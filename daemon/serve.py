@@ -13,13 +13,13 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import paths
 from .server import CodeCCTVServer
 from .store import StateStore
 
 
-APP_SUPPORT = Path.home() / "Library" / "Application Support" / "CodeCCTV"
-DEFAULT_CONFIG = APP_SUPPORT / "service.json"
-DEFAULT_STATE = APP_SUPPORT / "state.sqlite3"
+DEFAULT_CONFIG = paths.config_path()
+DEFAULT_STATE = paths.state_path()
 
 
 def write_json(path: Path, payload: dict[str, object]) -> None:

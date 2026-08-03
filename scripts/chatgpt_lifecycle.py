@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Keep Code CCTV child agents aligned with the ChatGPT desktop app."""
+"""Keep Code CCTV child agents aligned with the ChatGPT desktop app.
+
+Platform model: on macOS the watcher runs under launchd and drives launchd
+children via manage_service.py sync; on Windows it runs as a Task Scheduler
+onlogon task and drives the daemon task via the same sync() (which dispatches
+per platform). The 2s poll and 15s uninstall grace are platform-neutral.
+"""
 
 from __future__ import annotations
 
@@ -8,6 +14,17 @@ import sys
 import time
 import os
 from pathlib import Path
+
+if sys.platform not in ("darwin", "win32"):
+    raise SystemExit("Code CCTV lifecycle watcher supports macOS and Windows")
+
+if sys.platform == "win32":
+    from win_support import (  # noqa: E402
+        TASK_NAME,
+        delete_task,
+        remove_launcher_bats,
+    )
+    from win_support import chatgpt_running as windows_chatgpt_running
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -22,6 +39,8 @@ PLUGIN_MISSING_GRACE = 15.0
 
 
 def chatgpt_running() -> bool:
+    if sys.platform == "win32":
+        return windows_chatgpt_running()
     result = subprocess.run(
         ["/bin/ps", "-axo", "command="],
         check=False,
@@ -59,6 +78,11 @@ def bootout(label: str) -> None:
 
 
 def cleanup_after_uninstall() -> None:
+    if sys.platform == "win32":
+        delete_task(TASK_NAME)
+        delete_task("CodeCCTV-lifecycle")
+        remove_launcher_bats()
+        return
     for label in (*CHILD_LABELS, LIFECYCLE_LABEL):
         plist_path = LAUNCH_AGENTS / f"{label}.plist"
         try:

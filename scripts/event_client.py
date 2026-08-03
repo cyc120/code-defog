@@ -5,18 +5,22 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-
-DEFAULT_CONFIG = Path.home() / "Library" / "Application Support" / "CodeCCTV" / "service.json"
+# Make the repository root importable so the shared path resolver is used,
+# matching the daemon. Harmless no-op when the package is already on sys.path.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from daemon import paths  # noqa: E402
 
 
 def config_path() -> Path:
-    override = os.environ.get("CODE_CCTV_CONFIG")
-    return Path(override).expanduser() if override else DEFAULT_CONFIG
+    return paths.config_path()
 
 
 def load_config() -> dict[str, Any] | None:

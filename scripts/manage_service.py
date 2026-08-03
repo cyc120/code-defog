@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install and control the Code CCTV launchd user agent."""
+"""Install and control the Code CCTV background service (macOS / Windows)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,29 @@ import sys
 import time
 from pathlib import Path
 
+# Make the repository root importable so the shared path resolver is used.
+# Harmless no-op when the package is already on sys.path.
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+from daemon import paths  # noqa: E402
+
+if sys.platform == "win32":
+    from win_support import (  # noqa: E402
+        TASK_NAME,
+        LIFECYCLE_TASK_NAME,
+        chatgpt_running as windows_chatgpt_running,
+        create_task,
+        delete_task,
+        start_task,
+        stop_task,
+        task_exists,
+        task_running,
+        write_launcher_bat,
+        write_lifecycle_bat,
+        remove_launcher_bats,
+    )
+
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 LABEL = "com.code-cctv.daemon"
@@ -18,7 +41,7 @@ DESKTOP_LABEL = "com.code-cctv.floating"
 LEGACY_DESKTOP_LABEL = "com.code-cctv.desktop"
 LIFECYCLE_LABEL = "com.code-cctv.lifecycle"
 LAUNCH_AGENTS = Path.home() / "Library" / "LaunchAgents"
-APP_SUPPORT = Path.home() / "Library" / "Application Support" / "CodeCCTV"
+APP_SUPPORT = paths.data_dir()
 PLIST_PATH = LAUNCH_AGENTS / f"{LABEL}.plist"
 DESKTOP_PLIST_PATH = LAUNCH_AGENTS / f"{DESKTOP_LABEL}.plist"
 LEGACY_DESKTOP_PLIST_PATH = LAUNCH_AGENTS / f"{LEGACY_DESKTOP_LABEL}.plist"
@@ -205,16 +228,91 @@ def sync() -> None:
         stop_children()
 
 
+# ---------------------------------------------------------------------------
+# Windows (win32) branch: Task Scheduler + .bat launchers, mirroring the macOS
+# launchd lifecycle model. The macOS functions above are untouched.
+# ---------------------------------------------------------------------------
+
+
+def windows_install() -> None:
+    APP_SUPPORT.mkdir(parents=True, exist_ok=True)
+    write_launcher_bat(PLUGIN_ROOT)
+    write_lifecycle_bat(PLUGIN_ROOT)
+    create_task(LIFECYCLE_TASK_NAME, f'"{lifecycle_bat()}"', onlogon=True)
+    create_task(TASK_NAME, f'"{launcher_bat()}"', onlogon=False)
+    start_task(LIFECYCLE_TASK_NAME)
+    windows_sync()
+    print(f"Installed {LIFECYCLE_TASK_NAME} (onlogon) and {TASK_NAME} (daemon, on demand)")
+    print(f"Tasks follow ChatGPT; launchers in {APP_SUPPORT}")
+
+
+def windows_uninstall() -> None:
+    stop_task(TASK_NAME)
+    delete_task(TASK_NAME)
+    delete_task(LIFECYCLE_TASK_NAME)
+    remove_launcher_bats()
+    print(f"Uninstalled {LIFECYCLE_TASK_NAME} and {TASK_NAME}; local state remains in {APP_SUPPORT}")
+
+
+def windows_start() -> None:
+    if not task_exists(LIFECYCLE_TASK_NAME) or not task_exists(TASK_NAME):
+        windows_install()
+        return
+    start_task(LIFECYCLE_TASK_NAME)
+    windows_sync()
+    print(f"Synchronized Code CCTV with ChatGPT ({'running' if windows_chatgpt_running() else 'not running'})")
+
+
+def windows_stop() -> None:
+    stop_task(TASK_NAME)
+    stop_task(LIFECYCLE_TASK_NAME)
+    print(f"Stopped {LIFECYCLE_TASK_NAME} and {TASK_NAME}")
+
+
+def windows_sync() -> None:
+    if windows_chatgpt_running():
+        start_task(TASK_NAME)
+    else:
+        stop_task(TASK_NAME)
+
+
+def windows_status() -> int:
+    daemon_scheduled = task_exists(TASK_NAME)
+    lifecycle_scheduled = task_exists(LIFECYCLE_TASK_NAME)
+    daemon = task_running(TASK_NAME)
+    chatgpt = windows_chatgpt_running()
+    print(f"{TASK_NAME}: {'scheduled' if daemon_scheduled else 'not scheduled'}")
+    print(f"{LIFECYCLE_TASK_NAME}: {'scheduled' if lifecycle_scheduled else 'not scheduled'}")
+    print(f"Daemon: {'running' if daemon else 'stopped'}")
+    print(f"ChatGPT: {'running' if chatgpt else 'not running'}")
+    children_match = daemon == chatgpt
+    return 0 if lifecycle_scheduled and daemon_scheduled and children_match else 1
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Manage the Code CCTV macOS background service.")
+    parser = argparse.ArgumentParser(description="Manage the Code CCTV background service (macOS / Windows).")
     parser.add_argument("action", choices=["install", "uninstall", "start", "stop", "sync", "status"])
     return parser.parse_args()
 
 
 def main() -> None:
-    if sys.platform != "darwin":
-        raise SystemExit("Code CCTV desktop service requires macOS")
     action = parse_args().action
+    if sys.platform == "win32":
+        if action == "install":
+            windows_install()
+        elif action == "uninstall":
+            windows_uninstall()
+        elif action == "start":
+            windows_start()
+        elif action == "stop":
+            windows_stop()
+        elif action == "sync":
+            windows_sync()
+        else:
+            raise SystemExit(windows_status())
+        return
+    if sys.platform != "darwin":
+        raise SystemExit("Code CCTV desktop service currently supports macOS and Windows")
     if action == "install":
         install()
     elif action == "uninstall":

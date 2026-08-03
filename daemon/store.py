@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import sys
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -41,7 +42,11 @@ class StateStore:
         self.retention = max(retention, 100)
         self._ingests_since_prune = 0
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
-        self.path.chmod(0o600)
+        if sys.platform != "win32":
+            # POSIX: keep the SQLite file private to the owning user. On Windows
+            # chmod only toggles the read-only bit (a security no-op); privacy
+            # relies on %APPDATA% being per-user NTFS, which is sufficient.
+            self.path.chmod(0o600)
         self.connection.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         self.connection.execute("PRAGMA journal_mode=WAL")

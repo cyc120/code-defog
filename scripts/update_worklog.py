@@ -8,9 +8,9 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from event_client import post_event
 
@@ -255,8 +255,36 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+# Windows CPython ships without the IANA tzdata database, so
+# ZoneInfo("Asia/Shanghai") raises ZoneInfoNotFoundError. These fixed offsets
+# (no DST) cover the project's likely zones so the worklog still renders there
+# without pulling in the third-party tzdata wheel.
+_FIXED_TZ_OFFSETS = {
+    "Asia/Shanghai": 8 * 3600,
+    "Asia/Taipei": 8 * 3600,
+    "Asia/Hong_Kong": 8 * 3600,
+    "Asia/Singapore": 8 * 3600,
+    "Asia/Tokyo": 9 * 3600,
+    "Asia/Kolkata": 5 * 3600 + 1800,
+    "Australia/Sydney": 10 * 3600,
+}
+
+
+def load_tz(timezone_name: str) -> tzinfo:
+    """Resolve an IANA timezone, falling back to a fixed offset on systems
+    (notably Windows) that lack the tzdata database."""
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        offset = _FIXED_TZ_OFFSETS.get(timezone_name)
+        if offset is not None:
+            return timezone(timedelta(seconds=offset), name=timezone_name)
+        # Unknown zone: fixed UTC+8 to match the project default rather than crash.
+        return timezone(timedelta(hours=8), name="UTC+8")
+
+
 def now_text(timezone: str) -> str:
-    return datetime.now(ZoneInfo(timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
+    return datetime.now(load_tz(timezone)).strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 def conversation_id() -> str:

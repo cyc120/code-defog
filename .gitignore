@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+venv/
+AI_WORKLOG.md
+build/
+dist/

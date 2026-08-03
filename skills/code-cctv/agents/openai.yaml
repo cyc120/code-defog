@@ -1,0 +1,10 @@
+interface:
+  display_name: "Code CCTV"
+  short_description: "定位你的ai编程"
+  icon_small: "./assets/code-cctv-small.svg"
+  icon_large: "./assets/code-cctv-small.svg"
+  brand_color: "#2563EB"
+  default_prompt: "使用 $code-cctv，按信息金字塔展示，并为每个代码模块生成 Mermaid 模块图；交互或代码输出时更新 AI_WORKLOG.md。"
+
+policy:
+  allow_implicit_invocation: true

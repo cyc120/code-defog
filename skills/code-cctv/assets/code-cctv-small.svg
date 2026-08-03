@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Code CCTV small icon</title>
+  <desc id="desc">A compact code camera mark for Code CCTV.</desc>
+  <defs>
+    <linearGradient id="g" x1="18" y1="14" x2="110" y2="114" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0EA5E9"/>
+      <stop offset="0.56" stop-color="#2563EB"/>
+      <stop offset="1" stop-color="#14B8A6"/>
+    </linearGradient>
+  </defs>
+  <rect width="128" height="128" rx="30" fill="#020617"/>
+  <rect x="8" y="8" width="112" height="112" rx="25" fill="url(#g)"/>
+  <path d="M26 48C26 40 32 34 40 34H78C86 34 92 40 92 48V68C92 76 86 82 78 82H40C32 82 26 76 26 68V48Z" fill="#EFF6FF"/>
+  <path d="M92 50L110 42C114 40 118 43 118 48V69C118 74 114 77 110 75L92 67V50Z" fill="#DBEAFE"/>
+  <path d="M42 82H78L88 104H32L42 82Z" fill="#E0F2FE"/>
+  <circle cx="83" cy="58" r="12" fill="#0F172A"/>
+  <circle cx="83" cy="58" r="7" fill="#38BDF8"/>
+  <circle cx="99" cy="34" r="8" fill="#EF4444"/>
+  <path d="M43 53L35 60L43 67" fill="none" stroke="#0F172A" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M57 51L52 69" fill="none" stroke="#0F172A" stroke-width="6" stroke-linecap="round"/>
+  <path d="M62 53L70 60L62 67" fill="none" stroke="#0F172A" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

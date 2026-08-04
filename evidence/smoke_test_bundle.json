@@ -1,0 +1,85 @@
+{
+  "smoke_test_version": "1.0",
+  "timestamp": "2026-08-04T14:08:15Z",
+  "agentscope_version": "2.0.5",
+  "team": {
+    "team_id": "team-c4d15581e769",
+    "created_at": "2026-08-04T14:08:15Z",
+    "agents": {
+      "triage": {
+        "agent_id": "triage-f96f3f21",
+        "name": "TriageAgent",
+        "role": "triage"
+      },
+      "diagnosis": {
+        "agent_id": "diagnosis-02e82012",
+        "name": "DiagnosisAgent",
+        "role": "diagnosis"
+      },
+      "repair": {
+        "agent_id": "repair-df8de4f9",
+        "name": "RepairAgent",
+        "role": "repair"
+      },
+      "verification": {
+        "agent_id": "verification-22a790c3",
+        "name": "VerificationAgent",
+        "role": "verification"
+      }
+    },
+    "agent_configs": {
+      "triage": {
+        "model": "deepseek-chat",
+        "tool_count": 0
+      },
+      "diagnosis": {
+        "model": "deepseek-chat",
+        "tool_count": 0
+      },
+      "repair": {
+        "model": "deepseek-chat",
+        "tool_count": 0
+      },
+      "verification": {
+        "model": "deepseek-chat",
+        "tool_count": 0
+      }
+    }
+  },
+  "task": {
+    "task_id": "task-5187fbed11a7",
+    "trace_id": "trace-c4cfb77080cb44b3",
+    "team_id": "team-c4d15581e769",
+    "case_id": "case-smoke-d0f0945e",
+    "status": "RECEIVED",
+    "submitted_at": "2026-08-04T14:08:15Z",
+    "agent_assignments": {
+      "TRIAGED": "triage-f96f3f21",
+      "DIAGNOSED": "diagnosis-02e82012",
+      "REPAIRING": "repair-df8de4f9",
+      "VERIFYING": "verification-22a790c3"
+    }
+  },
+  "case_context": {
+    "case_id": "case-smoke-d0f0945e",
+    "status": "RECEIVED",
+    "priority": "medium",
+    "risk_level": "low",
+    "repository_ref": "D:\\cctv\\code-cctv-general\\demo_target",
+    "base_commit": "smoke-test",
+    "source_events": [
+      {
+        "source_type": "issue",
+        "source_uri": "smoke-test-issue",
+        "symptoms": "Smoke test verification"
+      }
+    ]
+  },
+  "verification": {
+    "team_created": true,
+    "task_submitted": true,
+    "evidence_saved": true,
+    "agent_count": 4,
+    "agentscope_import_ok": true
+  }
+}

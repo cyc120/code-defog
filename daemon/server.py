@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Threaded localhost HTTP and SSE server for Code CCTV."""
+"""Threaded localhost HTTP and SSE server for Code CCTV — extended with DevLoop Case API."""
 
 from __future__ import annotations
 
@@ -15,10 +15,12 @@ from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 
-from .store import StateStore
+from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS
 
 
 MAX_BODY_BYTES = 1_000_000
+TOKEN_TYPE_SERVICE = "service"
+TOKEN_TYPE_APPROVAL = "approval"
 
 
 class CodeCCTVServer(ThreadingHTTPServer):
@@ -32,21 +34,20 @@ class CodeCCTVServer(ThreadingHTTPServer):
         self.started_at = time.monotonic()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscriber_lock = Lock()
+        # Wire store → SSE so every Case event reaches all subscribers
+        self.store.publish_callback = self.publish
 
     def management_info(self) -> dict[str, Any]:
         payload = self.store.info()
-        payload.update(
-            {
-                "pid": os.getpid(),
-                "host": self.server_address[0],
-                "port": self.server_address[1],
-                "uptime_seconds": round(time.monotonic() - self.started_at, 1),
-            }
-        )
+        payload.update({
+            "pid": os.getpid(), "host": self.server_address[0],
+            "port": self.server_address[1],
+            "uptime_seconds": round(time.monotonic() - self.started_at, 1),
+        })
         return payload
 
     def subscribe(self) -> queue.Queue[dict[str, Any]]:
-        subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=4)
+        subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=8)
         with self.subscriber_lock:
             self.subscribers.add(subscriber)
         return subscriber
@@ -55,8 +56,7 @@ class CodeCCTVServer(ThreadingHTTPServer):
         with self.subscriber_lock:
             self.subscribers.discard(subscriber)
 
-    def publish(self, state: dict[str, Any]) -> None:
-        message = {"type": "state", "state": state}
+    def publish(self, message: dict[str, Any]) -> None:
         with self.subscriber_lock:
             subscribers = list(self.subscribers)
         for subscriber in subscribers:
@@ -78,14 +78,22 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         return
 
     def handle_error(self, request: Any, client_address: Any) -> None:
-        # SSE subscribers drop the connection all the time; those resets are
-        # normal and should not traceback into daemon.error.log. Real handler
-        # errors are already answered with a JSON error body where possible.
         return
 
-    def authorized(self) -> bool:
-        supplied = self.headers.get("X-Code-CCTV-Token", "")
+    # ── Auth helpers ─────────────────────────────────────────────────────
+
+    def _supplied_token(self) -> str:
+        return self.headers.get("X-Code-CCTV-Token", "")
+
+    def _token_type(self) -> str:
+        declared = self.headers.get("X-Code-CCTV-Token-Type", "service").strip().lower()
+        return TOKEN_TYPE_APPROVAL if declared == "approval" else TOKEN_TYPE_SERVICE
+
+    def authorized_service(self) -> bool:
+        supplied = self._supplied_token()
         return bool(supplied) and hmac.compare_digest(supplied, self.server.token)
+
+    # ── Response helpers ─────────────────────────────────────────────────
 
     def send_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -98,12 +106,6 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         self.wfile.write(body)
-
-    def require_auth(self) -> bool:
-        if self.authorized():
-            return True
-        self.send_json({"error": "unauthorized"}, HTTPStatus.UNAUTHORIZED)
-        return False
 
     def read_json_body(self) -> dict[str, Any] | None:
         try:
@@ -122,19 +124,29 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
             return None
 
+    def require_service_auth(self) -> bool:
+        if self.authorized_service():
+            return True
+        self.send_json({"error": "unauthorized — service token required"}, HTTPStatus.UNAUTHORIZED)
+        return False
+
+    # ── Routing ──────────────────────────────────────────────────────────
+
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Code-CCTV-Token")
+        self.send_header("Access-Control-Allow-Headers",
+                         "Content-Type, X-Code-CCTV-Token, X-Code-CCTV-Token-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
     def do_GET(self) -> None:
         route = urlparse(self.path).path
+
         if route == "/health":
             self.send_json({"ok": True, "service": "code-cctv"})
             return
-        if not self.require_auth():
+        if not self.require_service_auth():
             return
         if route == "/api/state":
             self.send_json(self.server.store.state())
@@ -145,35 +157,82 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         if route == "/api/stream":
             self.stream_state()
             return
+        if route == "/api/cases":
+            self.list_cases()
+            return
+        if route.startswith("/api/cases/") and route.endswith("/evidence"):
+            case_id = route.split("/")[3]
+            self.get_case_evidence(case_id)
+            return
+        if route.startswith("/api/cases/"):
+            case_id = route.split("/")[3]
+            self.get_case(case_id)
+            return
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if not self.require_auth():
-            return
         route = urlparse(self.path).path
-        if route != "/api/events":
-            if route == "/api/management/session/clear":
-                self.clear_session()
+
+        # ── Original Code CCTV endpoints (service token) ─────────────────
+        if route == "/api/events":
+            if not self.require_service_auth():
                 return
-            if route == "/api/management/clear-all":
-                state = self.server.store.clear_all()
-                self.server.publish(state)
-                self.send_json({"ok": True, "state": state}, HTTPStatus.ACCEPTED)
+            payload = self.read_json_body()
+            if payload is None:
                 return
-            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            try:
+                state = self.server.store.ingest(payload)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            self.server.publish({"type": "state", "state": state})
+            self.send_json({"ok": True, "state": state}, HTTPStatus.ACCEPTED)
             return
-        payload = self.read_json_body()
-        if payload is None:
+
+        if route == "/api/management/session/clear":
+            if not self.require_service_auth():
+                return
+            self.clear_session()
             return
-        try:
-            state = self.server.store.ingest(payload)
-        except ValueError as error:
-            # Malformed but well-typed payloads (e.g. missing workspace)
-            # should produce a normal 400, not a handler crash.
-            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+
+        if route == "/api/management/clear-all":
+            if not self.require_service_auth():
+                return
+            state = self.server.store.clear_all()
+            self.server.publish({"type": "state", "state": state})
+            self.send_json({"ok": True, "state": state}, HTTPStatus.ACCEPTED)
             return
-        self.server.publish(state)
-        self.send_json({"ok": True, "state": state}, HTTPStatus.ACCEPTED)
+
+        # ── DevLoop: Case intake (service token) ─────────────────────────
+        if route == "/api/cases":
+            if not self.require_service_auth():
+                return
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            result = self.server.store.create_or_find_case(payload)
+            if result.get("duplicate"):
+                self.send_json({"ok": True, "duplicate": True,
+                                "observation_id": result["observation_id"]}, HTTPStatus.CONFLICT)
+            elif result.get("pending"):
+                self.send_json({"ok": True, "pending": True,
+                                "observation_id": result["observation_id"]}, HTTPStatus.ACCEPTED)
+            else:
+                self.send_json({"ok": True, "case": result}, HTTPStatus.CREATED)
+            return
+
+        # ── DevLoop: Case actions (approval token for grant actions,
+        #    service token for cancel only) ────────────────────────────────
+        if route.startswith("/api/cases/") and route.endswith("/actions"):
+            case_id = route.split("/")[3]
+            self.handle_case_action(case_id)
+            return
+
+        self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # Original Code CCTV handlers
+    # ═══════════════════════════════════════════════════════════════════════
 
     def clear_session(self) -> None:
         payload = self.read_json_body()
@@ -185,10 +244,8 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "workspace is required"}, HTTPStatus.BAD_REQUEST)
             return
         state = self.server.store.delete_session(
-            str(Path(workspace).expanduser().resolve()),
-            str(conversation),
-        )
-        self.server.publish(state)
+            str(Path(workspace).expanduser().resolve()), str(conversation))
+        self.server.publish({"type": "state", "state": state})
         self.send_json({"ok": True, "state": state}, HTTPStatus.ACCEPTED)
 
     def stream_state(self) -> None:
@@ -218,3 +275,87 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.wfile.write(b"data: " + body + b"\n\n")
         self.wfile.flush()
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DevLoop: Case API handlers
+    # ═══════════════════════════════════════════════════════════════════════
+
+    def list_cases(self) -> None:
+        parsed = urlparse(self.path)
+        params: dict[str, list[str]] = {}
+        if parsed.query:
+            from urllib.parse import parse_qs
+            params = parse_qs(parsed.query)
+        status = params.get("status", [None])[0]
+        repo = params.get("repository_ref", [None])[0]
+        try:
+            limit = int(params.get("limit", ["50"])[0])
+        except (ValueError, TypeError):
+            limit = 50
+        cases = self.server.store.list_cases(status=status, repository_ref=repo, limit=limit)
+        self.send_json({"ok": True, "cases": cases, "count": len(cases)})
+
+    def get_case(self, case_id: str) -> None:
+        case = self.server.store.get_case(case_id)
+        if case is None:
+            self.send_json({"error": "case not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_json({"ok": True, "case": case})
+
+    def get_case_evidence(self, case_id: str) -> None:
+        evidence = self.server.store.get_case_evidence(case_id)
+        if evidence is None:
+            self.send_json({"error": "case not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_json({"ok": True, "evidence": evidence})
+
+    def handle_case_action(self, case_id: str) -> None:
+        """POST /api/cases/{case_id}/actions
+
+        Grant-based actions (approve_plan, approve_release, reject_plan,
+        reject_release): require X-Code-CCTV-Token-Type: approval and a
+        valid one-time approval_token.  Uses the same auth model as approve.
+
+        Cancel: requires service_token.
+        """
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        action = payload.get("action", "").strip()
+
+        if action in ALL_GRANTED_ACTIONS:
+            # ── Grant-consumption path (approve + reject, same model) ─
+            if self._token_type() != TOKEN_TYPE_APPROVAL:
+                self.send_json(
+                    {"error": "grant actions require X-Code-CCTV-Token-Type: approval"},
+                    HTTPStatus.FORBIDDEN)
+                return
+            result = self.server.store.perform_case_action(case_id, action, payload)
+            if result is None:
+                self.send_json({"error": "case not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if "error" in result:
+                self.send_json({"error": result["error"]}, result.get("status", 400))
+                return
+            self.send_json({"ok": True, "case": result})
+            return
+
+        elif action == "cancel":
+            if not self.require_service_auth():
+                return
+            result = self.server.store.perform_case_action(case_id, action, payload)
+            if result is None:
+                self.send_json({"error": "case not found"}, HTTPStatus.NOT_FOUND)
+                return
+            if "error" in result:
+                self.send_json({"error": result["error"]}, result.get("status", 400))
+                return
+            self.send_json({"ok": True, "case": result})
+            return
+
+        else:
+            self.send_json(
+                {"error": f"unknown action: {action}. Valid: approve_plan, approve_release, "
+                           "reject_plan, reject_release, cancel"},
+                HTTPStatus.BAD_REQUEST)
+            return

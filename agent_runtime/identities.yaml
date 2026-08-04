@@ -1,0 +1,97 @@
+# Agent identity definitions for Code CCTV DevLoop.
+#
+# These identities are loaded by the AgentTeams Adapter (or its mock)
+# to configure the team, tool allowlists, and I/O schemas.
+#
+# Each entry maps to an Agent in Section 5.2 of the framework document.
+
+identities:
+  - agent_id: triage
+    name: "Triage Evidence Agent"
+    description: >
+      聚合多源输入、去重、分类、提取复现条件和证据索引。
+    read_access:
+      - case_sources
+      - artifacts(kind=issue|log|feedback|ci)
+    write_access:
+      - cases(create, update:priority, update:status)
+      - case_sources(create)
+    forbidden:
+      - "不得下达根因结论"
+      - "不得修改代码"
+      - "不得执行审批动作"
+    tools:
+      - issue_normalizer
+      - symptom_extractor
+      - incident_matcher
+    input_schema: case_sources + extracted_signals
+    output_schema: normalized_case + priority + confidence
+
+  - agent_id: diagnosis
+    name: "Diagnosis Impact Agent"
+    description: >
+      检索代码、历史提交和测试，建立根因假设与影响范围。
+    read_access:
+      - cases(read)
+      - case_sources(read)
+      - repository(read-only)
+      - git_history(read-only)
+    write_access:
+      - cases(update:diagnosis_hypotheses, update:impact_scope, update:risk_level)
+      - agent_runs(create)
+    forbidden:
+      - "不得写入工作树"
+      - "不得合并代码"
+      - "不得执行发布"
+      - "不得执行审批动作"
+    tools:
+      - code_searcher
+      - git_blamer
+      - impact_analyzer
+    input_schema: CaseContext + evidence_refs
+    output_schema: diagnosis_report + remediation_strategy + risk_level
+
+  - agent_id: repair
+    name: "Repair Agent"
+    description: >
+      在隔离工作树生成最小补丁和测试补充。
+    read_access:
+      - cases(read)
+      - diagnosis_data(read)
+      - repository(isolated_worktree)
+    write_access:
+      - isolated_worktree(create_branch, create_patch, run_formatter, run_unit_tests)
+      - artifacts(create:patch)
+      - tool_runs(create)
+    forbidden:
+      - "不得直接写入主分支"
+      - "不得读取无关密钥"
+      - "不得执行部署"
+      - "不得持有审批令牌"
+    tools:
+      - patch_generator
+      - test_augmenter
+    input_schema: approved_remediation_plan + CaseContext
+    output_schema: patch_ref + branch + files_changed[] + test_results
+
+  - agent_id: verification
+    name: "Verification Release Agent"
+    description: >
+      验证补丁、检查质量门禁、执行模拟灰度并建议放行或回滚。
+    read_access:
+      - cases(read)
+      - patch_data(read)
+      - test_results(read)
+      - canary_metrics(read)
+    write_access:
+      - tool_runs(create)
+      - artifacts(create:test_report, create:canary_report)
+    forbidden:
+      - "不得执行未批准的真实生产发布"
+      - "不得忽略失败的质量门禁"
+      - "不得持有审批令牌"
+    tools:
+      - quality_gate
+      - canary_simulator
+    input_schema: patch_ref + CaseContext
+    output_schema: verification_report + release_recommendation + metrics

@@ -1,0 +1,14 @@
+{
+  "task_id": "task-5187fbed11a7",
+  "trace_id": "trace-c4cfb77080cb44b3",
+  "team_id": "team-c4d15581e769",
+  "case_id": "case-smoke-d0f0945e",
+  "status": "RECEIVED",
+  "submitted_at": "2026-08-04T14:08:15Z",
+  "agent_assignments": {
+    "TRIAGED": "triage-f96f3f21",
+    "DIAGNOSED": "diagnosis-02e82012",
+    "REPAIRING": "repair-df8de4f9",
+    "VERIFYING": "verification-22a790c3"
+  }
+}

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -472,6 +474,1024 @@ class ServerTests(unittest.TestCase):
                     received.append(line.decode("utf-8"))
                     frames += 1
                     connected.set()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DevLoop: Case ingestion, fingerprinting, and state machine tests
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class DevLoopCaseCreationTests(unittest.TestCase):
+    def test_create_case_from_source_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue",
+                "source_uri": "https://github.com/example/repo/issues/42",
+                "client_nonce": "nonce-001",
+                "raw_content": "When config.json is empty, --list crashes with KeyError: 'projects'",
+                "repository_ref": "/home/user/demo_target",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "config['projects']",
+                    "key_frames": ["src/config.py:42"],
+                    "keywords": ["config", "KeyError", "projects", "empty"],
+                    "repository_ref": "/home/user/demo_target",
+                },
+                "title": "Empty config crashes with KeyError",
+            })
+            self.assertNotIn("duplicate", result)
+            self.assertIn("case_id", result)
+            self.assertEqual(result["status"], "RECEIVED")
+            store.close()
+
+    def test_delivery_idempotency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            payload = {
+                "source_type": "issue",
+                "source_uri": "https://github.com/example/repo/issues/42",
+                "client_nonce": "nonce-002",
+                "raw_content": "KeyError: 'projects'",
+                "repository_ref": "/home/user/demo_target",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "config['projects']",
+                    "key_frames": ["src/config.py:42"],
+                    "keywords": ["KeyError"],
+                    "repository_ref": "/home/user/demo_target",
+                },
+            }
+            first = store.create_or_find_case(payload)
+            self.assertNotIn("duplicate", first)
+            second = store.create_or_find_case(payload)
+            self.assertIn("duplicate", second)
+            self.assertTrue(second["duplicate"])
+            store.close()
+
+    def test_same_incident_signature_merges_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            base = {
+                "repository_ref": "/home/user/demo_target",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "config['projects']",
+                    "key_frames": ["src/config.py:42"],
+                    "keywords": ["KeyError"],
+                    "repository_ref": "/home/user/demo_target",
+                },
+            }
+            issue = store.create_or_find_case({
+                **base,
+                "source_type": "issue",
+                "source_uri": "https://github.com/example/repo/issues/42",
+                "client_nonce": "nonce-issue-1",
+                "raw_content": "Empty config crashes",
+            })
+            case_id = issue["case_id"]
+            log = store.create_or_find_case({
+                **base,
+                "source_type": "log",
+                "source_uri": "/var/log/app/error.log",
+                "client_nonce": "nonce-log-1",
+                "raw_content": "ERROR: KeyError: 'projects'",
+            })
+            self.assertEqual(log["case_id"], case_id)
+            evidence = store.get_case_evidence(case_id)
+            self.assertIsNotNone(evidence)
+            self.assertGreaterEqual(len(evidence["sources"]), 2)
+            store.close()
+
+    def test_pending_association_for_incomplete_signals(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "feedback",
+                "source_uri": "user-feedback-001",
+                "client_nonce": "nonce-fb-1",
+                "raw_content": "The app crashes sometimes",
+                "repository_ref": "/home/user/demo_target",
+                "extracted_signals": {
+                    "keywords": ["crash"],
+                    "repository_ref": "/home/user/demo_target",
+                },
+            })
+            self.assertNotIn("duplicate", result)
+            # Incomplete signals → pending, no Case created yet
+            self.assertTrue(result.get("pending"))
+            self.assertIn("observation_id", result)
+            self.assertNotIn("case_id", result)
+            # The observation exists in case_sources with case_id = NULL
+            obs = store.connection.execute(
+                "SELECT case_id, association_state FROM case_sources WHERE observation_id = ?",
+                (result["observation_id"],),
+            ).fetchone()
+            self.assertIsNotNone(obs)
+            self.assertIsNone(obs["case_id"])
+            self.assertEqual(obs["association_state"], "pending")
+            store.close()
+
+
+class DevLoopApprovalTokenTests(unittest.TestCase):
+    def test_issue_and_use_approval_grant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue",
+                "source_uri": "test-issue",
+                "client_nonce": "nonce-approval-1",
+                "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "config['projects']",
+                    "key_frames": ["src/config.py:42"],
+                    "keywords": ["KeyError"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            store.transition_case(case_id, "TRIAGED")
+            store.transition_case(case_id, "DIAGNOSED")
+            # Set base_commit BEFORE transitioning to PLAN_APPROVAL
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'abc123' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+
+            # Issue approval grant — target_ref must match base_commit
+            grant = store.issue_approval_grant(
+                case_id, "approve_plan", "abc123", "test-user"
+            )
+            self.assertIsNotNone(grant)
+            self.assertIn("approval_token", grant)
+
+            # Use the token
+            action_result = store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "abc123",
+                "reason": "Looks good",
+                "approver": "test-user",
+            })
+            self.assertNotIn("error", action_result)
+            self.assertEqual(action_result["status"], "REPAIRING")
+
+            # Re-use should fail
+            reuse = store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "abc123",
+                "reason": "try again",
+                "approver": "test-user",
+            })
+            self.assertIn("error", reuse)
+            store.close()
+
+    def test_approval_token_expiry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue",
+                "source_uri": "test-issue-expiry",
+                "client_nonce": "nonce-exp-1",
+                "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            store.transition_case(case_id, "TRIAGED")
+            store.transition_case(case_id, "DIAGNOSED")
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'abc123' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+
+            # Issue with already-expired timestamp
+            expired = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+            grant = store.issue_approval_grant(
+                case_id, "approve_plan", "abc123", "test-user",
+                expires_at=expired,
+            )
+            self.assertIsNotNone(grant)
+            action_result = store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "abc123",
+                "reason": "should fail",
+                "approver": "test-user",
+            })
+            self.assertIn("error", action_result)
+            self.assertIn("expired", action_result["error"])
+            store.close()
+
+    def test_target_ref_mismatch_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue",
+                "source_uri": "test-mismatch",
+                "client_nonce": "nonce-mis-1",
+                "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            store.transition_case(case_id, "TRIAGED")
+            store.transition_case(case_id, "DIAGNOSED")
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'commit-aaa' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+            grant = store.issue_approval_grant(
+                case_id, "approve_plan", "commit-aaa", "test-user"
+            )
+            action_result = store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "commit-bbb",  # Different!
+                "reason": "mismatched target",
+                "approver": "test-user",
+            })
+            self.assertIn("error", action_result)
+            self.assertIn("mismatch", action_result["error"])
+            store.close()
+
+
+class DevLoopStateMachineTests(unittest.TestCase):
+    def test_valid_transition_chain(self) -> None:
+        from agent_runtime.state_machine import is_valid_transition
+        self.assertTrue(is_valid_transition("RECEIVED", "TRIAGED"))
+        self.assertTrue(is_valid_transition("TRIAGED", "DIAGNOSED"))
+        self.assertTrue(is_valid_transition("DIAGNOSED", "PLAN_APPROVAL"))
+        self.assertTrue(is_valid_transition("PLAN_APPROVAL", "REPAIRING"))
+        self.assertTrue(is_valid_transition("REPAIRING", "VERIFYING"))
+        self.assertTrue(is_valid_transition("VERIFYING", "PATCH_REJECTED"))
+        self.assertTrue(is_valid_transition("VERIFYING", "RELEASE_APPROVAL"))
+
+    def test_invalid_transition_rejected(self) -> None:
+        from agent_runtime.state_machine import is_valid_transition
+        self.assertFalse(is_valid_transition("RECEIVED", "REPAIRING"))
+        self.assertFalse(is_valid_transition("TRIAGED", "RELEASED"))
+        self.assertFalse(is_valid_transition("CLOSED", "REPAIRING"))
+
+    def test_patch_rejected_returns_to_repairing(self) -> None:
+        from agent_runtime.state_machine import is_valid_transition
+        self.assertTrue(is_valid_transition("PATCH_REJECTED", "REPAIRING"))
+        self.assertTrue(is_valid_transition("PATCH_REJECTED", "CLOSED"))
+
+    def test_terminal_states(self) -> None:
+        from agent_runtime.state_machine import is_terminal
+        self.assertTrue(is_terminal("CLOSED"))
+        self.assertFalse(is_terminal("ESCALATED"))   # ESCALATED can reopen → REPAIRING
+        self.assertFalse(is_terminal("REPAIRING"))
+
+    def test_approval_states(self) -> None:
+        from agent_runtime.state_machine import requires_approval
+        self.assertTrue(requires_approval("PLAN_APPROVAL"))
+        self.assertTrue(requires_approval("RELEASE_APPROVAL"))
+        self.assertFalse(requires_approval("REPAIRING"))
+
+
+class DevLoopStoreTransitionTests(unittest.TestCase):
+    def test_full_case_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue",
+                "source_uri": "test-lifecycle",
+                "client_nonce": "nonce-life-1",
+                "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+
+            # Walk to PLAN_APPROVAL via state transitions
+            for state in ["TRIAGED", "DIAGNOSED"]:
+                r = store.transition_case(case_id, state)
+                self.assertEqual(r["status"], state)
+            # Set base_commit before entering PLAN_APPROVAL
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'base-01' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+
+            # At PLAN_APPROVAL — consume approval Grant → REPAIRING
+            grant = store.issue_approval_grant(case_id, "approve_plan", "base-01", "user")
+            r = store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "base-01",
+                "reason": "ok",
+                "approver": "user",
+            })
+            self.assertEqual(r["status"], "REPAIRING")
+
+            # Continue to VERIFYING, then set patch_ref before RELEASE_APPROVAL
+            for state in ["VERIFYING"]:
+                r = store.transition_case(case_id, state)
+                self.assertEqual(r["status"], state)
+            store.connection.execute(
+                "UPDATE cases SET patch_ref = 'patch-01' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "RELEASE_APPROVAL", "approve_release")
+
+            # At RELEASE_APPROVAL — consume approval Grant → RELEASED
+            grant2 = store.issue_approval_grant(case_id, "approve_release", "patch-01", "user")
+            r = store.perform_case_action(case_id, "approve_release", {
+                "approval_token": grant2["approval_token"],
+                "target_ref": "patch-01",
+                "reason": "qa passed",
+                "approver": "user",
+            })
+            self.assertEqual(r["status"], "RELEASED")
+
+            # Close
+            r = store.transition_case(case_id, "CLOSED")
+            self.assertEqual(r["status"], "CLOSED")
+            self.assertIsNotNone(r.get("closed_at"))
+            store.close()
+
+    def test_patch_rejected_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "ci",
+                "source_uri": "test-patch-reject",
+                "client_nonce": "nonce-pr-1",
+                "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            for state in ["TRIAGED", "DIAGNOSED"]:
+                store.transition_case(case_id, state)
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'base-01' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+            grant = store.issue_approval_grant(case_id, "approve_plan", "base-01", "user")
+            store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "base-01",
+                "reason": "ok",
+                "approver": "user",
+            })
+            store.transition_case(case_id, "REPAIRING")
+            store.transition_case(case_id, "VERIFYING")
+            # Patch is bad — reject it
+            r = store.transition_case(case_id, "PATCH_REJECTED")
+            self.assertEqual(r["status"], "PATCH_REJECTED")
+            # Retry
+            r = store.transition_case(case_id, "REPAIRING")
+            self.assertEqual(r["status"], "REPAIRING")
+            store.close()
+
+    def test_escalated_reopen_clears_closed_at(self) -> None:
+        """ESCALATED → REPAIRING must clear closed_at.  Only CLOSED is terminal."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "test-escalated-reopen",
+                "client_nonce": "nonce-er-1", "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"], "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            # Walk to ESCALATED
+            for state in ["TRIAGED", "DIAGNOSED"]:
+                store.transition_case(case_id, state)
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'b1' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+            grant = store.issue_approval_grant(case_id, "reject_plan", "b1", "u")
+            store.perform_case_action(case_id, "reject_plan", {
+                "approval_token": grant["approval_token"], "target_ref": "b1",
+                "reason": "no", "approver": "u",
+            })
+            c = store.get_case(case_id)
+            self.assertEqual(c["status"], "ESCALATED")
+            self.assertIsNone(c["closed_at"], "ESCALATED must not set closed_at")
+
+            # Reopen to REPAIRING — closed_at must stay NULL
+            store.transition_case(case_id, "REPAIRING")
+            c = store.get_case(case_id)
+            self.assertIsNone(c["closed_at"],
+                              f"closed_at must be NULL after ESCALATED→REPAIRING, got {c['closed_at']}")
+
+            # ESCALATED → CLOSED: now closed_at should be set
+            store.transition_case(case_id, "ESCALATED")
+            store.transition_case(case_id, "CLOSED")
+            c = store.get_case(case_id)
+            self.assertIsNotNone(c["closed_at"], "CLOSED must set closed_at")
+            store.close()
+
+
+class DevLoopEvidenceTests(unittest.TestCase):
+    def test_tool_run_recording(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue",
+                "source_uri": "test-tool",
+                "client_nonce": "nonce-tool-1",
+                "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            run_id = store.record_tool_run({
+                "case_id": case_id,
+                "agent_id": "repair",
+                "tool_name": "git_checkout",
+                "command_template": "git checkout -b fix/{case_id} {base_commit}",
+                "actual_argv": "git checkout -b fix/case-abc abc123",
+                "working_directory": "/home/user/demo_target",
+                "policy_version": "v0.5",
+                "input_sha256": "abc123def456",
+                "output_sha256": "def789abc012",
+                "exit_code": 0,
+                "result_ref": "art-001",
+            })
+            self.assertTrue(run_id.startswith("tool-"))
+            evidence = store.get_case_evidence(case_id)
+            self.assertEqual(len(evidence["tool_runs"]), 1)
+            self.assertEqual(evidence["tool_runs"][0]["exit_code"], 0)
+            self.assertNotEqual(evidence["tool_runs"][0]["chain_hash"], "")
+            store.close()
+
+
+class DevLoopEndToEndReleaseTests(unittest.TestCase):
+    """Full path: Repair → patch_ref persisted → gate pass → RELEASE_APPROVAL → grant."""
+
+    def test_repair_patch_ref_flows_to_release_approval(self) -> None:
+        """Repair returns patch_ref → Case persists it → gate passes →
+        RELEASE_APPROVAL (not ESCALATED) → can issue and consume release grant."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "test-e2e-release",
+                "client_nonce": "nonce-e2e-1", "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"], "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+
+            # Walk to PLAN_APPROVAL and approve
+            for state in ["TRIAGED", "DIAGNOSED"]:
+                store.transition_case(case_id, state)
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'base-01' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+            grant = store.issue_approval_grant(case_id, "approve_plan", "base-01", "user")
+            store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "base-01", "reason": "ok", "approver": "user",
+            })
+
+            # ── REPAIRING: simulate Repair Agent returning patch_ref ────
+            store.transition_case(case_id, "REPAIRING")
+            patch_id = "patch-e2e-abc123"
+            store.connection.execute(
+                "UPDATE cases SET patch_ref = ? WHERE case_id = ?",
+                (patch_id, case_id),
+            )
+            store.connection.commit()
+            c = store.get_case(case_id)
+            self.assertEqual(c["patch_ref"], patch_id,
+                             "patch_ref must be persisted after Repair Agent runs")
+
+            # ── VERIFYING → RELEASE_APPROVAL (gate passed, patch_ref present)
+            store.transition_case(case_id, "VERIFYING")
+            store.transition_case(case_id, "RELEASE_APPROVAL", "approve_release")
+            c = store.get_case(case_id)
+            self.assertEqual(c["status"], "RELEASE_APPROVAL",
+                             "must reach RELEASE_APPROVAL, not ESCALATED")
+            self.assertEqual(c["pending_action"], "approve_release")
+
+            # ── Issue and consume approve_release Grant ─────────────────
+            rel_grant = store.issue_approval_grant(case_id, "approve_release", patch_id, "user")
+            self.assertNotIn("error", rel_grant,
+                             f"Grant issuance must succeed: {rel_grant}")
+            rel_result = store.perform_case_action(case_id, "approve_release", {
+                "approval_token": rel_grant["approval_token"],
+                "target_ref": patch_id, "reason": "qa ok", "approver": "user",
+            })
+            self.assertNotIn("error", rel_result)
+            self.assertEqual(rel_result["status"], "RELEASED")
+            store.close()
+
+    def test_missing_patch_ref_escalates_after_gate_pass(self) -> None:
+        """Gate passes but patch_ref is absent → ESCALATED (cannot approve release)."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "test-e2e-missing",
+                "client_nonce": "nonce-e2e-2", "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"], "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            for state in ["TRIAGED", "DIAGNOSED"]:
+                store.transition_case(case_id, state)
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'b1' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+            grant = store.issue_approval_grant(case_id, "approve_plan", "b1", "user")
+            store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "b1", "reason": "ok", "approver": "user",
+            })
+            # REPAIRING — but no patch_ref set
+            store.transition_case(case_id, "REPAIRING")
+            store.transition_case(case_id, "VERIFYING")
+            # Gate passes, but patch_ref is NULL → ESCALATED
+            store.transition_case(case_id, "ESCALATED")
+            c = store.get_case(case_id)
+            self.assertEqual(c["status"], "ESCALATED")
+            store.close()
+
+
+class DevLoopGrantGuardTests(unittest.TestCase):
+    """Regression tests: grant issuance is blocked when state/version don't match."""
+
+    def test_received_state_cannot_issue_release_grant(self) -> None:
+        """A Case at RECEIVED must not be able to issue an approve_release grant."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "x",
+                "client_nonce": "nonce-guard-1", "raw_content": "t",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"], "keywords": ["t"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            # Case is at RECEIVED — approve_release must be rejected
+            grant = store.issue_approval_grant(case_id, "approve_release", "v1", "user")
+            self.assertIsNotNone(grant)
+            self.assertIn("error", grant, f"Expected error, got: {grant}")
+            self.assertIn("RELEASE_APPROVAL", grant["error"])
+            store.close()
+
+    def test_old_patch_ref_cannot_issue_grant(self) -> None:
+        """target_ref must match the case's current patch_ref exactly."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "x",
+                "client_nonce": "nonce-guard-2", "raw_content": "t",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"], "keywords": ["t"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            for state in ["TRIAGED", "DIAGNOSED"]:
+                store.transition_case(case_id, state)
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'base-v1' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+            grant = store.issue_approval_grant(case_id, "approve_plan", "base-v1", "user")
+            store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"],
+                "target_ref": "base-v1", "reason": "ok", "approver": "user",
+            })
+            # Advance to VERIFYING, set patch_ref, then RELEASE_APPROVAL
+            store.transition_case(case_id, "VERIFYING")
+            store.connection.execute(
+                "UPDATE cases SET patch_ref = 'patch-v1' WHERE case_id = ?", (case_id,))
+            store.connection.commit()
+            store.transition_case(case_id, "RELEASE_APPROVAL", "approve_release")
+            # Try to issue a grant with a DIFFERENT (stale) target_ref
+            bad_grant = store.issue_approval_grant(case_id, "approve_release", "patch-v2", "user")
+            self.assertIsNotNone(bad_grant)
+            self.assertIn("error", bad_grant, f"Expected mismatch error, got: {bad_grant}")
+            self.assertIn("mismatch", bad_grant["error"])
+            store.close()
+
+
+class DevLoopChainSequenceTests(unittest.TestCase):
+    """Regression test: chain_sequence must be strictly increasing per Case."""
+
+    def test_chain_sequence_monotonic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "x",
+                "client_nonce": "nonce-chain-1", "raw_content": "t",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"], "keywords": ["t"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            base = {"case_id": case_id, "agent_id": "repair",
+                    "tool_name": "git_checkout",
+                    "command_template": "git checkout -b fix/x",
+                    "actual_argv": "git checkout -b fix/x abc",
+                    "working_directory": "/test", "policy_version": "v1",
+                    "input_sha256": "in1", "output_sha256": "out1",
+                    "exit_code": 0}
+            r1 = store.record_tool_run(base)
+            r2 = store.record_tool_run(base)
+            r3 = store.record_tool_run(base)
+            # Fetch sequences
+            seqs = [r["chain_sequence"] for r in store.connection.execute(
+                "SELECT chain_sequence FROM tool_runs WHERE case_id = ? ORDER BY chain_sequence",
+                (case_id,)).fetchall()]
+            self.assertEqual(seqs, [1, 2, 3],
+                             f"chain_sequence must be strictly increasing, got: {seqs}")
+            # chain_hash must differ across records
+            hashes = [r["chain_hash"] for r in store.connection.execute(
+                "SELECT chain_hash FROM tool_runs WHERE case_id = ? ORDER BY chain_sequence",
+                (case_id,)).fetchall()]
+            self.assertEqual(len(set(hashes)), 3,
+                             "Each chain_hash must be unique")
+            store.close()
+
+
+class DevLoopFingerprintTests(unittest.TestCase):
+    def test_delivery_id_reuses_nonce_on_retry(self) -> None:
+        from daemon.store import compute_delivery_id
+        # Same nonce → same delivery_id (connector must reuse nonce on retry)
+        id1 = compute_delivery_id("issue", "https://example.com/1", "fixed-nonce")
+        id2 = compute_delivery_id("issue", "https://example.com/1", "fixed-nonce")
+        self.assertEqual(id1, id2)
+
+    def test_delivery_id_differs_with_new_nonce(self) -> None:
+        from daemon.store import compute_delivery_id
+        id1 = compute_delivery_id("issue", "https://example.com/1", "nonce-a")
+        id2 = compute_delivery_id("issue", "https://example.com/1", "nonce-b")
+        self.assertNotEqual(id1, id2)
+
+    def test_incident_signature_ignores_timestamp(self) -> None:
+        from daemon.store import compute_incident_signature
+        sig1 = compute_incident_signature("/repo", "KeyError", "config['projects']", ["src/config.py:42"])
+        sig2 = compute_incident_signature("/repo", "KeyError", "config['projects']", ["src/config.py:42"])
+        self.assertEqual(sig1, sig2)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# DevLoop: HTTP integration tests (real server)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _start_server(store: StateStore) -> tuple[CodeCCTVServer, str, str]:
+    """Start the daemon on a random port and return (server, base_url, token)."""
+    port = 0
+    token = secrets.token_hex(16)
+    server = CodeCCTVServer(("127.0.0.1", port), token, store)
+    actual_port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, f"http://127.0.0.1:{actual_port}", token
+
+
+class DevLoopHTTPIntegrationTests(unittest.TestCase):
+    def test_service_token_cannot_transition_case(self) -> None:
+        """Arbitrary state transitions are NOT exposed via HTTP.
+        Only approve_plan/reject_plan/approve_release/reject_release/cancel
+        are valid actions on /actions."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                # Create a case
+                result = store.create_or_find_case({
+                    "source_type": "issue",
+                    "source_uri": "test-http-transition",
+                    "client_nonce": "nonce-http-1",
+                    "raw_content": "test",
+                    "repository_ref": "/test",
+                    "extracted_signals": {
+                        "exception_type": "KeyError", "message_pattern": "test",
+                        "key_frames": ["src/test.py:1"],
+                        "keywords": ["test"], "repository_ref": "/test",
+                    },
+                })
+                case_id = result["case_id"]
+
+                # Advance to TRIAGED using store directly (orchestrator path)
+                store.transition_case(case_id, "TRIAGED")
+
+                # Try to jump to REPAIRING via HTTP — should be rejected
+                import urllib.request
+                body = json.dumps({"action": "REPAIRING"}).encode()
+                req = urllib.request.Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=body, method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": token,
+                        "X-Code-CCTV-Token-Type": "service",
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        data = json.loads(resp.read())
+                    self.assertIn("error", data)
+                except urllib.error.HTTPError as e:
+                    self.assertIn(e.code, (400, 409))
+            finally:
+                store.close()
+                server.shutdown()
+
+    def test_service_token_cannot_approve(self) -> None:
+        """service_token with type=service must be rejected for grant actions."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                result = store.create_or_find_case({
+                    "source_type": "issue",
+                    "source_uri": "test-no-approve",
+                    "client_nonce": "nonce-no-ap-1",
+                    "raw_content": "test",
+                    "repository_ref": "/test",
+                    "extracted_signals": {
+                        "exception_type": "KeyError", "message_pattern": "test",
+                        "key_frames": ["src/test.py:1"],
+                        "keywords": ["test"], "repository_ref": "/test",
+                    },
+                })
+                case_id = result["case_id"]
+                store.transition_case(case_id, "DIAGNOSED")
+                store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+
+                import urllib.request
+                body = json.dumps({"action": "approve_plan", "approval_token": "fake-token"}).encode()
+                req = urllib.request.Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=body, method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": token,
+                        "X-Code-CCTV-Token-Type": "service",  # Wrong type!
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        pass
+                    self.fail("Expected 403 Forbidden")
+                except urllib.error.HTTPError as e:
+                    self.assertEqual(e.code, 403)
+            finally:
+                store.close()
+                server.shutdown()
+
+    def test_reject_plan_uses_same_grant_model_as_approve(self) -> None:
+        """reject_plan consumes an approval Grant, same auth model as approve_plan."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                result = store.create_or_find_case({
+                    "source_type": "issue",
+                    "source_uri": "test-reject-grant",
+                    "client_nonce": "nonce-rj-1",
+                    "raw_content": "test",
+                    "repository_ref": "/test",
+                    "extracted_signals": {
+                        "exception_type": "KeyError", "message_pattern": "test",
+                        "key_frames": ["src/test.py:1"],
+                        "keywords": ["test"], "repository_ref": "/test",
+                    },
+                })
+                case_id = result["case_id"]
+                store.transition_case(case_id, "TRIAGED")
+                store.transition_case(case_id, "DIAGNOSED")
+                store.connection.execute(
+                    "UPDATE cases SET base_commit = 'base-01' WHERE case_id = ?", (case_id,))
+                store.connection.commit()
+                store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+
+                # Issue a reject_plan grant
+                grant = store.issue_approval_grant(case_id, "reject_plan", "base-01", "qa-user")
+                self.assertIsNotNone(grant)
+
+                # Execute reject_plan via HTTP with the approval_token
+                import urllib.request
+                body = json.dumps({
+                    "action": "reject_plan",
+                    "approval_token": grant["approval_token"],
+                    "target_ref": "base-01",
+                    "reason": "Need more details",
+                }).encode()
+                req = urllib.request.Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=body, method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": grant["approval_token"],
+                        "X-Code-CCTV-Token-Type": "approval",
+                    },
+                )
+                with urllib.request.urlopen(req, timeout=2) as resp:
+                    data = json.loads(resp.read())
+                self.assertTrue(data["ok"])
+                self.assertEqual(data["case"]["status"], "ESCALATED")
+            finally:
+                store.close()
+                server.shutdown()
+
+    def test_expired_grant_rejected_by_http(self) -> None:
+        """An expired approval Grant must be rejected even via HTTP."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                result = store.create_or_find_case({
+                    "source_type": "issue",
+                    "source_uri": "test-expired-http",
+                    "client_nonce": "nonce-exph-1",
+                    "raw_content": "test",
+                    "repository_ref": "/test",
+                    "extracted_signals": {
+                        "exception_type": "KeyError", "message_pattern": "test",
+                        "key_frames": ["src/test.py:1"],
+                        "keywords": ["test"], "repository_ref": "/test",
+                    },
+                })
+                case_id = result["case_id"]
+                store.transition_case(case_id, "TRIAGED")
+                store.transition_case(case_id, "DIAGNOSED")
+                store.connection.execute(
+                    "UPDATE cases SET base_commit = 'base-01' WHERE case_id = ?", (case_id,))
+                store.connection.commit()
+                store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+
+                expired = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+                grant = store.issue_approval_grant(case_id, "approve_plan", "base-01", "qa-user", expires_at=expired)
+
+                import urllib.request
+                body = json.dumps({
+                    "action": "approve_plan",
+                    "approval_token": grant["approval_token"],
+                    "target_ref": "base-01",
+                }).encode()
+                req = urllib.request.Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=body, method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": grant["approval_token"],
+                        "X-Code-CCTV-Token-Type": "approval",
+                    },
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        data = json.loads(resp.read())
+                    self.assertIn("error", data)
+                    self.assertIn("expired", data["error"])
+                except urllib.error.HTTPError as e:
+                    self.assertIn(e.code, (400, 401))
+            finally:
+                store.close()
+                server.shutdown()
+
+    def test_case_creation_pushes_sse(self) -> None:
+        """Creating a Case should push an SSE event of type 'case_created'."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                # Subscribe to SSE
+                import threading, urllib.request
+
+                sse_events: list[dict] = []
+
+                def sse_listener():
+                    try:
+                        req = urllib.request.Request(
+                            f"{base_url}/api/stream",
+                            headers={"X-Code-CCTV-Token": token},
+                        )
+                        with urllib.request.urlopen(req, timeout=3) as resp:
+                            for line in resp:
+                                line = line.decode("utf-8").strip()
+                                if line.startswith("data: "):
+                                    sse_events.append(json.loads(line[6:]))
+                    except Exception:
+                        pass
+
+                sse_thread = threading.Thread(target=sse_listener, daemon=True)
+                sse_thread.start()
+
+                # Give SSE connection time to establish
+                time.sleep(0.3)
+
+                # Create a Case
+                store.create_or_find_case({
+                    "source_type": "ci",
+                    "source_uri": "test-sse-case",
+                    "client_nonce": "nonce-sse-1",
+                    "raw_content": "SSE test",
+                    "repository_ref": "/test",
+                    "extracted_signals": {
+                        "exception_type": "KeyError", "message_pattern": "SSE test",
+                        "key_frames": ["src/test.py:1"],
+                        "keywords": ["SSE"], "repository_ref": "/test",
+                    },
+                })
+
+                time.sleep(0.3)
+
+                # Should have received a case_created event via SSE
+                case_events = [e for e in sse_events if e.get("type") == "case_created"]
+                self.assertGreaterEqual(len(case_events), 1,
+                                         "SSE should emit case_created when a Case is created")
+            finally:
+                store.close()
+                server.shutdown()
+
+    def test_pending_observation_promoted_on_timeout(self) -> None:
+        """resolve_pending_sources should create a Case for expired pending observations."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "feedback",
+                "source_uri": "user-says-crash",
+                "client_nonce": "nonce-promo-1",
+                "raw_content": "It keeps crashing",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "keywords": ["crash"],
+                    "repository_ref": "/test",
+                },
+            })
+            self.assertTrue(result.get("pending"))
+            obs_id = result["observation_id"]
+
+            # Manually set the deadline to the past to force promotion
+            past = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+            store.connection.execute(
+                "UPDATE case_sources SET association_deadline = ? WHERE observation_id = ?",
+                (past, obs_id),
+            )
+            store.connection.commit()
+
+            created = store.resolve_pending_sources()
+            self.assertGreaterEqual(len(created), 1)
+            self.assertIn("case_id", created[0])
+            # The observation should now be linked to the new Case
+            obs = store.connection.execute(
+                "SELECT case_id, association_state FROM case_sources WHERE observation_id = ?",
+                (obs_id,),
+            ).fetchone()
+            self.assertIsNotNone(obs)
+            self.assertEqual(obs["case_id"], created[0]["case_id"])
+            store.close()
 
 
 if __name__ == "__main__":

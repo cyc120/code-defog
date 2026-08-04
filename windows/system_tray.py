@@ -1,16 +1,25 @@
-"""System tray icon for the Windows app (mirrors the macOS menu-bar item)."""
+﻿"""System tray icon for the Windows app (mirrors the macOS menu-bar item)."""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
 
+def app_icon() -> QIcon:
+    """Load the bundled Code CCTV logo; falls back to an empty icon."""
+    logo = Path(__file__).resolve().parents[1] / "assets" / "code-cctv-logo.svg"
+    if logo.exists():
+        return QIcon(str(logo))
+    return QIcon()
+
+
 class SystemTrayIcon(QSystemTrayIcon):
     def __init__(self, app: QApplication, on_show: Any, client: Any) -> None:
-        super().__init__(QIcon(), app)
+        super().__init__(app_icon(), app)
         self._client = client
         self._menu = QMenu()
         show_action = QAction("显示窗口", self._menu)

@@ -1,392 +1,255 @@
-# Code CCTV General
+# Code CCTV DevLoop
 
-定位你的 AI 编程。
+定位你的 AI 编程 — 从"看见过程"到"受控闭环"。
 
-Code CCTV General 是一套**通用 AI 编程监控与中文工作日志工具**：它把 AI 辅助编程过程整理成中文 `AI_WORKLOG.md`，让你能看见当前改了什么、为什么改、落在哪些模块，以及如何验证结果。macOS 和 Windows 上都可以启用可选的本地后台服务和原生界面，把多个工作区、多个编程会话的结构化状态汇总到一个全局预览中。
+**Code CCTV** 是一套通用 AI 编程监控与中文工作日志工具；**DevLoop** 是在此之上构建的多 Agent 软件研发闭环系统（GOAI Agent Infra 赛道 · 方向三参赛项目）。
 
-它**不绑定任何单一 AI 工具**：结构化事件来自工作区内的脚本和 AI 对话本身，`AI_WORKLOG.md`、本地 daemon、SSE 界面都只依赖一套开放的本地协议。Codex 集成是当前最成熟的默认场景（内置插件清单和 skill），但同样的脚本可以在其他 AI 编程环境或纯人工编码工作流中使用。
+---
 
-> 本仓库是通用版（General）的独立演进起点。日常使用、安装方式和内部标识符（插件名 `code-cctv`、技能名 `$code-cctv`、daemon 标签 `com.code-cctv.*`）与经典版保持一致，可直接照常安装。
+## 项目定位
+
+```
+Code CCTV（已有）                DevLoop（新增）
+┌─────────────────────┐       ┌──────────────────────────────┐
+│ AI_WORKLOG.md       │       │ Case 管理 & 多源归并          │
+│ 本地 HTTP/SSE 服务   │  →   │ AgentTeams 多 Agent 编排      │
+│ SQLite 状态留存      │       │ 审批门禁 & 安全审计           │
+│ 跨平台原生界面       │       │ 受控工具链 & 证据哈希链       │
+│                     │       │ 质量门禁 & 复盘知识沉淀        │
+└─────────────────────┘       └──────────────────────────────┘
+```
+
+> 将一次软件缺陷处置变成可追踪、可验证、可回滚、可复用的工程闭环。
+
+**赛道信息：** [GOAI 世界人工智能开源大赛](https://www.goaihz.com) — Agent Infra（新智基座）赛道 — 方向三「软件研发全流程协同」
+
+**项目框架文档：** [GOAI_Direction3_Project_Framework.md](GOAI_Direction3_Project_Framework.md)
+
+---
+
+## 快速开始
+
+### 前置条件
+
+- Python 3.10+
+- DeepSeek API Key（设为环境变量 `DEEPSEEK_API_KEY`；用于 AgentTeams 生产模式）
+
+### 安装
+
+```bash
+git clone https://github.com/cyc120/code-cctv-general.git
+cd code-cctv-general
+pip install agentscope pytest
+```
+
+### 运行冒烟测试
+
+```bash
+# AgentTeams Runtime 冒烟验证 — 创建 Team、提交 Task、获取真实 ID
+python agent_runtime/smoke_test.py
+
+# 输出：
+#   team_id:  team-xxxxxxxxxxxx
+#   task_id:  task-xxxxxxxxxxxx
+#   trace_id: trace-xxxxxxxxxxxxxxxx
+#   Evidence saved to: evidence/
+```
+
+### 运行所有测试
+
+```bash
+python -m pytest tests/ demo_target/ -q
+# 66 passed
+```
+
+### 启动本地服务
+
+```bash
+python -m daemon.serve
+# 服务监听 127.0.0.1，支持 Case API + 原有 CCTV API
+```
+
+---
+
+## 架构概览
+
+```mermaid
+flowchart LR
+    I["Issue / 日志 / 用户反馈 / CI"] --> C["Case Intake API"]
+    C --> S["Case Store: SQLite"]
+    S --> O["AgentTeams Runtime Adapter"]
+    O --> A1["分诊证据 Agent"]
+    O --> A2["诊断影响 Agent"]
+    O --> A3["修复执行 Agent"]
+    O --> A4["验证发布 Agent"]
+    A1 --> T["受控工具层"]
+    A2 --> T
+    A3 --> T
+    A4 --> T
+    S --> E["证据包 & AI_WORKLOG.md"]
+    S --> P["SSE / Case 看板 / 审批界面"]
+    P --> H["人工审批者"]
+    S -.-> R["异步复盘模块"]
+```
+
+### 4 个核心 Agent
+
+| Agent | 职责 | 执行动作 | 明确禁止 |
+|-------|------|---------|---------|
+| Triage Evidence | 聚合多源输入、去重、分类 | 写入 Case、标注优先级 | 不下根因结论、不改代码 |
+| Diagnosis Impact | 检索代码、建立根因假设 | 生成诊断报告、评估风险 | 不写工作树、不发布 |
+| Repair | 隔离工作树生成补丁 | 创建分支/补丁、运行单测 | 不写主分支、不部署 |
+| Verification Release | 质量门禁、模拟灰度 | 执行测试、生成验证报告 | 不忽略失败门禁 |
+
+### Case 状态机
+
+```
+RECEIVED → TRIAGED → DIAGNOSED → PLAN_APPROVAL → REPAIRING
+    → VERIFYING → PATCH_REJECTED (gate fail)
+    → VERIFYING → RELEASE_APPROVAL → RELEASED → CLOSED
+                                        ↘ ROLLED_BACK → CLOSED
+```
+
+---
+
+## Case API（DevLoop 新增）
+
+所有接口绑定 `127.0.0.1`，沿用 `X-Code-CCTV-Token` 鉴权。
+
+| 方法 | 路径 | 鉴权 | 用途 |
+|------|------|------|------|
+| `POST` | `/api/cases` | `service_token` | 创建或关联 Case（自动归并/去重） |
+| `GET` | `/api/cases` | `service_token` | 按状态/仓库查询 Case 队列 |
+| `GET` | `/api/cases/{id}` | `service_token` | 获取 Case 详情 |
+| `POST` | `/api/cases/{id}/actions` | `approval_token`（审批类）/ `service_token`（cancel） | 审批通过/拒绝/取消 |
+| `GET` | `/api/cases/{id}/evidence` | `service_token` | 导出完整证据索引（含哈希链） |
+
+### 令牌分离
+
+| 令牌类型 | 持有者 | 可访问 |
+|---------|--------|--------|
+| `service_token` | Agent、脚本 | 事件上报、Case 查询、状态流 |
+| `approval_token` | 人工审批者 | 一次性审批 Grant（签发与消费分离） |
+
+Agent 持有的 `service_token` 不能执行审批动作 — 调用审批类端点返回 `403 Forbidden`。
+
+### 两级指纹
+
+```
+delivery_id = SHA256(source_type | source_uri | client_nonce)  # 传输幂等
+incident_signature = SHA256(repo | exception_type | message_pattern | key_frames)  # 跨源关联
+```
+
+---
+
+## AgentTeams 集成
+
+### 模式
+
+| 模式 | 命令 | 用途 |
+|------|------|------|
+| Mock | `adapter.set_mode("mock")` | 进程内 stub 调用 — 单元测试 / 离线开发 |
+| Production | `adapter.set_mode("production")` | 真实 AgentScope Agent + DeepSeek LLM |
+
+### 生产冒烟验证
+
+```python
+from agent_runtime.teams_adapter import AgentTeamsAdapter
+adapter = AgentTeamsAdapter(store)
+adapter.set_mode("production")
+# 创建 4 个 AgentScope Agent，dispatch_task() 调用真实 LLM
+agent_result = adapter.dispatch_task(case_id, "TRIAGED", ctx)
+# 返回: {agent, case_id, task_id, trace_id, team_id, result_summary}
+```
+
+生产模式依赖 `DEEPSEEK_API_KEY` 环境变量。
+
+---
+
+## 目录结构
+
+```
+code-cctv-general/
+├── daemon/                  # HTTP、SSE、SQLite — Case API + 原有 CCTV API
+│   ├── server.py            # 令牌分离、Case 路由、SSE 推送
+│   └── store.py             # 10 个 DevLoop 表 + 原有监控表 + 迁移
+├── agent_runtime/           # AgentTeams 编排层
+│   ├── teams_adapter.py     # Mock / Production 双模式
+│   ├── orchestrator.py      # Case 生命周期协调
+│   ├── state_machine.py     # 12 状态转移表
+│   ├── case_context.py      # 结构化交接契约
+│   ├── identities.yaml      # 4 个 Agent 身份定义
+│   └── smoke_test.py        # AgentTeams 冒烟验证脚本
+├── agents/                  # 4 个核心 Agent（P1 stub → P2 模型驱动）
+│   ├── triage.py
+│   ├── diagnosis.py
+│   ├── repair.py
+│   └── verification.py      # 真实 quality_gate.py 调用
+├── retrospective/           # 异步复盘批处理
+├── connectors/              # 外部输入规范化接入
+├── tools/                   # 受控 Git/检索/测试/部署模拟
+├── policy/                  # 审批策略、风险分级
+├── evidence/                # 烟雾测试与生产调度证据
+├── demo_target/             # 隔离故障演练仓库
+│   ├── cli.py               # 故意有 bug 的 CLI（Case A & Case B）
+│   ├── quality_gate.py      # 质量门禁脚本（驱动 PATCH_REJECTED）
+│   └── test_config.py       # 7 个隔离场景测试
+├── scripts/                 # 现有 CCTV 脚本
+│   ├── update_worklog.py
+│   ├── watch_worklog.py
+│   └── event_client.py
+├── skills/code-cctv/        # CCTV Skill 定义
+├── macos/                   # SwiftUI 原生界面
+├── windows/                 # PySide6 原生界面
+├── tests/                   # 56 单元 + HTTP 集成测试
+└── docs/                    # 独立材料目录
+```
+
+---
+
+## 开发与验证
+
+```bash
+# 语法检查
+python -m py_compile daemon/*.py agent_runtime/*.py agents/*.py
+
+# 全量测试（56 单元 + 7 demo + HTTP 集成）
+python -m pytest tests/ demo_target/ -q
+
+# AgentTeams 冒烟验证
+python agent_runtime/smoke_test.py
+```
+
+提交前不要包含：
+- `AI_WORKLOG.md`
+- `evidence/` 下的运行时证据（冒烟测试产出的 `smoke_test_*.json` 除外）
+- 数据目录（`%APPDATA%\CodeCCTV\` 或 `~/Library/Application Support/CodeCCTV/`）
+
+---
 
 ## 平台支持
 
 | 功能 | macOS | Windows |
-| --- | --- | --- |
+|------|-------|---------|
 | 中文工作日志 `AI_WORKLOG.md` | ✅ | ✅ |
-| 文件变化监听 `watch_worklog.py` | ✅ | ✅ |
-| 本地 HTTP/SSE 服务（`daemon/`） | ✅ | ✅ |
-| ChatGPT 生命周期跟随 | ✅ launchd | ✅ 任务计划程序 |
-| 开机自启 | ✅ LaunchAgent | ✅ schtasks（用户级） |
-| 原生界面 | ✅ SwiftUI 浮窗 | ✅ PySide6 应用 |
+| 文件变化监听 | ✅ | ✅ |
+| 本地 HTTP/SSE 服务 | ✅ | ✅ |
+| Case API & Agent 编排 | ✅ | ✅ |
+| AgentTeams 生产模式 | ✅ | ✅ |
+| 原生界面 | ✅ SwiftUI | ✅ PySide6 |
 
-macOS 与 Windows 共享同一套 Python 后端和本地协议；只有界面层（`macos/` vs `windows/`）和服务管理（launchd vs schtasks）按平台分叉。
+---
 
-## 适合谁
+## 隐私边界
 
-- 想看懂 AI 正在修改什么，而不是只看一句“已完成”。
-- 正在处理陌生项目、遗留项目或复杂代码，想快速建立模块地图。
-- 需要把函数位置、关键代码段、命令证据和验证步骤留档。
-- 希望在 macOS 浮窗或 Windows 应用里实时查看多个工作区的摘要。
+- 所有服务监听 `127.0.0.1`，不对外开放
+- SQLite 保存结构化摘要，不存储原始聊天全文
+- 审批令牌仅存哈希（`SHA256(approval_token)`），不存明文
+- 证据哈希链（`chain_hash`）面向重放验证，不可篡改
+- Agent 持有的 `service_token` 不能执行审批动作
 
-## 核心能力
+---
 
-### 1. 中文工作日志
+## 许可证
 
-启用 `$code-cctv` 后，AI 编程助手（如 Codex）会在当前工作区根目录维护 `AI_WORKLOG.md`，默认按信息金字塔组织内容：
-
-1. 先看结论、风险、阻塞和下一步。
-2. 再看模块图谱和 Mermaid 关系图。
-3. 最后查看实时记录、涉及文件、函数定位、代码片段说明、决策、验证和初学者核对清单。
-
-日志是编程助手在任务中主动维护的可读记录，不是偷偷采集的聊天遥测。手工运行 `update_worklog.py` 同样适用，不要求有 AI 对话在场。
-
-### 2. 文件变化监听
-
-`watch_worklog.py` 可以监听工作区文件的新增、修改和删除，并把变化摘要追加到 `AI_WORKLOG.md`。它不读取聊天内容；用户互动、代码输出、工具结果和验证结果仍由 Codex 按 skill 规范主动记录。
-
-### 3. 实时状态服务
-
-可选的后台服务（macOS / Windows 通用）只绑定 `127.0.0.1`，接收结构化摘要事件，并保存到本机 SQLite：
-
-```text
-macOS:   ~/Library/Application Support/CodeCCTV/state.sqlite3
-Windows: %APPDATA%\CodeCCTV\state.sqlite3
-```
-
-macOS 浮窗与 Windows 应用都通过 SSE 订阅实时状态，并以 `/api/state` 轮询作为断线兜底。服务记录工作区、Codex 对话 ID、阶段、状态、焦点、摘要、证据、文件列表和时间，不记录原始聊天全文，也不会主动向网络上传内容。同一工作区的不同对话会在列表和拓扑中显示为独立会话。
-
-每个启用 `code-cctv` 的 Codex 对话会自动读取宿主提供的 `CODEX_THREAD_ID` 并随摘要事件上报。未带线程 ID 的手动脚本归入“默认会话”，旧版 SQLite 状态库会在服务启动时自动迁移。
-
-### 4. ChatGPT 生命周期跟随
-
-运行 `manage_service.py install` 后会安装一个无界面的生命周期 watcher：
-
-- watcher 在用户登录后负责检查 ChatGPT 是否运行，但不会自己显示浮窗。
-- 检测到 `/Applications/ChatGPT.app` 运行时，才启动 daemon 和浮窗。
-- ChatGPT 退出后，daemon 和浮窗自动停止。
-- 它跟随的是 ChatGPT.app 进程存活状态，不是某个会话是否正在生成，因为目前没有稳定的公开会话状态 hook。
-- 生命周期 watcher 只负责跟随 ChatGPT.app，不会扫描或读取其他对话；其他对话需要在各自线程中启用 `code-cctv` 并产生结构化事件后才会出现在全局预览。
-- 从 Codex 卸载插件后，watcher 检测到插件缓存消失，等待 15 秒确认不是重装切换，再停止子服务并清理自己的服务配置（macOS 的 LaunchAgent / Windows 的计划任务）。
-
-### 5. 浮窗交互
-
-浮窗采用类似 Apple Dynamic Island 的动态表面：收起时是黑色状态胶囊，展开时平滑变成活动卡片，共享同一块背景和状态指示，不会额外创建第二个浮窗窗口。默认显示为可拖动胶囊，并提供以下入口：
-
-- 单击：展开消息泡泡，显示最近项目、阶段、焦点和摘要。
-- 双击：打开全局预览窗口（含“项目详情 / 监听图 / 管理”三个标签页；管理页可静音、清除会话或清空全部数据）。
-- 拖动：移动浮窗，位置会保存到当前用户的偏好设置。
-- 泡泡中的 `×`：关闭当前消息泡泡。
-- 泡泡中的收起按钮：回到胶囊状态。
-- 泡泡中的隐藏按钮：隐藏浮窗，但保留菜单栏入口。
-- 右键：打开全局预览、显示/收起泡泡或隐藏浮窗。
-- 菜单栏图标：重新显示浮窗、打开全局预览或退出 Code CCTV。
-
-不要在已经安装常驻服务时再次运行 `scripts/run_macos_app.sh`，否则手动启动的 app 和 LaunchAgent 启动的浮窗可能同时出现。
-
-## 工作流
-
-```mermaid
-flowchart LR
-    A["Codex 线程 + code-cctv skill"] --> B["update_worklog.py"]
-    B --> C["工作区 AI_WORKLOG.md"]
-    B --> D["event_client.py"]
-    D --> E["127.0.0.1 本地 daemon"]
-    E --> F["SQLite 状态库"]
-    E --> G["SSE 实时流"]
-    G --> H["macOS 浮窗 / Windows 应用 与全局预览"]
-    I["ChatGPT 进程"] --> J["生命周期 watcher"]
-    J --> E
-    J --> H
-```
-
-## 安装插件
-
-### 从 GitHub 克隆
-
-```bash
-git clone git@github.com:cyc120/code-cctv-general.git ~/plugins/code-cctv
-```
-
-如果已经存在同名目录，使用：
-
-```bash
-git -C ~/plugins/code-cctv pull --ff-only
-```
-
-确保个人插件市场的 `code-cctv` 条目指向这份本地目录，然后安装或刷新插件：
-
-```bash
-codex plugin add code-cctv@personal
-```
-
-更新插件代码后，需要重新执行一次上面的命令；刷新后建议新开一个 Codex 线程，让新版本 skill 完整生效。
-
-> macOS 和 Windows 都支持将本仓库作为 Codex 插件使用；生命周期跟随、实时状态服务与界面则按平台启用（见下）。
-
-### 第一次使用
-
-在新的 Codex 线程中输入：
-
-```text
-使用 $code-cctv，开启中文实时工作日志。请按信息金字塔展示结论，生成模块 Mermaid 图，标注函数和代码段位置，并给出初学者核对清单。
-```
-
-日志会写入当前项目根目录，而不是写入插件目录。
-
-## 启用 macOS 常驻服务
-
-macOS 浮窗构建脚本当前面向 Apple Silicon、macOS 13+：
-
-```bash
-cd ~/plugins/code-cctv
-python3 scripts/manage_service.py install
-python3 scripts/manage_service.py status
-```
-
-`install` 会在需要时构建 `dist/CodeCCTV.app`，并安装三个用户级 LaunchAgent：
-
-```text
-com.code-cctv.lifecycle   ChatGPT 生命周期 watcher
-com.code-cctv.daemon      本地 HTTP/SSE 服务
-com.code-cctv.floating    菜单栏图标与浮窗
-```
-
-常用命令：
-
-```bash
-python3 scripts/manage_service.py status   # 查看 ChatGPT、watcher、daemon、浮窗状态
-python3 scripts/manage_service.py sync     # 立即按 ChatGPT 当前状态同步子服务
-python3 scripts/manage_service.py stop     # 停止 watcher 和子服务，但保留 LaunchAgent 文件
-python3 scripts/manage_service.py start    # 恢复跟随模式
-python3 scripts/manage_service.py uninstall # 停止并删除 LaunchAgent
-```
-
-卸载服务不会删除本地状态库；如需清理历史摘要，可手动删除：
-
-```text
-~/Library/Application Support/CodeCCTV/
-```
-
-### 不需要常驻服务时
-
-只使用 `AI_WORKLOG.md` 不需要安装 macOS 服务。也可以手动监听文件变化：
-
-```bash
-python3 scripts/watch_worklog.py --workspace "$PWD"
-```
-
-单次检查：
-
-```bash
-python3 scripts/watch_worklog.py --workspace "$PWD" --once
-```
-
-手动打开浮窗仅用于临时调试：
-
-```bash
-scripts/run_macos_app.sh
-```
-
-它不会替代 ChatGPT 生命周期模式；若已安装常驻服务，请先退出手动启动的 app，避免出现两个浮窗入口。
-
-## 启用 Windows 常驻服务
-
-需要 Python 3.10+。Windows 界面额外依赖 PySide6：
-
-```powershell
-pip install -r windows/requirements-windows.txt
-```
-
-数据与配置位于每用户的 `%APPDATA%\CodeCCTV\`（对应 macOS 的 `~/Library/Application Support/CodeCCTV/`）：`service.json`、`state.sqlite3` 和日志都在这里。
-
-在仓库根目录手动启动本地服务：
-
-```powershell
-python -m daemon.serve
-```
-
-安装常驻服务（会创建两个用户级任务计划项，无需管理员）：
-
-```powershell
-python scripts\manage_service.py install
-```
-
-安装后生成：
-
-```text
-CodeCCTV-lifecycle   登录时启动的 ChatGPT 生命周期 watcher
-CodeCCTV             daemon 任务（由 lifecycle watcher 按需启动）
-```
-
-常用命令与 macOS 一致：
-
-```powershell
-python scripts\manage_service.py status   # 查看任务、daemon、ChatGPT 状态
-python scripts\manage_service.py sync     # 立即按 ChatGPT 当前状态同步
-python scripts\manage_service.py stop     # 停止 watcher 和 daemon，但保留计划任务
-python scripts\manage_service.py start    # 恢复跟随模式
-python scripts\manage_service.py uninstall  # 停止并删除计划任务
-```
-
-ChatGPT 跟随通过 `tasklist` 检测 `ChatGPT.exe` 进程，并回退探测 `%LOCALAPPDATA%\Programs\OpenAI` 等常见安装路径；可用环境变量 `CODE_CCTV_WATCH_EXE` 指定要跟随的其他可执行文件，`CODE_CCTV_PYTHON` 指定 Python 解释器。
-
-Windows 界面（全局预览，含托盘图标、项目列表、事件流和管理页）：
-
-```powershell
-python -m windows.main
-```
-
-## 本地服务 API
-
-配置文件和令牌位于（macOS）：
-
-```text
-~/Library/Application Support/CodeCCTV/service.json
-```
-
-Windows 上对应 `%APPDATA%\CodeCCTV\service.json`。可用环境变量 `CODE_CCTV_CONFIG` 覆盖该路径。
-
-除 `/health` 外，接口都要求请求头 `X-Code-CCTV-Token`。接口只应在本机使用：
-
-| 方法 | 路径 | 用途 |
-| --- | --- | --- |
-| GET | `/health` | 检查服务是否存活 |
-| GET | `/api/state` | 获取全部工作区的当前摘要 |
-| GET | `/api/stream` | 通过 SSE 订阅状态更新 |
-| POST | `/api/events` | 写入一条结构化工作事件 |
-| GET | `/api/management/info` | 服务进程与状态库统计 |
-| POST | `/api/management/session/clear` | 清除单个会话的全部事件记录 |
-| POST | `/api/management/clear-all` | 清空全部会话与事件记录 |
-
-工作日志更新器会尽力上报事件；daemon 不可用时，Markdown 写入仍会继续，不会因为浮窗服务故障而阻塞编程任务。事件保留按会话分别裁剪：每个会话最多保留 `retention` 条（默认 2000，见 `/api/management/info`），忙碌会话不会挤占其他会话的历史。
-
-## 目录结构
-
-| 路径 | 作用 |
-| --- | --- |
-| `.codex-plugin/plugin.json` | 插件名称、版本、技能入口和界面元数据 |
-| `skills/code-cctv/SKILL.md` | 中文工作日志、模块图谱和验证规范 |
-| `skills/code-cctv/assets/` | skill 使用的图标与中文日志模板 |
-| `scripts/update_worklog.py` | 生成和更新 `AI_WORKLOG.md` |
-| `scripts/watch_worklog.py` | 监听工作区文件变化 |
-| `scripts/event_client.py` | 向本机 daemon 上报摘要事件 |
-| `scripts/manage_service.py` | 跨平台服务管理（macOS launchd / Windows 任务计划程序） |
-| `scripts/chatgpt_lifecycle.py` | 检查 ChatGPT 进程并负责卸载后的自清理 |
-| `scripts/win_support.py` | Windows 任务计划程序、进程检测和 .bat 启动器 |
-| `daemon/` | 本地 HTTP、SSE 和 SQLite 状态服务（含平台路径解析 `paths.py`） |
-| `macos/` | Swift 菜单栏图标、浮窗和全局预览（macOS） |
-| `windows/` | PySide6 托盘图标、全局预览和事件流（Windows） |
-| `tests/` | Python 脚本和 daemon 单元测试 |
-
-## 常用脚本
-
-按文件扩展名生成函数定位骨架：
-
-```bash
-python3 scripts/scan_code_map.py src tests
-```
-
-更新日志时也可以显式写入模块、函数和验证信息：
-
-```bash
-python3 scripts/update_worklog.py \
-  --workspace "$PWD" \
-  --language zh \
-  --status "修改中" \
-  --focus "正在处理登录模块" \
-  --module "登录模块|src/auth.py:1-120|处理登录输入和校验|配置模块|边界条件可能漏测|运行登录测试并尝试错误密码" \
-  --function "src/auth.py:42|login|校验输入并返回登录结果|检查调用处传入的凭据并运行测试" \
-  --segment "src/auth.py:40-58|登录校验|把输入转成业务层可用的结果|修改临时输入并确认错误提示变化"
-```
-
-## 开发与验证
-
-在仓库根目录运行：
-
-```bash
-python3 -m py_compile scripts/*.py daemon/*.py windows/*.py
-python3 -m unittest discover -s tests -v
-```
-
-构建 macOS app：
-
-```bash
-scripts/build_macos_app.sh
-```
-
-构建产物是 `dist/CodeCCTV.app`，`build/` 和 `dist/` 已加入 `.gitignore`。修改 Swift 浮窗后，应至少检查：拖动是否连续、展开/收起动画是否稳定、`×` 是否能关闭泡泡、隐藏后是否能从菜单栏恢复，以及常驻服务是否仍只有一个浮窗进程。
-
-## 隐私边界与限制
-
-- 所有状态服务监听地址都是 `127.0.0.1`，不是对外开放的远程服务。
-- 保存的是工作区 + Codex 对话级结构化摘要、事件和文件路径；不会把原始聊天全文写入 SQLite。
-- 服务令牌位于每用户数据目录下的 `service.json`（macOS `~/Library/Application Support/CodeCCTV/`，Windows `%APPDATA%\CodeCCTV\`），不要提交到 Git。
-- Windows 上 `state.sqlite3` 的隐私依赖 `%APPDATA%` 的 NTFS 每用户 ACL（macOS 上则由 chmod 0600 保证）；`manage_service.py` 的任务计划项均为用户级（`/rl limited`），无需管理员权限。
-- 文件 watcher 只读取工作区文件元数据和路径摘要；它不读取聊天消息。
-- Codex 没有稳定的全局聊天 hook，所以 Code CCTV 不会被动读取所有聊天；交互、代码输出、工具输出和验证记录依赖每个任务中的 `code-cctv` skill 主动更新。
-- ChatGPT 跟随模式只判断标准安装路径下的 ChatGPT.app（macOS）或 ChatGPT.exe（Windows）进程是否存在；不会判断某个会话是否正在生成。
-- 函数扫描器目前主要覆盖 Python、JavaScript 和 TypeScript 的常见函数形态，扫描结果需要结合上下文复核。
-- 当前 macOS 构建脚本是 arm64 目标；Intel Mac 需要调整 `scripts/build_macos_app.sh` 的 Swift 编译目标后再构建。
-
-## 排障
-
-### 浮窗没有出现
-
-先执行：
-
-```bash
-python3 scripts/manage_service.py status
-```
-
-确认 `ChatGPT: running`，且 `com.code-cctv.lifecycle`、`com.code-cctv.daemon`、`com.code-cctv.floating` 均为 `loaded`。如果 ChatGPT 已退出，浮窗自动停止是预期行为。
-
-### 出现两个图标或两个浮窗
-
-通常是同时使用了 LaunchAgent 常驻服务和 `scripts/run_macos_app.sh` 手动启动。退出手动启动的 app，并只保留一种启动方式；仍异常时执行：
-
-```bash
-python3 scripts/manage_service.py uninstall
-python3 scripts/manage_service.py install
-```
-
-### 卸载插件后浮窗仍在
-
-正常卸载插件后，lifecycle watcher 最多等待约 15 秒确认缓存消失，然后会停止 daemon、浮窗和 watcher，并删除三个 LaunchAgent。若只是更新 cachebuster，这段宽限时间用于避免误清理。
-
-### 日志有更新但浮窗未刷新
-
-确认 daemon 正在运行，并检查 `service.json` 是否存在。服务不可用不会阻塞 `AI_WORKLOG.md`；恢复 daemon 后，浮窗会通过 SSE 重新连接，并在 SSE 暂时不可用时由 `/api/state` 轮询继续同步。
-
-### Windows 应用没有出现
-
-先执行：
-
-```powershell
-python scripts\manage_service.py status
-```
-
-确认 `ChatGPT: running`，且 `CodeCCTV` 与 `CodeCCTV-lifecycle` 两个计划任务均为 `scheduled`。若 ChatGPT 已退出，daemon 与应用自动停止是预期行为。窗口可通过托盘图标重新打开：
-
-```powershell
-python -m windows.main
-```
-
-### Windows 控制台中文乱码
-
-脚本以 `-X utf8` 强制 UTF-8 输出；若在 PowerShell 里手动运行时仍乱码，先执行 `chcp 65001` 切换代码页。
-
-## 贡献前检查
-
-提交前建议依次执行：
-
-```bash
-python3 -m py_compile scripts/*.py daemon/*.py windows/*.py
-python3 -m unittest discover -s tests -v
-git status --short
-```
-
-不要提交以下本地运行数据：
-
-- `AI_WORKLOG.md`
-- `build/`、`dist/`
-- 数据目录下的 SQLite、令牌和日志（macOS `~/Library/Application Support/CodeCCTV/`，Windows `%APPDATA%\CodeCCTV\`）
+© 2026 Code CCTV DevLoop. All rights reserved.

@@ -134,7 +134,8 @@ def _validate_structured(agent_key: str, structured: dict[str, Any] | None) -> s
         if expected is bool and isinstance(value, (int, float)) and not isinstance(value, bool):
             # allow 0/1 as bool in LLM output
             if value in (0, 1):
-                continue
+                    structured[field] = bool(value)
+                    continue
             return f"field '{field}' must be boolean, got {type(value).__name__}"
         if not isinstance(value, expected):
             return f"field '{field}' wrong type: expected {expected.__name__}, got {type(value).__name__}"
@@ -389,6 +390,15 @@ class AgentTeamsAdapter:
                         failure = f"runtime_error: {evt['error']}"
                         break
 
+            # Persist the full runtime event stream as an evidence artifact
+            import hashlib
+            events_json = json.dumps(runtime_events, ensure_ascii=False, default=str)
+            events_sha256 = hashlib.sha256(events_json.encode()).hexdigest()
+            artifact_id = self._store.record_artifact(
+                case_id, "runtime_events", f"runtime_events/{run_id}.json",
+                events_json.encode(),
+            )
+
             base_result = {
                 "agent": agent_key, "case_id": case_id,
                 "devloop_task_id": devloop_task_id,
@@ -396,9 +406,10 @@ class AgentTeamsAdapter:
                 "team_id": self._team["team_id"] if self._team else "",
                 "runtime_reply_id": runtime_reply_id,
                 "runtime_session_id": runtime_session_id,
-                # Summary of runtime events (full list kept in evidence)
                 "runtime_event_count": len(runtime_events),
                 "runtime_event_types": [e["type"] for e in runtime_events],
+                "runtime_events_artifact_id": artifact_id,
+                "runtime_events_sha256": events_sha256,
             }
 
             if failure:

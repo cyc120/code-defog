@@ -1198,14 +1198,20 @@ class DevLoopStructuredValidationTests(unittest.TestCase):
         })
         self.assertIsNone(err)
 
-    def test_boolean_from_zero_one_accepted(self) -> None:
-        """LLM may output 0/1 for booleans — treat as acceptable."""
+    def test_boolean_zero_one_normalized_to_bool(self) -> None:
+        """LLM may output 0/1 for booleans — validate accepts and
+        normalizes to Python bool so the orchestrator's is True/is False
+        checks work."""
         from agent_runtime.teams_adapter import _validate_structured
-        err = _validate_structured("verification", {
+        structured = {
             "action": "verified",
             "quality_gate_passed": 0,
-        })
+        }
+        err = _validate_structured("verification", structured)
         self.assertIsNone(err, f"0 should be accepted as boolean: {err}")
+        self.assertIsInstance(structured["quality_gate_passed"], bool,
+                              "0 must be normalized to bool(False)")
+        self.assertFalse(structured["quality_gate_passed"])
 
     def test_top_level_fields_promoted(self) -> None:
         """Verify that schema fields are promoted to result top level

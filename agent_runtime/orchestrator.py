@@ -53,8 +53,16 @@ class Orchestrator:
             ctx_dict = result if isinstance(result, dict) else {}
             agent_result = self.teams.dispatch_task(case_id, target_state, ctx_dict)
 
+            # Only consume results from a successfully completed Agent run.
+            # A 'failed' run (failure_reason set, structured output invalid)
+            # must NOT drive any state transition.
+            completed = (
+                isinstance(agent_result, dict)
+                and agent_result.get("status") == "completed"
+            )
+
             # ── REPAIRING: persist patch_ref ───────────────────────────
-            if target_state == "REPAIRING" and isinstance(agent_result, dict):
+            if target_state == "REPAIRING" and completed:
                 patch_ref = agent_result.get("patch_ref", "")
                 if patch_ref:
                     self.store.connection.execute(
@@ -65,13 +73,15 @@ class Orchestrator:
 
             # ── Verification gate: drive next transition ──────────────
             if target_state == "VERIFYING" and isinstance(agent_result, dict):
-                qg_passed = agent_result.get("quality_gate_passed")
-                qg_error   = agent_result.get("quality_gate_error")
-
+                qg_error = agent_result.get("quality_gate_error")
+                # Gate execution error (timeout, OSError, etc.) → escalate
                 if qg_error:
-                    # Gate execution failed (timeout, OSError, etc.)
                     self.store.transition_case(case_id, "ESCALATED")
-                elif qg_passed is True:
+                elif not completed:
+                    # Adapter reported failure (invalid output / runtime error)
+                    # → escalate rather than silently pausing at VERIFYING
+                    self.store.transition_case(case_id, "ESCALATED")
+                elif agent_result.get("quality_gate_passed") is True:
                     patch_ref = agent_result.get("patch_ref") or case.get("patch_ref")
                     if not patch_ref:
                         # No patch reference — cannot issue a release grant
@@ -84,9 +94,9 @@ class Orchestrator:
                         self.store.connection.commit()
                         self.store.transition_case(case_id, "RELEASE_APPROVAL",
                                                     pending_action_for_state("RELEASE_APPROVAL"))
-                elif qg_passed is False:
+                elif agent_result.get("quality_gate_passed") is False:
                     self.store.transition_case(case_id, "PATCH_REJECTED")
-                # qg_passed is None → unchecked (offline/stub mode);
+                # quality_gate_passed is None → unchecked (offline/stub mode);
                 # leave the case at VERIFYING for manual handling.
 
             # Refresh result after any automatic transitions

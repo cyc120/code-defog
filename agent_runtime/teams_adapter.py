@@ -5,8 +5,16 @@ Production mode (P2):
     identities.yaml, dispatches CaseContext as structured tasks,
     and captures Team / Task / Trace evidence.
 
-    Failure detection: iteration exhaustion, empty output, and model
-    errors are recorded as 'failed', never as 'completed'.
+    Failure detection: iteration exhaustion, empty output, model
+    errors, and invalid structured output are recorded as 'failed',
+    never as 'completed'.
+
+    Trace honesty: the local UUIDs (devloop_task_id, devloop_run_id,
+    devloop_trace_id) are application-layer mapping IDs. The real
+    runtime identifiers (reply_id, session_id) and the full event
+    stream (MODEL_CALL_*, TOOL_CALL_*, REPLY_END, EXCEED_MAX_ITERS)
+    are captured from AgentScope's reply_stream as runtime_events —
+    these are the runtime-native trace evidence.
 
 Mock mode (unit tests / offline dev):
     Loads identities, calls Agent entry functions in-process.
@@ -52,7 +60,6 @@ def _detect_failure(text: str) -> str | None:
             return "iteration_exhausted"
     if len(stripped) < 3:
         return "empty_output"
-    # Check for model-level error markers
     lower = stripped.lower()
     if any(marker in lower for marker in ["an error occurred", "i'm sorry, but", "i cannot", "i am unable"]):
         return "model_refusal"
@@ -61,20 +68,76 @@ def _detect_failure(text: str) -> str | None:
 
 def _extract_json_block(text: str) -> dict[str, Any] | None:
     """Try to extract a JSON object from agent output (```json ... ``` or bare {})."""
-    # Try fenced block first
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(1))
         except json.JSONDecodeError:
             pass
-    # Try bare JSON object
     m = re.search(r"\{.*\}", text, re.DOTALL)
     if m:
         try:
             return json.loads(m.group(0))
         except json.JSONDecodeError:
             pass
+    return None
+
+
+# ── Structured output schema validation ───────────────────────────────────
+
+# Per-agent required fields and their expected types.  A missing field or
+# a wrong-typed value marks the run as invalid_structured_output.
+_AGENT_SCHEMAS: dict[str, dict[str, type | tuple[type, ...]]] = {
+    "triage": {
+        "action": str,
+        "priority": str,
+        "confidence": (int, float),
+    },
+    "diagnosis": {
+        "action": str,
+        "hypotheses": list,
+        "impact_scope": str,
+        "risk_level": str,
+    },
+    "repair": {
+        "action": str,
+        "patch_ref": str,
+    },
+    "verification": {
+        "action": str,
+        "quality_gate_passed": bool,
+    },
+}
+
+# Fields that are promoted to the top level of the result so the
+# orchestrator can drive state transitions without unwrapping.
+_TOP_LEVEL_FIELDS = {
+    "triage":       ("priority", "confidence"),
+    "diagnosis":    ("risk_level", "impact_scope"),
+    "repair":       ("patch_ref", "branch", "files_changed"),
+    "verification": ("quality_gate_passed", "recommendation"),
+}
+
+
+def _validate_structured(agent_key: str, structured: dict[str, Any] | None) -> str | None:
+    """Validate structured output against the agent schema.
+
+    Returns an error string if invalid, or None on success.
+    """
+    if not isinstance(structured, dict):
+        return "missing or non-object structured output"
+    schema = _AGENT_SCHEMAS.get(agent_key, {})
+    for field, expected in schema.items():
+        if field not in structured:
+            return f"missing required field: {field}"
+        value = structured[field]
+        if expected is bool and isinstance(value, (int, float)) and not isinstance(value, bool):
+            # allow 0/1 as bool in LLM output
+            if value in (0, 1):
+                continue
+            return f"field '{field}' must be boolean, got {type(value).__name__}"
+        if not isinstance(value, expected):
+            return f"field '{field}' wrong type: expected {expected.__name__}, got {type(value).__name__}"
     return None
 
 
@@ -131,11 +194,8 @@ class AgentTeamsAdapter:
             model = DeepSeekChatModel(credential=credential, model="deepseek-chat")
 
         read_toolkit = Toolkit(tools=[Read()])
-        # Agents that don't need tool access use an empty toolkit for
-        # faster, cheaper completion without ReAct loop overhead.
         no_tools = Toolkit(tools=[])
 
-        # Triage and Verification are analysis-only — no tools needed
         toolkit_map = {
             "triage":       no_tools,
             "diagnosis":    read_toolkit,
@@ -143,7 +203,6 @@ class AgentTeamsAdapter:
             "verification": no_tools,
         }
 
-        # 5 iterations is enough for a direct JSON response
         react_cfg = ReActConfig(max_iters=5, stop_on_reject=True)
 
         team_id = f"team-{uuid.uuid4().hex[:12]}"
@@ -232,15 +291,17 @@ class AgentTeamsAdapter:
     def _dispatch_production(
         self, case_id: str, state: str, agent_key: str, context: dict[str, Any],
     ) -> dict[str, Any]:
-        """Real AgentScope Agent dispatch with failure detection.
+        """Real AgentScope Agent dispatch with failure detection and
+        structured output validation.
 
         Returns:
-            On success:  {agent, case_id, task_id, trace_id, team_id,
-                          status: "completed", structured_output: {...},
-                          result_summary: "...", raw_text: "..."}
-            On failure:  {agent, case_id, task_id, trace_id, team_id,
-                          status: "failed", failure_reason: "...",
-                          raw_text: "..."}
+            On success:  {agent, case_id, devloop_task_id, devloop_trace_id,
+                          team_id, status: "completed", structured_output: {...},
+                          <top-level fields promoted from structured_output>,
+                          result_summary, raw_text, runtime_events}
+            On failure:  {agent, case_id, devloop_task_id, devloop_trace_id,
+                          team_id, status: "failed", failure_reason: "...",
+                          raw_text, runtime_events}
         """
         import time
 
@@ -248,14 +309,15 @@ class AgentTeamsAdapter:
         if agent is None:
             return {"error": f"Agent '{agent_key}' not initialised — call set_mode('production') first"}
 
-        task_id = f"task-{uuid.uuid4().hex[:12]}"
-        trace_id = context.get("trace_id", f"trace-{uuid.uuid4().hex[:16]}")
+        # Application-layer IDs (NOT runtime-native identifiers)
+        devloop_task_id = f"devtask-{uuid.uuid4().hex[:12]}"
+        devloop_trace_id = context.get("trace_id", f"devtrace-{uuid.uuid4().hex[:16]}")
         run_id = f"run-{uuid.uuid4().hex[:8]}"
 
         self._store.connection.execute(
             "INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at) "
             "VALUES (?, ?, ?, 'running', ?, ?)",
-            (run_id, case_id, agent_key, trace_id, time.strftime("%Y-%m-%dT%H:%M:%SZ")),
+            (run_id, case_id, agent_key, devloop_trace_id, time.strftime("%Y-%m-%dT%H:%M:%SZ")),
         )
         self._store.connection.commit()
 
@@ -265,31 +327,83 @@ class AgentTeamsAdapter:
             from agentscope.message import UserMsg
             import asyncio
 
-            reply = asyncio.run(agent.reply(UserMsg("Orchestrator", prompt)))
+            # Use reply_stream to capture real runtime events (trace evidence)
+            runtime_events: list[dict[str, Any]] = []
+            runtime_reply_id: str | None = None
+            runtime_session_id: str | None = None
+            final_message = None
 
-            # Extract text — reply.content may be a list of TextBlock objects
+            async def _run_with_events():
+                nonlocal runtime_reply_id, runtime_session_id, final_message
+                stream = agent.reply_stream(UserMsg("Orchestrator", prompt), yield_final_msg=True)
+                async for evt in stream:
+                    if hasattr(evt, "type"):
+                        event_type = getattr(evt, "type", None)
+                        record = {
+                            "type": str(event_type),
+                            "reply_id": getattr(evt, "reply_id", None),
+                            "created_at": getattr(evt, "created_at", None),
+                        }
+                        if event_type == "MODEL_CALL_END":
+                            record["input_tokens"] = getattr(evt, "input_tokens", None)
+                            record["output_tokens"] = getattr(evt, "output_tokens", None)
+                            record["finished_reason"] = getattr(evt, "finished_reason", None)
+                        elif event_type == "REPLY_START":
+                            runtime_reply_id = getattr(evt, "reply_id", None)
+                            runtime_session_id = getattr(evt, "session_id", None)
+                        elif event_type == "REPLY_END":
+                            record["finished_reason"] = getattr(evt, "finished_reason", None)
+                            record["error"] = getattr(evt, "error", None)
+                        runtime_events.append(record)
+                    else:
+                        # Final message (Msg) when yield_final_msg=True
+                        final_message = evt
+
+            asyncio.run(_run_with_events())
+
+            # Extract text from final message
             raw_text = ""
-            content = getattr(reply, "content", None)
-            if content is not None:
-                if isinstance(content, list):
-                    raw_text = "\n".join(
-                        getattr(block, "text", str(block))
-                        for block in content
-                    )
-                else:
-                    raw_text = str(content)
-            elif hasattr(reply, "text"):
-                raw_text = str(reply.text)
-            else:
-                raw_text = str(reply)
+            if final_message is not None:
+                content = getattr(final_message, "content", None)
+                if content is not None:
+                    if isinstance(content, list):
+                        raw_text = "\n".join(
+                            getattr(block, "text", str(block))
+                            for block in content
+                        )
+                    else:
+                        raw_text = str(content)
+                elif hasattr(final_message, "text"):
+                    raw_text = str(final_message.text)
 
-            # ── Failure detection ────────────────────────────────────
+            # ── Failure detection (text-level) ────────────────────────
             failure = _detect_failure(raw_text)
+
+            # ── Failure detection (runtime event-level) ───────────────
+            if failure is None:
+                for evt in runtime_events:
+                    if evt["type"] == "EXCEED_MAX_ITERS":
+                        failure = "iteration_exhausted"
+                        break
+                    if evt["type"] == "REPLY_END" and evt.get("error"):
+                        failure = f"runtime_error: {evt['error']}"
+                        break
+
+            base_result = {
+                "agent": agent_key, "case_id": case_id,
+                "devloop_task_id": devloop_task_id,
+                "devloop_trace_id": devloop_trace_id,
+                "team_id": self._team["team_id"] if self._team else "",
+                "runtime_reply_id": runtime_reply_id,
+                "runtime_session_id": runtime_session_id,
+                # Summary of runtime events (full list kept in evidence)
+                "runtime_event_count": len(runtime_events),
+                "runtime_event_types": [e["type"] for e in runtime_events],
+            }
+
             if failure:
                 result = {
-                    "agent": agent_key, "case_id": case_id,
-                    "task_id": task_id, "trace_id": trace_id,
-                    "team_id": self._team["team_id"] if self._team else "",
+                    **base_result,
                     "status": "failed",
                     "failure_reason": failure,
                     "raw_text": raw_text[:2000],
@@ -300,26 +414,45 @@ class AgentTeamsAdapter:
                      time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
                 )
             else:
-                # ── Try structured JSON extraction ──────────────────
+                # ── Structured JSON extraction + validation ──────────
                 structured = _extract_json_block(raw_text)
-                result = {
-                    "agent": agent_key, "case_id": case_id,
-                    "task_id": task_id, "trace_id": trace_id,
-                    "team_id": self._team["team_id"] if self._team else "",
-                    "status": "completed",
-                    "structured_output": structured,
-                    "result_summary": raw_text[:500],
-                    "raw_text": raw_text[:4000],
-                }
-                self._store.connection.execute(
-                    "UPDATE agent_runs SET status = 'completed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                    (json.dumps(result, ensure_ascii=False),
-                     time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-                )
+                validation_error = _validate_structured(agent_key, structured)
+                if validation_error:
+                    result = {
+                        **base_result,
+                        "status": "failed",
+                        "failure_reason": f"invalid_structured_output: {validation_error}",
+                        "raw_text": raw_text[:2000],
+                    }
+                    self._store.connection.execute(
+                        "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
+                        (json.dumps(result, ensure_ascii=False),
+                         time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
+                    )
+                else:
+                    # Promote schema fields to top level for the orchestrator
+                    promoted: dict[str, Any] = {}
+                    for field in _TOP_LEVEL_FIELDS.get(agent_key, ()):
+                        if field in structured:
+                            promoted[field] = structured[field]
+                    result = {
+                        **base_result,
+                        "status": "completed",
+                        "structured_output": structured,
+                        **promoted,
+                        "result_summary": raw_text[:500],
+                        "raw_text": raw_text[:4000],
+                    }
+                    self._store.connection.execute(
+                        "UPDATE agent_runs SET status = 'completed', output_ref = ?, finished_at = ? WHERE run_id = ?",
+                        (json.dumps(result, ensure_ascii=False),
+                         time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
+                    )
         except Exception as exc:
             result = {
                 "agent": agent_key, "case_id": case_id,
-                "task_id": task_id, "trace_id": trace_id,
+                "devloop_task_id": devloop_task_id,
+                "devloop_trace_id": devloop_trace_id,
                 "team_id": self._team["team_id"] if self._team else "",
                 "status": "failed",
                 "failure_reason": f"exception: {exc}",
@@ -392,7 +525,12 @@ class AgentTeamsAdapter:
     # ── Trace export ────────────────────────────────────────────────────
 
     def export_trace(self, case_id: str) -> dict[str, Any]:
-        """Export Team / Task / Trace evidence for a Case."""
+        """Export Team / Task / Trace evidence for a Case.
+
+        Note: 'team_id' and 'devloop_task_id' are application-layer
+        mapping IDs.  Runtime-native evidence is captured in
+        agent_runs.output_ref (runtime_events, runtime_reply_id).
+        """
         agent_runs = self._store.connection.execute(
             "SELECT * FROM agent_runs WHERE case_id = ? ORDER BY started_at",
             (case_id,),
@@ -403,4 +541,10 @@ class AgentTeamsAdapter:
             "team": self._team,
             "agent_runs": [dict(r) for r in agent_runs],
             "mode": self._mode,
+            "note": (
+                "team_id / devloop_task_id / devloop_trace_id are application-layer "
+                "mapping IDs. Runtime-native evidence lives in agent_runs.output_ref: "
+                "runtime_reply_id, runtime_session_id, runtime_events (MODEL_CALL_*, "
+                "TOOL_CALL_*, REPLY_END, EXCEED_MAX_ITERS)."
+            ),
         }

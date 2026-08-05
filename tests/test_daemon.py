@@ -1161,6 +1161,72 @@ class DevLoopChainSequenceTests(unittest.TestCase):
             store.close()
 
 
+class DevLoopStructuredValidationTests(unittest.TestCase):
+    """Production adapter output validation — JSON extraction + schema checks."""
+
+    def test_invalid_structured_output_marked_failed(self) -> None:
+        """JSON missing/invalid must produce status='failed' with
+        failure_reason='invalid_structured_output'."""
+        from agent_runtime.teams_adapter import _validate_structured
+        # No output at all
+        err = _validate_structured("triage", None)
+        self.assertIsNotNone(err)
+        self.assertIn("missing", err)
+
+    def test_missing_required_field_detected(self) -> None:
+        from agent_runtime.teams_adapter import _validate_structured
+        err = _validate_structured("repair", {"action": "patched"})
+        self.assertIsNotNone(err)
+        self.assertIn("patch_ref", err)
+
+    def test_wrong_type_detected(self) -> None:
+        from agent_runtime.teams_adapter import _validate_structured
+        # quality_gate_passed must be bool, not string
+        err = _validate_structured("verification", {
+            "action": "verified",
+            "quality_gate_passed": "yes",
+        })
+        self.assertIsNotNone(err)
+        self.assertIn("quality_gate_passed", err)
+
+    def test_valid_structured_passes(self) -> None:
+        from agent_runtime.teams_adapter import _validate_structured
+        err = _validate_structured("triage", {
+            "action": "triage",
+            "priority": "high",
+            "confidence": 0.85,
+        })
+        self.assertIsNone(err)
+
+    def test_boolean_from_zero_one_accepted(self) -> None:
+        """LLM may output 0/1 for booleans — treat as acceptable."""
+        from agent_runtime.teams_adapter import _validate_structured
+        err = _validate_structured("verification", {
+            "action": "verified",
+            "quality_gate_passed": 0,
+        })
+        self.assertIsNone(err, f"0 should be accepted as boolean: {err}")
+
+    def test_top_level_fields_promoted(self) -> None:
+        """Verify that schema fields are promoted to result top level
+        (simulating what the orchestrator reads)."""
+        from agent_runtime.teams_adapter import _validate_structured, _TOP_LEVEL_FIELDS
+
+        structured = {
+            "action": "patched",
+            "patch_ref": "abc123def",
+            "branch": "fix/keyerror",
+            "files_changed": ["src/config.py"],
+        }
+        err = _validate_structured("repair", structured)
+        self.assertIsNone(err)
+        promoted = {}
+        for field in _TOP_LEVEL_FIELDS.get("repair", ()):
+            if field in structured:
+                promoted[field] = structured[field]
+        self.assertEqual(promoted["patch_ref"], "abc123def")
+
+
 class DevLoopFingerprintTests(unittest.TestCase):
     def test_delivery_id_reuses_nonce_on_retry(self) -> None:
         from daemon.store import compute_delivery_id

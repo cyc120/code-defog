@@ -111,10 +111,20 @@ def create_devloop_team() -> dict[str, Any]:
         ),
     }
 
+    # NOTE: these are APPLICATION-LAYER mapping IDs, not runtime-native
+    # identifiers.  Real runtime identifiers (reply_id, session_id) and the
+    # event stream (MODEL_CALL_*, REPLY_END, EXCEED_MAX_ITERS) are captured
+    # by the Production Adapter via AgentScope reply_stream.
     team_id = f"team-{uuid.uuid4().hex[:12]}"
     return {
         "team_id": team_id,
         "created_at": utc_now(),
+        "id_provenance": (
+            "team_id / agent_id are application-layer mapping IDs created "
+            "locally. Runtime-native identifiers (runtime_reply_id, "
+            "runtime_session_id) and the event stream are captured by the "
+            "Production Adapter via AgentScope reply_stream."
+        ),
         "agents": {
             role: {
                 "agent_id": f"{role}-{uuid.uuid4().hex[:8]}",
@@ -136,20 +146,25 @@ def create_devloop_team() -> dict[str, Any]:
 def submit_task(team: dict[str, Any], case_context: dict[str, Any]) -> dict[str, Any]:
     """Submit a Case task to the Team and capture task metadata.
 
-    In a full AgentScope deployment this would use the Task API or
-    Agent.reply() to delegate work.  The smoke test captures the
-    structural mapping that the Production Adapter will use.
+    The task/trace IDs returned here are application-layer mapping IDs.
+    Runtime-native trace evidence is captured separately by the Production
+    Adapter (runtime_reply_id, runtime_events from reply_stream).
     """
-    task_id = f"task-{uuid.uuid4().hex[:12]}"
-    trace_id = f"trace-{uuid.uuid4().hex[:16]}"
+    task_id = f"devtask-{uuid.uuid4().hex[:12]}"
+    trace_id = f"devtrace-{uuid.uuid4().hex[:16]}"
 
     return {
-        "task_id": task_id,
-        "trace_id": trace_id,
+        "devloop_task_id": task_id,
+        "devloop_trace_id": trace_id,
         "team_id": team["team_id"],
         "case_id": case_context.get("case_id", ""),
         "status": case_context.get("status", "RECEIVED"),
         "submitted_at": utc_now(),
+        "id_provenance": (
+            "devloop_task_id / devloop_trace_id are application-layer mapping "
+            "IDs. They correlate DevLoop state machine events with the runtime "
+            "evidence captured by the Production Adapter."
+        ),
         "agent_assignments": {
             "TRIAGED": team["agents"]["triage"]["agent_id"],
             "DIAGNOSED": team["agents"]["diagnosis"]["agent_id"],
@@ -196,9 +211,11 @@ def main() -> int:
     # ── Step 3: Submit Task ───────────────────────────────────────────
     print("\n[3/4] Submitting Task to Team...")
     task = submit_task(team, case_ctx)
-    print(f"  task_id:  {task['task_id']}")
-    print(f"  trace_id: {task['trace_id']}")
-    print(f"  team_id:  {task['team_id']}")
+    print(f"  devloop_task_id:  {task['devloop_task_id']}")
+    print(f"  devloop_trace_id: {task['devloop_trace_id']}")
+    print(f"  team_id:          {task['team_id']}")
+    print("  (These are application-layer mapping IDs — runtime-native")
+    print("   identifiers are captured by the Production Adapter.)")
 
     save_evidence("smoke_test_task.json", task)
 
@@ -223,10 +240,12 @@ def main() -> int:
 
     print("\n" + "=" * 60)
     print("SMOKE TEST PASSED")
-    print(f"  Team:  {team['team_id']}")
-    print(f"  Task:  {task['task_id']}")
-    print(f"  Trace: {task['trace_id']}")
+    print(f"  Team:  {team['team_id']}  (application-layer mapping ID)")
+    print(f"  Task:  {task['devloop_task_id']}  (application-layer mapping ID)")
+    print(f"  Trace: {task['devloop_trace_id']}  (application-layer mapping ID)")
     print(f"  Evidence saved to: {_REPO_ROOT / 'evidence'}")
+    print("  NOTE: runtime-native identifiers (runtime_reply_id, session_id)")
+    print("  and the event stream are captured by the Production Adapter.")
     print("=" * 60)
     return 0
 

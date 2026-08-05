@@ -27,10 +27,14 @@ class CodeCCTVServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
-    def __init__(self, address: tuple[str, int], token: str, store: StateStore) -> None:
+    def __init__(
+        self, address: tuple[str, int], token: str, store: StateStore,
+        orchestrator: Any | None = None,
+    ) -> None:
         super().__init__(address, CodeCCTVHandler)
         self.token = token
         self.store = store
+        self.orchestrator = orchestrator
         self.started_at = time.monotonic()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscriber_lock = Lock()
@@ -337,6 +341,17 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             if "error" in result:
                 self.send_json({"error": result["error"]}, result.get("status", 400))
                 return
+            if action == "approve_plan" and self.server.orchestrator is not None:
+                # Approval is fully consumed before any agent is resumed. A
+                # repair therefore never runs with a service/API token alone.
+                try:
+                    resumed = self.server.orchestrator.run_active_state(case_id)
+                except Exception:
+                    resumed = {"error": "approved workflow could not be resumed"}
+                if isinstance(resumed, dict) and "error" not in resumed:
+                    result = resumed
+                elif isinstance(resumed, dict):
+                    result = {**result, "workflow_error": resumed["error"]}
             self.send_json({"ok": True, "case": result})
             return
 

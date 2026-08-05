@@ -26,6 +26,7 @@ class CaseContext:
     impact_scope: str = ""
     remediation_plan: str = ""
     patch_ref: str = ""
+    sandbox_ref: str = ""
     test_reports: list[dict[str, Any]] = field(default_factory=list)
     release_report: dict[str, Any] = field(default_factory=dict)
     approval_refs: list[str] = field(default_factory=list)

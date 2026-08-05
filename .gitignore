@@ -7,3 +7,6 @@ AI_WORKLOG.md
 build/
 dist/
 evidence/production_dispatch*.json
+evidence/artifacts/
+evidence/*.sqlite3
+evidence/runtime_*.json

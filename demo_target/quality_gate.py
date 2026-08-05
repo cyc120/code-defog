@@ -11,6 +11,7 @@ Used by the Verification Agent to decide RELEASE_APPROVAL vs PATCH_REJECTED.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +62,8 @@ def main() -> int:
         mode="w", suffix=".json", delete=False,
     ) as tf:
         json.dump({"projects": ["a", "b"]}, tf)
+        tf.flush()
+        os.fsync(tf.fileno())
         partial_path = tf.name
     try:
         result = run_cli(cli_dir, partial_path, "--list")

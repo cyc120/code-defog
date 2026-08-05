@@ -11,6 +11,7 @@ Responsibilities (not an Agent itself — see framework Section 5.1):
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .state_machine import (
@@ -30,6 +31,62 @@ class Orchestrator:
         self.store = store
         self.teams = teams_adapter
 
+    def _build_agent_context(self, case_id: str, case: dict[str, Any]) -> dict[str, Any]:
+        """Hydrate the canonical CaseContext with persisted source evidence."""
+        context = CaseContext.from_dict(case)
+        evidence = self.store.get_case_evidence(case_id) or {}
+        source_events: list[dict[str, Any]] = []
+        normalized_symptoms: list[str] = []
+
+        for source in evidence.get("sources", []):
+            try:
+                signals = json.loads(source.get("extracted_signals_json", "{}"))
+            except (TypeError, json.JSONDecodeError):
+                signals = {}
+            if not isinstance(signals, dict):
+                signals = {}
+
+            exception_type = signals.get("exception_type")
+            message_pattern = signals.get("message_pattern")
+            if exception_type or message_pattern:
+                normalized_symptoms.append(
+                    ": ".join(part for part in (exception_type, message_pattern) if part)
+                )
+            source_events.append({
+                "observation_id": source.get("observation_id"),
+                "source_type": source.get("source_type"),
+                "source_uri": source.get("source_uri"),
+                "received_at": source.get("received_at"),
+                "content_hash": source.get("content_hash"),
+                "signals": signals,
+            })
+
+        context.source_events = source_events
+        context.normalized_symptoms = normalized_symptoms
+        context.evidence_refs = [
+            artifact["uri"] for artifact in evidence.get("artifacts", [])
+            if artifact.get("uri")
+        ]
+        context_dict = context.to_dict()
+        # Repair execution is opt-in and carried as persisted source evidence.
+        # A path by itself must never enable a mutating tool.
+        for source in source_events:
+            repair_mode = source["signals"].get("repair_mode")
+            if repair_mode:
+                context_dict["repair_mode"] = repair_mode
+                break
+        return context_dict
+
+    def run_active_state(self, case_id: str) -> dict[str, Any] | None:
+        """Resume the Agent assigned to a Case after an external approval."""
+        case = self.store.get_case(case_id)
+        if case is None:
+            return None
+        state = case["status"]
+        if state not in AGENT_ACTIVE_STATES:
+            return {"error": f"case is not in an active Agent state: {state}"}
+        return self.advance(case_id, state)
+
     def advance(self, case_id: str, target_state: str) -> dict[str, Any] | None:
         """Advance a Case to *target_state* if the transition is valid.
 
@@ -40,17 +97,21 @@ class Orchestrator:
         if case is None:
             return None
         current = case["status"]
-        if not is_valid_transition(current, target_state):
-            return {"error": f"invalid transition: {current} -> {target_state}"}
-
-        pending = pending_action_for_state(target_state)
-        result = self.store.transition_case(case_id, target_state, pending)
-        if result is None:
-            return None
+        if current == target_state and target_state in AGENT_ACTIVE_STATES:
+            # An approval moves the Case into REPAIRING in the StateStore.
+            # Resume that active state without inventing a self-transition.
+            result = case
+        else:
+            if not is_valid_transition(current, target_state):
+                return {"error": f"invalid transition: {current} -> {target_state}"}
+            pending = pending_action_for_state(target_state)
+            result = self.store.transition_case(case_id, target_state, pending)
+            if result is None:
+                return None
 
         # If this state requires Agent work, dispatch and handle result
         if target_state in AGENT_ACTIVE_STATES and self.teams:
-            ctx_dict = result if isinstance(result, dict) else {}
+            ctx_dict = self._build_agent_context(case_id, result)
             agent_result = self.teams.dispatch_task(case_id, target_state, ctx_dict)
 
             # Only consume results from a successfully completed Agent run.
@@ -65,11 +126,14 @@ class Orchestrator:
             if target_state == "REPAIRING" and completed:
                 patch_ref = agent_result.get("patch_ref", "")
                 if patch_ref:
-                    self.store.connection.execute(
-                        "UPDATE cases SET patch_ref = ? WHERE case_id = ?",
-                        (patch_ref, case_id),
+                    self.store.set_patch_context(
+                        case_id,
+                        patch_ref,
+                        agent_result.get("sandbox_repository_ref", ""),
                     )
-                    self.store.connection.commit()
+                    # The repair result owns the next state. Verification will
+                    # receive the persisted sandbox_ref, not the source path.
+                    return self.advance(case_id, "VERIFYING")
 
             # ── Verification gate: drive next transition ──────────────
             if target_state == "VERIFYING" and isinstance(agent_result, dict):

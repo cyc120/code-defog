@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import shutil
 import sqlite3
 import tempfile
 import threading
@@ -952,6 +953,75 @@ class DevLoopEvidenceTests(unittest.TestCase):
             self.assertNotEqual(evidence["tool_runs"][0]["chain_hash"], "")
             store.close()
 
+    def test_artifact_content_is_persisted_and_hash_checked(self) -> None:
+        """Artifact bytes must be readable from the URI recorded in SQLite."""
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory)
+            store = StateStore(data_dir / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "ci", "source_uri": "test-artifact",
+                "client_nonce": "nonce-artifact-1", "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"], "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            content = b'[{"type":"REPLY_END","reply_id":"reply-1"}]'
+            artifact_id = store.record_artifact(
+                result["case_id"], "runtime_events", "runtime_events/run.json", content,
+            )
+            evidence = store.get_case_evidence(result["case_id"])
+            artifact = evidence["artifacts"][0]
+            stored_path = data_dir / artifact["uri"]
+            self.assertTrue(stored_path.is_file())
+            self.assertEqual(stored_path.read_bytes(), content)
+            self.assertEqual(store.read_artifact(artifact_id), content)
+
+            stored_path.write_bytes(b"tampered")
+            with self.assertRaisesRegex(ValueError, "hash verification"):
+                store.read_artifact(artifact_id)
+            store.close()
+
+
+class DevLoopAgentContextTests(unittest.TestCase):
+    def test_orchestrator_hydrates_sources_before_agent_dispatch(self) -> None:
+        """Agents receive normalized source signals, not only a Case summary."""
+        from agent_runtime.orchestrator import Orchestrator
+
+        class CapturingTeams:
+            def __init__(self) -> None:
+                self.context: dict | None = None
+
+            def dispatch_task(self, case_id: str, state: str, context: dict) -> dict:
+                self.context = context
+                return {"status": "completed", "action": "triaged"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "test-context",
+                "client_nonce": "nonce-context-1", "raw_content": "KeyError observed",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "missing projects key",
+                    "key_frames": ["demo/cli.py:25"],
+                    "keywords": ["projects"], "repository_ref": "/test",
+                },
+            })
+            teams = CapturingTeams()
+            transitioned = Orchestrator(store, teams).advance(result["case_id"], "TRIAGED")
+
+            self.assertEqual(transitioned["status"], "TRIAGED")
+            self.assertIsNotNone(teams.context)
+            source = teams.context["source_events"][0]
+            self.assertEqual(source["signals"]["exception_type"], "KeyError")
+            self.assertEqual(source["signals"]["message_pattern"], "missing projects key")
+            self.assertIn("KeyError: missing projects key", teams.context["normalized_symptoms"])
+            store.close()
+
 
 class DevLoopEndToEndReleaseTests(unittest.TestCase):
     """Full path: Repair → patch_ref persisted → gate pass → RELEASE_APPROVAL → grant."""
@@ -1051,6 +1121,152 @@ class DevLoopEndToEndReleaseTests(unittest.TestCase):
             store.transition_case(case_id, "ESCALATED")
             c = store.get_case(case_id)
             self.assertEqual(c["status"], "ESCALATED")
+            store.close()
+
+
+class ControlledRepairWorkflowTests(unittest.TestCase):
+    """P3 demo workflow: isolated repair, audited gate, deterministic outcome."""
+
+    demo_target = Path(__file__).resolve().parents[1] / "demo_target"
+
+    def test_legacy_case_schema_is_migrated_with_sandbox_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.execute("""
+                CREATE TABLE cases (
+                    case_id TEXT PRIMARY KEY, incident_signature TEXT,
+                    status TEXT NOT NULL DEFAULT 'RECEIVED',
+                    priority TEXT NOT NULL DEFAULT 'medium',
+                    risk_level TEXT NOT NULL DEFAULT 'low',
+                    repository_ref TEXT NOT NULL DEFAULT '', base_commit TEXT,
+                    patch_ref TEXT, pending_action TEXT, trace_id TEXT, title TEXT,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, closed_at TEXT
+                )
+            """)
+            connection.commit()
+            connection.close()
+
+            store = StateStore(database)
+            columns = {
+                row[1] for row in store.connection.execute("PRAGMA table_info(cases)").fetchall()
+            }
+            self.assertIn("sandbox_ref", columns)
+            store.close()
+
+    def _create_case(self, store: StateStore, nonce: str) -> str:
+        result = store.create_or_find_case({
+            "source_type": "issue",
+            "source_uri": f"controlled-repair-{nonce}",
+            "client_nonce": nonce,
+            "raw_content": "KeyError: missing projects key",
+            "repository_ref": str(self.demo_target),
+            "extracted_signals": {
+                "exception_type": "KeyError",
+                "message_pattern": "missing projects key",
+                "key_frames": ["demo_target/cli.py:25"],
+                "keywords": ["projects"],
+                "repository_ref": str(self.demo_target),
+                "repair_mode": "demo_sandbox",
+            },
+        })
+        return result["case_id"]
+
+    def _approve_plan(self, store: StateStore, case_id: str, orchestrator: object) -> None:
+        orchestrator.advance(case_id, "TRIAGED")
+        orchestrator.advance(case_id, "DIAGNOSED")
+        store.connection.execute(
+            "UPDATE cases SET base_commit = 'demo-base-1' WHERE case_id = ?", (case_id,)
+        )
+        store.connection.commit()
+        orchestrator.advance(case_id, "PLAN_APPROVAL")
+        grant = store.issue_approval_grant(case_id, "approve_plan", "demo-base-1", "reviewer")
+        result = store.perform_case_action(case_id, "approve_plan", {
+            "approval_token": grant["approval_token"],
+            "target_ref": "demo-base-1",
+            "reason": "approved for isolated demo repair",
+            "approver": "reviewer",
+        })
+        self.assertEqual(result["status"], "REPAIRING")
+
+    def test_case_a_repair_uses_sandbox_and_reaches_release_approval(self) -> None:
+        from agent_runtime.orchestrator import Orchestrator
+        from agent_runtime.teams_adapter import AgentTeamsAdapter
+
+        source_before = (self.demo_target / "cli.py").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            case_id = self._create_case(store, "controlled-case-a")
+            orchestrator = Orchestrator(store, AgentTeamsAdapter(store))
+            self._approve_plan(store, case_id, orchestrator)
+
+            result = orchestrator.run_active_state(case_id)
+            self.assertEqual(result["status"], "RELEASE_APPROVAL")
+            case = store.get_case(case_id)
+            self.assertTrue(case["patch_ref"].startswith("patch-"))
+            sandbox = Path(case["sandbox_ref"])
+            self.assertTrue(sandbox.is_dir())
+            self.assertIn('config.get("projects", [])', (sandbox / "cli.py").read_text(encoding="utf-8"))
+            self.assertEqual(source_before, (self.demo_target / "cli.py").read_bytes())
+
+            evidence = store.get_case_evidence(case_id)
+            self.assertEqual(
+                [run["tool_name"] for run in evidence["tool_runs"]],
+                ["sandbox_copy", "apply_case_a_patch", "quality_gate"],
+            )
+            self.assertEqual(
+                [run["chain_sequence"] for run in evidence["tool_runs"]], [1, 2, 3]
+            )
+            for run in evidence["tool_runs"]:
+                self.assertEqual(len(run["input_sha256"]), 64)
+                self.assertEqual(len(run["output_sha256"]), 64)
+                self.assertTrue(run["actual_argv"])
+                self.assertEqual(run["exit_code"], 0)
+            kinds = {artifact["kind"] for artifact in evidence["artifacts"]}
+            self.assertEqual(kinds, {"patch_metadata", "quality_gate_report"})
+            for artifact in evidence["artifacts"]:
+                self.assertTrue(artifact["uri"].startswith(f"artifacts/{case_id}/"))
+                self.assertIsNotNone(store.read_artifact(artifact["artifact_id"]))
+            store.close()
+
+    def test_case_b_wrong_patch_is_rejected_by_deterministic_gate(self) -> None:
+        from agent_runtime.orchestrator import Orchestrator
+        from agent_runtime.teams_adapter import AgentTeamsAdapter
+
+        source_before = (self.demo_target / "cli.py").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            case_id = self._create_case(store, "controlled-case-b")
+            orchestrator = Orchestrator(store, AgentTeamsAdapter(store))
+            self._approve_plan(store, case_id, orchestrator)
+
+            sandbox = Path(directory) / "wrong-patch-sandbox"
+            shutil.copytree(self.demo_target, sandbox, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            wrong_cli = sandbox / "cli.py"
+            wrong_text = wrong_cli.read_text(encoding="utf-8")
+            wrong_text = wrong_text.replace(
+                '"projects": config["projects"]', '"projects": config.get("projects", [])'
+            )
+            wrong_text = wrong_text.replace(
+                '"required_field": config["required_field"]',
+                '"required_field": config.get("required_field")',
+            )
+            wrong_text = wrong_text.replace(
+                '    if "required_field" not in config or not config["required_field"]:\n'
+                '        raise ConfigError("required_field is missing or empty")',
+                "    return None",
+            )
+            wrong_cli.write_text(wrong_text, encoding="utf-8", newline="\n")
+            store.set_patch_context(case_id, "patch-case-b-wrong", str(sandbox))
+
+            result = orchestrator.advance(case_id, "VERIFYING")
+            self.assertEqual(result["status"], "PATCH_REJECTED")
+            self.assertEqual(source_before, (self.demo_target / "cli.py").read_bytes())
+            evidence = store.get_case_evidence(case_id)
+            self.assertEqual(len(evidence["tool_runs"]), 1)
+            self.assertEqual(evidence["tool_runs"][0]["tool_name"], "quality_gate")
+            self.assertEqual(evidence["tool_runs"][0]["exit_code"], 1)
+            self.assertEqual(evidence["artifacts"][0]["kind"], "quality_gate_report")
             store.close()
 
 
@@ -1259,11 +1475,13 @@ class DevLoopFingerprintTests(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _start_server(store: StateStore) -> tuple[CodeCCTVServer, str, str]:
+def _start_server(
+    store: StateStore, orchestrator: object | None = None,
+) -> tuple[CodeCCTVServer, str, str]:
     """Start the daemon on a random port and return (server, base_url, token)."""
     port = 0
     token = secrets.token_hex(16)
-    server = CodeCCTVServer(("127.0.0.1", port), token, store)
+    server = CodeCCTVServer(("127.0.0.1", port), token, store, orchestrator)
     actual_port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1271,6 +1489,77 @@ def _start_server(store: StateStore) -> tuple[CodeCCTVServer, str, str]:
 
 
 class DevLoopHTTPIntegrationTests(unittest.TestCase):
+    def test_approved_plan_resumes_controlled_repair_workflow(self) -> None:
+        """A valid HTTP plan approval resumes Repair and Verification once."""
+        from agent_runtime.orchestrator import Orchestrator
+        from agent_runtime.teams_adapter import AgentTeamsAdapter
+
+        demo_target = Path(__file__).resolve().parents[1] / "demo_target"
+        source_before = (demo_target / "cli.py").read_bytes()
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            orchestrator = Orchestrator(store, AgentTeamsAdapter(store))
+            server, base_url, _token = _start_server(store, orchestrator)
+            try:
+                created = store.create_or_find_case({
+                    "source_type": "issue",
+                    "source_uri": "http-controlled-repair",
+                    "client_nonce": "nonce-http-controlled-repair",
+                    "raw_content": "KeyError: missing projects key",
+                    "repository_ref": str(demo_target),
+                    "extracted_signals": {
+                        "exception_type": "KeyError",
+                        "message_pattern": "missing projects key",
+                        "key_frames": ["demo_target/cli.py:25"],
+                        "keywords": ["projects"],
+                        "repository_ref": str(demo_target),
+                        "repair_mode": "demo_sandbox",
+                    },
+                })
+                case_id = created["case_id"]
+                orchestrator.advance(case_id, "TRIAGED")
+                orchestrator.advance(case_id, "DIAGNOSED")
+                store.connection.execute(
+                    "UPDATE cases SET base_commit = 'http-demo-base' WHERE case_id = ?", (case_id,)
+                )
+                store.connection.commit()
+                orchestrator.advance(case_id, "PLAN_APPROVAL")
+                grant = store.issue_approval_grant(
+                    case_id, "approve_plan", "http-demo-base", "reviewer"
+                )
+
+                request = Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=json.dumps({
+                        "action": "approve_plan",
+                        "approval_token": grant["approval_token"],
+                        "target_ref": "http-demo-base",
+                        "reason": "approved for controlled repair",
+                    }).encode(),
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": grant["approval_token"],
+                        "X-Code-CCTV-Token-Type": "approval",
+                    },
+                )
+                with urlopen(request, timeout=10) as response:
+                    body = json.loads(response.read())
+
+                self.assertTrue(body["ok"])
+                self.assertEqual(body["case"]["status"], "RELEASE_APPROVAL")
+                self.assertEqual(store.get_case(case_id)["status"], "RELEASE_APPROVAL")
+                self.assertEqual(source_before, (demo_target / "cli.py").read_bytes())
+                evidence = store.get_case_evidence(case_id)
+                self.assertEqual(
+                    [run["tool_name"] for run in evidence["tool_runs"]],
+                    ["sandbox_copy", "apply_case_a_patch", "quality_gate"],
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                store.close()
+
     def test_service_token_cannot_transition_case(self) -> None:
         """Arbitrary state transitions are NOT exposed via HTTP.
         Only approve_plan/reject_plan/approve_release/reject_release/cancel

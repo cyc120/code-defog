@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import sqlite3
 import sys
@@ -100,6 +101,7 @@ class StateStore:
     def __init__(self, path: Path, retention: int = DEFAULT_RETENTION) -> None:
         self.path = path.expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.artifact_root = self.path.parent / "artifacts"
         self.retention = max(retention, 100)
         self._ingests_since_prune = 0
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
@@ -161,6 +163,7 @@ class StateStore:
                 repository_ref TEXT NOT NULL DEFAULT '',
                 base_commit TEXT,
                 patch_ref TEXT,
+                sandbox_ref TEXT,
                 pending_action TEXT,
                 trace_id TEXT,
                 title TEXT,
@@ -298,6 +301,7 @@ class StateStore:
         needs_name_column = not needs_project_rebuild and "conversation_name" not in project_columns
         tool_run_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(tool_runs)").fetchall()}
         needs_patch_ref = "patch_ref" not in case_columns if case_columns else False
+        needs_sandbox_ref = "sandbox_ref" not in case_columns if case_columns else False
         needs_chain_sequence = "chain_sequence" not in tool_run_cols if tool_run_cols else False
 
         if needs_event_column or needs_project_rebuild or needs_name_column:
@@ -338,6 +342,8 @@ class StateStore:
         # DevLoop schema migrations
         if needs_patch_ref:
             self.connection.execute("ALTER TABLE cases ADD COLUMN patch_ref TEXT")
+        if needs_sandbox_ref:
+            self.connection.execute("ALTER TABLE cases ADD COLUMN sandbox_ref TEXT")
         if needs_chain_sequence:
             self.connection.execute("ALTER TABLE tool_runs ADD COLUMN chain_sequence INTEGER NOT NULL DEFAULT 0")
             self.connection.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_sequence ON tool_runs(case_id, chain_sequence)")
@@ -580,6 +586,7 @@ class StateStore:
             "exception_type": exception_type, "message_pattern": message_pattern,
             "key_frames": key_frames, "keywords": keywords,
             "repository_ref": repository_ref,
+            "repair_mode": clean_text(signals_raw.get("repair_mode"), 80),
         }, ensure_ascii=False)
 
         # ── Step 3: find or create Case ──────────────────────────────────
@@ -938,6 +945,16 @@ class StateStore:
 
     # ── DevLoop: evidence / tool runs ──────────────────────────────────────
 
+    def set_patch_context(self, case_id: str, patch_ref: str, sandbox_ref: str) -> dict[str, Any] | None:
+        """Persist the patch identity and its isolated workspace reference."""
+        with self.lock:
+            self.connection.execute(
+                "UPDATE cases SET patch_ref = ?, sandbox_ref = ?, updated_at = ? WHERE case_id = ?",
+                (clean_text(patch_ref, 200), clean_text(sandbox_ref, 1000), utc_now(), case_id),
+            )
+            self.connection.commit()
+            return self._case_dict(case_id)
+
     def record_tool_run(self, payload: dict[str, Any]) -> str:
         """Insert a COMPLETE immutable tool run record in one atomic write.
 
@@ -1005,16 +1022,84 @@ class StateStore:
             self.connection.commit()
             return run_id
 
+    def _artifact_target(self, artifact_id: str, case_id: str, suggested_uri: str) -> tuple[str, Path]:
+        """Return a Store-controlled relative URI and its absolute target path."""
+        safe_case_id = "".join(
+            char if char.isalnum() or char in "-_" else "_" for char in case_id
+        )[:80] or "unknown-case"
+        suffix = Path(clean_text(suggested_uri, 240)).suffix.lower()
+        if not suffix or len(suffix) > 16 or not suffix[1:].isalnum():
+            suffix = ".bin"
+        relative_path = Path("artifacts") / safe_case_id / f"{artifact_id}{suffix}"
+        return relative_path.as_posix(), self.path.parent / relative_path
+
     def record_artifact(self, case_id: str, kind: str, uri: str, file_content: bytes) -> str:
+        """Persist artifact bytes atomically and record a hash-checked reference.
+
+        ``uri`` is a suggested extension/name only. The Store generates the
+        final relative URI to prevent callers from escaping its data directory.
+        """
+        if not isinstance(file_content, (bytes, bytearray)):
+            raise TypeError("file_content must be bytes")
+
         artifact_id = f"art-{uuid.uuid4().hex[:12]}"
-        art_sha256 = hashlib.sha256(file_content).hexdigest()
+        content = bytes(file_content)
+        art_sha256 = hashlib.sha256(content).hexdigest()
+        stored_uri, target_path = self._artifact_target(artifact_id, case_id, uri)
+        temporary_path = target_path.with_name(
+            f".{target_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+
         with self.lock:
-            self.connection.execute(
-                "INSERT INTO artifacts (artifact_id, case_id, kind, uri, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (artifact_id, case_id, kind, uri, art_sha256, utc_now()),
-            )
-            self.connection.commit()
-            return artifact_id
+            try:
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(temporary_path, "xb") as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if sys.platform != "win32":
+                    temporary_path.chmod(0o600)
+                os.replace(temporary_path, target_path)
+
+                # Verify the final bytes before their database reference commits.
+                if hashlib.sha256(target_path.read_bytes()).hexdigest() != art_sha256:
+                    raise OSError("artifact hash mismatch after write")
+
+                self.connection.execute(
+                    "INSERT INTO artifacts (artifact_id, case_id, kind, uri, sha256, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (artifact_id, case_id, kind, stored_uri, art_sha256, utc_now()),
+                )
+                self.connection.commit()
+                return artifact_id
+            except Exception:
+                temporary_path.unlink(missing_ok=True)
+                # artifact_id is unique, so this cleanup cannot remove another record's file.
+                target_path.unlink(missing_ok=True)
+                raise
+
+    def read_artifact(self, artifact_id: str) -> bytes | None:
+        """Read a persisted artifact and verify it against the recorded hash."""
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT uri, sha256 FROM artifacts WHERE artifact_id = ?", (artifact_id,)
+            ).fetchone()
+            if row is None:
+                return None
+
+            relative_path = Path(row["uri"])
+            if relative_path.is_absolute() or not relative_path.parts or relative_path.parts[0] != "artifacts":
+                raise ValueError(f"artifact {artifact_id} has an unsafe URI")
+            target_path = (self.path.parent / relative_path).resolve()
+            artifact_root = self.artifact_root.resolve()
+            if artifact_root not in target_path.parents:
+                raise ValueError(f"artifact {artifact_id} escapes artifact root")
+            if not target_path.is_file():
+                return None
+
+            content = target_path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != row["sha256"]:
+                raise ValueError(f"artifact {artifact_id} failed hash verification")
+            return content
 
     def get_case_evidence(self, case_id: str) -> dict[str, Any] | None:
         with self.lock:

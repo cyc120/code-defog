@@ -272,7 +272,14 @@ class AgentTeamsAdapter:
             agent_fn = getattr(mod, "run", None)
             if agent_fn is None:
                 raise RuntimeError(f"Agent module {module_path} has no run() function")
-            result = agent_fn(context)
+            # The StateStore is injected only into the in-process mock. It is
+            # never serialized into a production Runtime task prompt.
+            result = agent_fn({**context, "_state_store": self._store})
+            if not isinstance(result, dict):
+                raise RuntimeError(f"Agent module {module_path} returned a non-object result")
+            # Mock and production modes expose the same completion contract so
+            # the orchestrator never has to infer success from the execution mode.
+            result.setdefault("status", "completed")
             self._store.connection.execute(
                 "UPDATE agent_runs SET status = 'completed', output_ref = ?, finished_at = ? WHERE run_id = ?",
                 (json.dumps(result, ensure_ascii=False), time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
@@ -441,6 +448,27 @@ class AgentTeamsAdapter:
                          time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
                     )
                 else:
+                    # Runtime text is advisory for a mutating demo repair and
+                    # for its release decision. The controlled repair tool and
+                    # deterministic quality gate provide the authoritative
+                    # fields consumed by the orchestrator.
+                    authoritative: dict[str, Any] = {}
+                    if agent_key == "repair" and context.get("repair_mode") == "demo_sandbox":
+                        from agents.repair import run as run_controlled_repair
+                        authoritative = run_controlled_repair({
+                            **context,
+                            "_state_store": self._store,
+                        })
+                        structured["patch_ref"] = authoritative.get("patch_ref", "")
+                    elif agent_key == "verification" and context.get("sandbox_ref"):
+                        from agents.verification import run as run_deterministic_verification
+                        authoritative = run_deterministic_verification({
+                            **context,
+                            "_state_store": self._store,
+                        })
+                        structured["quality_gate_passed"] = authoritative.get("quality_gate_passed")
+                        structured["recommendation"] = authoritative.get("recommendation", "escalate")
+
                     # Promote schema fields to top level for the orchestrator
                     promoted: dict[str, Any] = {}
                     for field in _TOP_LEVEL_FIELDS.get(agent_key, ()):
@@ -451,6 +479,7 @@ class AgentTeamsAdapter:
                         "status": "completed",
                         "structured_output": structured,
                         **promoted,
+                        **authoritative,
                         "result_summary": raw_text[:500],
                         "raw_text": raw_text[:4000],
                     }

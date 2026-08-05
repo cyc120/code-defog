@@ -13,6 +13,9 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent_runtime.orchestrator import Orchestrator
+from agent_runtime.teams_adapter import AgentTeamsAdapter
+
 from . import paths
 from .server import CodeCCTVServer
 from .store import StateStore
@@ -52,7 +55,9 @@ def main() -> None:
     args = parse_args()
     token = secrets.token_urlsafe(32)
     store = StateStore(args.state)
-    server = CodeCCTVServer((args.host, args.port), token, store)
+    teams = AgentTeamsAdapter(store)
+    orchestrator = Orchestrator(store, teams)
+    server = CodeCCTVServer((args.host, args.port), token, store, orchestrator)
     address, port = server.server_address
     write_json(
         args.config.expanduser().resolve(),

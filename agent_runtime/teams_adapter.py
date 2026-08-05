@@ -37,6 +37,21 @@ from typing import Any, Protocol
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
+def _resolve_api_key() -> str:
+    """Resolve DEEPSEEK_API_KEY, falling back to a project .env file.
+
+    Loads .env only when the env var is missing, so explicit shell
+    exports always win and unit tests are unaffected.
+    """
+    key = os.environ.get("DEEPSEEK_API_KEY", "")
+    if key:
+        return key
+    from agent_runtime.envfile import load_dotenv
+
+    load_dotenv()
+    return os.environ.get("DEEPSEEK_API_KEY", "")
+
 # ── Failure detection patterns ────────────────────────────────────────────
 _ITERATION_EXHAUSTED_PATTERNS = [
     r"maximum\s+reasoning-acting\s+iterations?\s+(?:are\s+)?exceeded",
@@ -186,7 +201,7 @@ class AgentTeamsAdapter:
         from agentscope.tool import Toolkit
         from agentscope.tool._builtin import Read
 
-        api_key = os.environ.get("DEEPSEEK_API_KEY", "")
+        api_key = _resolve_api_key()
         model = None
         if api_key:
             from agentscope.credential._deepseek import DeepSeekCredential
@@ -199,8 +214,8 @@ class AgentTeamsAdapter:
 
         toolkit_map = {
             "triage":       no_tools,
-            "diagnosis":    read_toolkit,
-            "repair":       read_toolkit,
+            "diagnosis":    no_tools,
+            "repair":       no_tools,
             "verification": no_tools,
         }
 

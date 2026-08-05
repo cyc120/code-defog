@@ -12,3 +12,4 @@ evidence/production_dispatch*.json
 evidence/artifacts/
 evidence/*.sqlite3
 evidence/runtime_*.json
+docs/_shots/

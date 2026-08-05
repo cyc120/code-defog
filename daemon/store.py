@@ -50,6 +50,13 @@ def utc_now_unix() -> int:
     return int(time.time())
 
 
+# States that auto-trigger the async retrospective after transition.
+# state_machine.TERMINAL_STATES stays {CLOSED} for state-machine purposes;
+# ROLLED_BACK is included here because its only valid next state is CLOSED,
+# so it is effectively terminal for reporting purposes.
+RETROSPECTIVE_TRIGGER_STATES = frozenset({"CLOSED", "ROLLED_BACK"})
+
+
 def clean_text(value: Any, limit: int = 1200) -> str:
     if value is None:
         return ""
@@ -150,6 +157,13 @@ class StateStore:
 
         # Callback for SSE publishing — set by the server after construction.
         self.publish_callback: Any = None
+        # Callback fired (outside the lock, on a daemon thread) when a Case
+        # reaches a retrospective-trigger state.  Wired in serve.py.
+        self.retrospective_hook: Any = None
+        # Per-case generation locks serialise the idempotency check + write in
+        # generate_retrospective, preventing a ROLLED_BACK→CLOSED double-trigger
+        # (or manual HTTP + async hook racing) from duplicating artifacts/records.
+        self.retrospective_locks: dict[str, threading.Lock] = {}
 
     def _ensure_devloop_tables(self) -> None:
         self.connection.executescript(
@@ -287,6 +301,7 @@ class StateStore:
                 created_at TEXT NOT NULL,
                 reviewed_at TEXT,
                 reviewed_by TEXT,
+                review_note TEXT,
                 FOREIGN KEY (case_id) REFERENCES cases(case_id)
             );
             """
@@ -303,6 +318,8 @@ class StateStore:
         needs_patch_ref = "patch_ref" not in case_columns if case_columns else False
         needs_sandbox_ref = "sandbox_ref" not in case_columns if case_columns else False
         needs_chain_sequence = "chain_sequence" not in tool_run_cols if tool_run_cols else False
+        knowledge_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(knowledge_records)").fetchall()}
+        needs_review_note = "review_note" not in knowledge_cols if knowledge_cols else False
 
         if needs_event_column or needs_project_rebuild or needs_name_column:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -347,6 +364,8 @@ class StateStore:
         if needs_chain_sequence:
             self.connection.execute("ALTER TABLE tool_runs ADD COLUMN chain_sequence INTEGER NOT NULL DEFAULT 0")
             self.connection.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_sequence ON tool_runs(case_id, chain_sequence)")
+        if needs_review_note:
+            self.connection.execute("ALTER TABLE knowledge_records ADD COLUMN review_note TEXT")
 
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS events_session_timestamp ON events(workspace, conversation_id, timestamp DESC)"
@@ -520,11 +539,16 @@ class StateStore:
                 "note": row["note"], "evidence": row["evidence"],
                 "files": files if isinstance(files, list) else []}
 
-    def _publish_case_event(self, event_type: str, case: dict[str, Any]) -> None:
-        """Push a Case-level SSE event if a publish callback is registered."""
+    def _publish_case_event(self, event_type: str, case: dict[str, Any],
+                            extra: dict[str, Any] | None = None) -> None:
+        """Push a Case-level SSE event if a publish callback is registered.
+
+        ``extra`` merges into the payload (backward compatible — existing
+        callers pass nothing).
+        """
         if self.publish_callback:
             try:
-                self.publish_callback({"type": event_type, "case": case})
+                self.publish_callback({"type": event_type, "case": case, **(extra or {})})
             except Exception:
                 pass
 
@@ -803,6 +827,7 @@ class StateStore:
                         pending_action: str | None = None) -> dict[str, Any] | None:
         """State transition (used by orchestration layer).  Validates against
         the state machine — invalid transitions are rejected."""
+        trigger_retrospective = False
         with self.lock:
             case = self.connection.execute(
                 "SELECT * FROM cases WHERE case_id = ?", (case_id,)
@@ -836,7 +861,16 @@ class StateStore:
             self.connection.commit()
             result = self._case_dict(case_id)
             self._publish_case_event("case_transition", result)
-            return result
+            trigger_retrospective = (
+                new_status in RETROSPECTIVE_TRIGGER_STATES
+                and result is not None
+                and "error" not in result
+            )
+        # Fire the async retrospective hook outside the lock so report
+        # generation never blocks the transition or its SSE broadcast.
+        if trigger_retrospective:
+            self._maybe_trigger_retrospective(case_id)
+        return result
 
     # ── DevLoop: approval grant management ─────────────────────────────────
 
@@ -1118,7 +1152,199 @@ class StateStore:
                     "SELECT * FROM approvals WHERE case_id = ? ORDER BY resolved_at", (case_id,)).fetchall()],
                 "artifacts": [dict(r) for r in self.connection.execute(
                     "SELECT * FROM artifacts WHERE case_id = ? ORDER BY created_at", (case_id,)).fetchall()],
+                "knowledge_records": self.list_knowledge_records(case_id=case_id),
+                "retrospective": self.get_retrospective(case_id),
             }
+
+    # ── DevLoop: knowledge records & retrospective ─────────────────────────
+
+    def record_knowledge_records(
+        self, case_id: str, content_ref: str, entries: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Persist extracted knowledge entries as pending-review records.
+
+        Each entry becomes one ``knowledge_records`` row with
+        ``status='pending_review'``; ``content_ref`` is
+        ``f"{manifest_artifact_id}#{index}"`` pointing into the knowledge
+        manifest artifact.  Returns the inserted records.
+        """
+        records: list[dict[str, Any]] = []
+        now = utc_now()
+        with self.lock:
+            for index, entry in enumerate(entries):
+                record_id = f"krec-{uuid.uuid4().hex[:12]}"
+                tags = entry.get("tags") or []
+                tags_json = json.dumps(tags, ensure_ascii=False) if isinstance(tags, list) else "[]"
+                self.connection.execute(
+                    """INSERT INTO knowledge_records
+                       (record_id, case_id, status, content_ref, reuse_tags, created_at)
+                       VALUES (?, ?, 'pending_review', ?, ?, ?)""",
+                    (record_id, case_id, f"{content_ref}#{index}", tags_json, now),
+                )
+                records.append({
+                    "record_id": record_id,
+                    "case_id": case_id,
+                    "status": "pending_review",
+                    "content_ref": f"{content_ref}#{index}",
+                    "reuse_tags": tags if isinstance(tags, list) else [],
+                    "created_at": now,
+                })
+            self.connection.commit()
+        return records
+
+    def list_knowledge_records(
+        self, case_id: str | None = None, status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List knowledge records, optionally filtered by case and/or status."""
+        query = "SELECT * FROM knowledge_records"
+        clauses: list[str] = []
+        params: list[Any] = []
+        if case_id:
+            clauses.append("case_id = ?")
+            params.append(case_id)
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC, record_id"
+        with self.lock:
+            rows = self.connection.execute(query, params).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            try:
+                record["reuse_tags"] = json.loads(record["reuse_tags"] or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                record["reuse_tags"] = []
+            records.append(record)
+        return records
+
+    def get_knowledge_record(self, record_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM knowledge_records WHERE record_id = ?", (record_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        record = dict(row)
+        try:
+            record["reuse_tags"] = json.loads(record["reuse_tags"] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            record["reuse_tags"] = []
+        return record
+
+    def review_knowledge_record(
+        self, record_id: str, reviewed_by: str, decision: str, note: str = "",
+    ) -> dict[str, Any] | None:
+        """Review a knowledge record: decision ∈ {'verified', 'rejected'}.
+
+        Verified entries become reusable by later Agents; rejected entries
+        stay recorded but excluded from reuse.  Returns the updated record,
+        ``None`` for an unknown record, or ``{"error": ...}`` for a bad decision.
+        """
+        if decision not in ("verified", "rejected"):
+            return {"error": f"decision must be 'verified' or 'rejected', got: {decision!r}"}
+        now = utc_now()
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM knowledge_records WHERE record_id = ?", (record_id,)
+            ).fetchone()
+            if row is None:
+                return None
+            self.connection.execute(
+                """UPDATE knowledge_records
+                   SET status = ?, reviewed_at = ?, reviewed_by = ?, review_note = ?
+                   WHERE record_id = ?""",
+                (decision, now, clean_text(reviewed_by, 100), clean_text(note, 500), record_id),
+            )
+            self.connection.commit()
+        record = dict(row)
+        record["status"] = decision
+        record["reviewed_at"] = now
+        record["reviewed_by"] = clean_text(reviewed_by, 100)
+        record["review_note"] = clean_text(note, 500)
+        try:
+            record["reuse_tags"] = json.loads(record["reuse_tags"] or "[]")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            record["reuse_tags"] = []
+        return record
+
+    def get_case_artifact(self, case_id: str, kind: str) -> dict[str, Any] | None:
+        """Return the most recent artifact of a given kind for a Case."""
+        with self.lock:
+            row = self.connection.execute(
+                """SELECT * FROM artifacts WHERE case_id = ? AND kind = ?
+                   ORDER BY created_at DESC LIMIT 1""",
+                (case_id, kind),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def get_retrospective(self, case_id: str) -> dict[str, Any] | None:
+        """Return a Case's retrospective (report + manifest + records).
+
+        Returns None when no retrospective has been generated.  Artifact
+        content is read (and hash-verified) via ``read_artifact``.
+        """
+        report = self.get_case_artifact(case_id, "retrospective_report")
+        manifest = self.get_case_artifact(case_id, "knowledge_manifest")
+        if report is None and manifest is None:
+            return None
+        result: dict[str, Any] = {}
+        if report is not None:
+            report_row = dict(report)
+            content = self.read_artifact(report["artifact_id"])
+            report_row["content"] = content.decode("utf-8") if content is not None else None
+            result["report"] = report_row
+        if manifest is not None:
+            manifest_row = dict(manifest)
+            manifest_row["entries"] = []
+            manifest_row["index"] = {}
+            content = self.read_artifact(manifest["artifact_id"])
+            if content is not None:
+                try:
+                    parsed = json.loads(content.decode("utf-8"))
+                    if isinstance(parsed, dict):
+                        manifest_row["entries"] = parsed.get("entries", [])
+                        manifest_row["index"] = parsed.get("index", {})
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+            result["manifest"] = manifest_row
+        result["knowledge_records"] = self.list_knowledge_records(case_id=case_id)
+        return result
+
+    def publish_retrospective(self, case_id: str, retrospective: dict[str, Any]) -> None:
+        """Broadcast the generated retrospective over SSE."""
+        with self.lock:
+            case = self._case_dict(case_id)
+        self._publish_case_event(
+            "case_retrospective", case, {"retrospective": retrospective},
+        )
+
+    def _maybe_trigger_retrospective(self, case_id: str) -> None:
+        """Invoke the injected retrospective hook if one is registered."""
+        hook = self.retrospective_hook
+        if hook is None:
+            return
+        try:
+            hook(case_id)
+        except Exception:
+            pass
+
+    def retrospective_lock(self, case_id: str) -> threading.Lock:
+        """Return the per-Case lock serialising retrospective generation.
+
+        The lock guards the check-then-write in generate_retrospective so two
+        concurrent triggers (e.g. ROLLED_BACK then CLOSED, or the async hook
+        racing a manual HTTP request) cannot both pass the idempotency guard
+        and insert duplicate artifacts / knowledge_records.
+        """
+        with self.lock:
+            lock = self.retrospective_locks.get(case_id)
+            if lock is None:
+                lock = threading.Lock()
+                self.retrospective_locks[case_id] = lock
+            return lock
 
     def _case_dict(self, case_id: str) -> dict[str, Any] | None:
         row = self.connection.execute("SELECT * FROM cases WHERE case_id = ?", (case_id,)).fetchone()

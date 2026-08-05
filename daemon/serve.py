@@ -21,6 +21,17 @@ from .server import CodeCCTVServer
 from .store import StateStore
 
 
+def _run_retrospective(store: StateStore, case_id: str) -> None:
+    """Generate a retrospective off the hot path, best-effort."""
+    from retrospective.retrospective import generate_retrospective
+
+    try:
+        generate_retrospective(store, case_id)
+    except Exception:
+        # Retrospective must never break the transition that triggered it.
+        pass
+
+
 DEFAULT_CONFIG = paths.config_path()
 DEFAULT_STATE = paths.state_path()
 
@@ -57,6 +68,13 @@ def main() -> None:
     store = StateStore(args.state)
     teams = AgentTeamsAdapter(store)
     orchestrator = Orchestrator(store, teams)
+
+    # Async retrospective on Case close — runs on a daemon thread so the
+    # transition that triggered it is never blocked.
+    store.retrospective_hook = lambda case_id: threading.Thread(
+        target=_run_retrospective, args=(store, case_id), daemon=True,
+    ).start()
+
     server = CodeCCTVServer((args.host, args.port), token, store, orchestrator)
     address, port = server.server_address
     write_json(

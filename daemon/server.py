@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import getpass
 import hmac
 import json
 import os
@@ -232,6 +233,22 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.handle_case_action(case_id)
             return
 
+        # ── DevLoop: retrospective generation (service token) ────────────
+        if route.startswith("/api/cases/") and route.endswith("/retrospective"):
+            if not self.require_service_auth():
+                return
+            case_id = route.split("/")[3]
+            self.handle_generate_retrospective(case_id)
+            return
+
+        # ── DevLoop: knowledge review (service token) ─────────────────────
+        if route.startswith("/api/knowledge/") and route.endswith("/review"):
+            if not self.require_service_auth():
+                return
+            record_id = route.split("/")[3]
+            self.handle_knowledge_review(record_id)
+            return
+
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -312,6 +329,61 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "case not found"}, HTTPStatus.NOT_FOUND)
             return
         self.send_json({"ok": True, "evidence": evidence})
+
+    def handle_generate_retrospective(self, case_id: str) -> None:
+        """POST /api/cases/{case_id}/retrospective — generate (or fetch) a
+        retrospective report + knowledge entries for a terminal Case."""
+        # Lazy import to keep startup ordering simple; no circular dependency
+        # (retrospective does not import daemon modules at module level).
+        from retrospective.retrospective import generate_retrospective
+
+        result = generate_retrospective(self.server.store, case_id)
+        if "error" in result:
+            code = (HTTPStatus.NOT_FOUND if result["error"] == "case not found"
+                    else HTTPStatus.CONFLICT)
+            self.send_json({"error": result["error"]}, code)
+            return
+        self.send_json({"ok": True, "retrospective": result})
+
+    def handle_knowledge_review(self, record_id: str) -> None:
+        """POST /api/knowledge/{record_id}/review — human review of a
+        knowledge entry.  decision ∈ {'verified', 'rejected'}.
+
+        Unlike Case actions (which use one-time approval grants), knowledge
+        review is a stateless human act: the caller must present an
+        ``approval`` token type (service tokens — held by Agents — are
+        rejected), and the reviewer identity is taken from the server-side
+        system user rather than trusted from the request body, so an Agent
+        cannot self-verify a knowledge entry or impersonate a reviewer.
+        """
+        if self._token_type() != TOKEN_TYPE_APPROVAL:
+            self.send_json(
+                {"error": "knowledge review requires X-Code-CCTV-Token-Type: approval"},
+                HTTPStatus.FORBIDDEN)
+            return
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        decision = (payload.get("decision") or "").strip()
+        if decision not in ("verified", "rejected"):
+            self.send_json(
+                {"error": "decision must be 'verified' or 'rejected'"},
+                HTTPStatus.BAD_REQUEST)
+            return
+        # Reviewer identity comes from the server-side process user, never
+        # from the request body — a client cannot impersonate a reviewer.
+        reviewer = getpass.getuser()
+        note = (payload.get("note") or "").strip()
+        record = self.server.store.review_knowledge_record(
+            record_id, reviewer, decision, note)
+        if record is None:
+            self.send_json({"error": "record not found"}, HTTPStatus.NOT_FOUND)
+            return
+        if "error" in record:
+            self.send_json({"error": record["error"]}, HTTPStatus.BAD_REQUEST)
+            return
+        self.server.publish({"type": "knowledge_reviewed", "record": record})
+        self.send_json({"ok": True, "record": record})
 
     def handle_case_action(self, case_id: str) -> None:
         """POST /api/cases/{case_id}/actions

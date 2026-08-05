@@ -491,6 +491,8 @@ struct PreviewView: View {
                     selectedProjectID = project.id
                     viewMode = .list
                 }
+            } else if viewMode == .caseView {
+                CaseListView(store: store)
             } else {
                 HStack(spacing: 0) {
                     projectList
@@ -517,10 +519,11 @@ struct PreviewView: View {
             Picker("视图", selection: $viewMode) {
                 Text("项目详情").tag(PreviewMode.list)
                 Text("监听图").tag(PreviewMode.graph)
+                Text("Case").tag(PreviewMode.caseView)
                 Text("管理").tag(PreviewMode.management)
             }
             .pickerStyle(.segmented)
-            .frame(width: 260)
+            .frame(width: 340)
             Metric(title: "会话", value: "\(store.visibleSummary.totalProjects)")
             Metric(title: "活跃", value: "\(store.visibleSummary.activeProjects)")
             Metric(title: "阻塞", value: "\(store.visibleSummary.blockedProjects)")

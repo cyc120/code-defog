@@ -123,9 +123,201 @@ struct ActivitySummary {
     let active: Bool
 }
 
+// ── DevLoop Case models ──────────────────────────────────────────────────
+
+struct CaseSummary: Codable, Identifiable {
+    let id: String
+    let incidentSignature: String?
+    let status: String
+    let priority: String
+    let riskLevel: String
+    let repositoryRef: String
+    let baseCommit: String?
+    let patchRef: String?
+    let sandboxRef: String?
+    let pendingAction: String?
+    let traceId: String?
+    let title: String?
+    let createdAt: String
+    let updatedAt: String
+    let closedAt: String?
+    let sourceCount: Int
+
+    enum CodingKeys: String, CodingKey {
+        case id = "case_id"
+        case incidentSignature = "incident_signature"
+        case status, priority
+        case riskLevel = "risk_level"
+        case repositoryRef = "repository_ref"
+        case baseCommit = "base_commit"
+        case patchRef = "patch_ref"
+        case sandboxRef = "sandbox_ref"
+        case pendingAction = "pending_action"
+        case traceId = "trace_id"
+        case title
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+        case closedAt = "closed_at"
+        case sourceCount = "source_count"
+    }
+}
+
+struct EvidenceSource: Codable {
+    let sourceType: String?
+    let sourceUri: String?
+    let associationState: String?
+    let receivedAt: String?
+    enum CodingKeys: String, CodingKey {
+        case sourceType = "source_type"
+        case sourceUri = "source_uri"
+        case associationState = "association_state"
+        case receivedAt = "received_at"
+    }
+}
+
+struct AgentRun: Codable {
+    let agentId: String?
+    let status: String?
+    let startedAt: String?
+    let finishedAt: String?
+    enum CodingKeys: String, CodingKey {
+        case agentId = "agent_id"
+        case status
+        case startedAt = "started_at"
+        case finishedAt = "finished_at"
+    }
+}
+
+struct ToolRun: Codable {
+    let chainSequence: Int?
+    let toolName: String?
+    let exitCode: Int?
+    let inputSha256: String?
+    let outputSha256: String?
+    let chainHash: String?
+    enum CodingKeys: String, CodingKey {
+        case chainSequence = "chain_sequence"
+        case toolName = "tool_name"
+        case exitCode = "exit_code"
+        case inputSha256 = "input_sha256"
+        case outputSha256 = "output_sha256"
+        case chainHash = "chain_hash"
+    }
+}
+
+struct ApprovalRecord: Codable {
+    let action: String?
+    let decision: String?
+    let approver: String?
+    let targetRef: String?
+    let resolvedAt: String?
+    enum CodingKeys: String, CodingKey {
+        case action, decision, approver
+        case targetRef = "target_ref"
+        case resolvedAt = "resolved_at"
+    }
+}
+
+struct ArtifactRecord: Codable {
+    let kind: String?
+    let uri: String?
+    let sha256: String?
+    enum CodingKeys: String, CodingKey {
+        case kind, uri, sha256
+    }
+}
+
+struct KnowledgeRecord: Codable {
+    let recordId: String?
+    let status: String?
+    let reuseTags: [String]?
+    let reviewedBy: String?
+    enum CodingKeys: String, CodingKey {
+        case recordId = "record_id"
+        case status
+        case reuseTags = "reuse_tags"
+        case reviewedBy = "reviewed_by"
+    }
+}
+
+struct EvidenceBundle: Codable {
+    let caseSummary: CaseSummary
+    let sources: [EvidenceSource]
+    let agentRuns: [AgentRun]
+    let toolRuns: [ToolRun]
+    let approvals: [ApprovalRecord]
+    let artifacts: [ArtifactRecord]
+    let knowledgeRecords: [KnowledgeRecord]
+    let retrospective: RetrospectiveBundle?
+    enum CodingKeys: String, CodingKey {
+        case caseSummary = "case"
+        case sources
+        case agentRuns = "agent_runs"
+        case toolRuns = "tool_runs"
+        case approvals
+        case artifacts
+        case knowledgeRecords = "knowledge_records"
+        case retrospective
+    }
+}
+
+struct RetrospectiveBundle: Codable {
+    let report: RetrospectiveReport?
+}
+
+struct RetrospectiveReport: Codable {
+    let artifactId: String?
+    let uri: String?
+    let content: String?
+    enum CodingKeys: String, CodingKey {
+        case artifactId = "artifact_id"
+        case uri
+        case content
+    }
+}
+
+struct ApprovalGrant: Codable {
+    let grantId: String
+    let approvalToken: String
+    let caseId: String
+    let action: String
+    let targetRef: String
+    let expiresAt: String
+    enum CodingKeys: String, CodingKey {
+        case grantId = "grant_id"
+        case approvalToken = "approval_token"
+        case caseId = "case_id"
+        case action
+        case targetRef = "target_ref"
+        case expiresAt = "expires_at"
+    }
+}
+
+struct CaseListResponse: Codable {
+    let cases: [CaseSummary]
+    let count: Int
+}
+
+struct EvidenceResponse: Codable {
+    let evidence: EvidenceBundle
+}
+
+struct GrantResponse: Codable {
+    let grant: ApprovalGrant
+}
+
+struct CaseActionResponse: Codable {
+    let `case`: CaseSummary
+}
+
 struct StreamEnvelope: Codable {
     let type: String
-    let state: GlobalState
+    let state: GlobalState?
+    let caseSummary: CaseSummary?
+    enum CodingKeys: String, CodingKey {
+        case type, state
+        case caseSummary = "case"
+    }
 }
 
 struct ManagementInfo: Codable {
@@ -154,6 +346,9 @@ final class StatusStore: ObservableObject {
     @Published private(set) var lastStateReceivedAt: Date?
     @Published private(set) var managementInfo: ManagementInfo?
     @Published private(set) var preferencesRevision = 0
+    @Published private(set) var cases: [CaseSummary] = []
+    @Published private(set) var casesRevision = 0
+    @Published private(set) var casesLoading = false
 
     private var streamTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
@@ -317,6 +512,105 @@ final class StatusStore: ObservableObject {
         }
     }
 
+    // ── DevLoop Case methods ──────────────────────────────────────────────
+
+    func loadCases(status: String? = nil) async {
+        guard let configuration = loadConfiguration() else { return }
+        var query = "?limit=100"
+        if let status, !status.isEmpty {
+            let encoded = status.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? status
+            query += "&status=\(encoded)"
+        }
+        guard let url = URL(string: "http://\(configuration.host):\(configuration.port)/api/cases\(query)") else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 6
+        request.setValue(configuration.token, forHTTPHeaderField: "X-Code-CCTV-Token")
+        casesLoading = true
+        defer { casesLoading = false }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return }
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let payload = try decoder.decode(CaseListResponse.self, from: data)
+            cases = payload.cases.sorted { $0.updatedAt > $1.updatedAt }
+        } catch {
+            // Keep the last list; failures are silent (offline daemon).
+        }
+    }
+
+    func getCaseEvidence(_ caseID: String) async -> EvidenceBundle? {
+        guard let configuration = loadConfiguration(),
+              let url = URL(string: "http://\(configuration.host):\(configuration.port)/api/cases/\(caseID)/evidence") else {
+            return nil
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 6
+        request.setValue(configuration.token, forHTTPHeaderField: "X-Code-CCTV-Token")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            return try decoder.decode(EvidenceResponse.self, from: data).evidence
+        } catch {
+            return nil
+        }
+    }
+
+    func requestApprovalGrant(caseID: String, action: String, targetRef: String,
+                              approver: String) async throws -> ApprovalGrant {
+        guard let configuration = loadConfiguration(),
+              let url = URL(string: "http://\(configuration.host):\(configuration.port)/api/cases/\(caseID)/approval-grant") else {
+            throw StreamError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 6
+        request.setValue(configuration.token, forHTTPHeaderField: "X-Code-CCTV-Token")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "action": action, "target_ref": targetRef, "approver": approver,
+        ])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw StreamError.invalidResponse
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(GrantResponse.self, from: data).grant
+    }
+
+    @discardableResult
+    func postCaseAction(caseID: String, action: String, approvalToken: String,
+                        targetRef: String, reason: String = "") async throws -> CaseSummary {
+        guard let configuration = loadConfiguration(),
+              let url = URL(string: "http://\(configuration.host):\(configuration.port)/api/cases/\(caseID)/actions") else {
+            throw StreamError.invalidResponse
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 6
+        request.setValue(approvalToken, forHTTPHeaderField: "X-Code-CCTV-Token")
+        request.setValue("approval", forHTTPHeaderField: "X-Code-CCTV-Token-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "action": action, "approval_token": approvalToken,
+            "target_ref": targetRef, "reason": reason,
+        ])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw StreamError.invalidResponse
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let result = try decoder.decode(CaseActionResponse.self, from: data)
+        casesRevision += 1
+        return result.case
+    }
+
     private func startMonitoring() {
         streamTask?.cancel()
         pollingTask?.cancel()
@@ -383,9 +677,14 @@ final class StatusStore: ObservableObject {
                 guard let data = json.data(using: .utf8) else { continue }
                 let decoder = JSONDecoder()
                 decoder.keyDecodingStrategy = .convertFromSnakeCase
-                guard let envelope = try? decoder.decode(StreamEnvelope.self, from: data),
-                      envelope.type == "state" else { continue }
-                applyState(envelope.state)
+                guard let envelope = try? decoder.decode(StreamEnvelope.self, from: data) else { continue }
+                if envelope.type == "state", let state = envelope.state {
+                    applyState(state)
+                } else if ["case_created", "case_action", "case_transition",
+                           "case_retrospective"].contains(envelope.type) {
+                    // A Case-level change invalidates the cached list.
+                    casesRevision += 1
+                }
             }
             setStreamConnected(false)
             return true

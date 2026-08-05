@@ -14,6 +14,7 @@ enum PreviewMode: Hashable {
     case list
     case graph
     case management
+    case caseView
 }
 
 enum FloatingPanelAnimation {
@@ -414,6 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.image = NSImage(systemSymbolName: "video.fill", accessibilityDescription: "Code CCTV")
         let menu = NSMenu()
         menu.addItem(menuItem(title: "打开全局预览", action: #selector(openPreview), image: "rectangle.3.group"))
+        menu.addItem(menuItem(title: "Case 队列", action: #selector(openCaseView), image: "tray.full"))
         menu.addItem(menuItem(title: "显示浮窗", action: #selector(showFloatingPanel), image: "eye"))
         menu.addItem(.separator())
         menu.addItem(menuItem(title: "退出 Code CCTV", action: #selector(quitApp), image: "power"))
@@ -430,6 +432,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func openPreview() {
         PreviewWindowController.shared.show(store: store)
+    }
+
+    @objc private func openCaseView() {
+        PreviewWindowController.shared.show(store: store, mode: .caseView)
     }
 
     @objc private func showFloatingPanel() {

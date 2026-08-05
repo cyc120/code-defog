@@ -16,7 +16,7 @@ from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 
-from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS
+from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text
 
 
 MAX_BODY_BYTES = 1_000_000
@@ -249,6 +249,14 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.handle_knowledge_review(record_id)
             return
 
+        # ── DevLoop: approval grant issuance (service token only) ─────────
+        if route.startswith("/api/cases/") and route.endswith("/approval-grant"):
+            if not self.require_service_auth():
+                return
+            case_id = route.split("/")[3]
+            self.handle_issue_approval_grant(case_id)
+            return
+
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -384,6 +392,46 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             return
         self.server.publish({"type": "knowledge_reviewed", "record": record})
         self.send_json({"ok": True, "record": record})
+
+    def handle_issue_approval_grant(self, case_id: str) -> None:
+        """POST /api/cases/{case_id}/approval-grant
+
+        Service-token guarded.  Issues a one-time approval_token (stored as
+        SHA-256) that the caller then consumes via POST /actions with
+        X-Code-CCTV-Token-Type: approval.  Issuing and consuming use
+        different credentials, so a service token alone cannot complete an
+        approval — the grant token is one-shot and bound to the Case state.
+        """
+        payload = self.read_json_body()
+        if payload is None:
+            return
+        action = clean_text(payload.get("action"), 40)
+        target_ref = clean_text(payload.get("target_ref"), 200)
+        approver = clean_text(payload.get("approver"), 100)
+        if action not in ALL_GRANTED_ACTIONS:
+            self.send_json(
+                {"error": f"unknown action: {action}. Valid: approve_plan, "
+                          f"approve_release, reject_plan, reject_release"},
+                HTTPStatus.BAD_REQUEST)
+            return
+        if not target_ref:
+            self.send_json(
+                {"error": "target_ref is required (base_commit for plan, patch_ref for release)"},
+                HTTPStatus.BAD_REQUEST)
+            return
+        if not approver:
+            self.send_json({"error": "approver is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        result = self.server.store.issue_approval_grant(case_id, action, target_ref, approver)
+        if result is None:
+            self.send_json({"error": "case not found"}, HTTPStatus.NOT_FOUND)
+            return
+        if "error" in result:
+            status = (HTTPStatus.BAD_REQUEST if "unknown grant action" in result["error"]
+                      else HTTPStatus.CONFLICT)
+            self.send_json({"error": result["error"]}, status)
+            return
+        self.send_json({"ok": True, "grant": result})
 
     def handle_case_action(self, case_id: str) -> None:
         """POST /api/cases/{case_id}/actions

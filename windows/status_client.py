@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import threading
 import time
+import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
@@ -77,9 +78,19 @@ def default_content_id(projects: list[dict[str, Any]]) -> str:
     return ";".join(parts)
 
 
-def parse_sse_line(line: bytes | str) -> tuple[str, dict[str, Any]] | None:
-    """Parse one SSE line. Heartbeat/comment lines (': ...') and unknown event
-    types return None; a 'data:' line returns (type, payload)."""
+_CASE_EVENT_TYPES = frozenset({
+    "case_created", "case_action", "case_transition",
+    "case_retrospective", "knowledge_reviewed",
+})
+
+
+def parse_sse_envelope(line: bytes | str) -> dict[str, Any] | None:
+    """Parse any SSE 'data:' line into its full envelope dict, or None.
+
+    Unlike ``parse_sse_line`` (which only yields ``state`` events), this
+    returns every envelope so case events (case_created / case_action /
+    case_transition / case_retrospective / knowledge_reviewed) reach the UI.
+    """
     if isinstance(line, bytes):
         try:
             line = line.decode("utf-8")
@@ -94,6 +105,15 @@ def parse_sse_line(line: bytes | str) -> tuple[str, dict[str, Any]] | None:
     except json.JSONDecodeError:
         return None
     if not isinstance(envelope, dict):
+        return None
+    return envelope
+
+
+def parse_sse_line(line: bytes | str) -> tuple[str, dict[str, Any]] | None:
+    """Parse one SSE line. Heartbeat/comment lines (': ...') and unknown event
+    types return None; a 'data:' line returns (type, payload)."""
+    envelope = parse_sse_envelope(line)
+    if envelope is None:
         return None
     event_type = envelope.get("type", "")
     state = envelope.get("state")
@@ -126,6 +146,7 @@ class StatusClient:
         self._lock = threading.Lock()
         self.on_state: Callable[[dict[str, Any]], None] | None = None
         self.on_connection: Callable[[bool], None] | None = None
+        self.on_case_event: Callable[[dict[str, Any]], None] | None = None
 
     def start(self) -> None:
         if self._enable_stream:
@@ -157,13 +178,18 @@ class StatusClient:
     # -- HTTP plumbing ------------------------------------------------------
 
     def _request(self, method: str, path: str, body: Any = None,
-                 timeout: float = 6.0) -> tuple[int, bytes]:
+                 timeout: float = 6.0, token: str | None = None,
+                 token_type: str | None = None) -> tuple[int, bytes]:
         config = self._config_provider()
         if config is None:
             raise OSError("no daemon config")
         url = f"http://{config['host']}:{config['port']}{path}"
         request = urllib.request.Request(url, method=method)
-        request.add_header("X-Code-CCTV-Token", config["token"])
+        # Default to the service token; allow a one-shot approval_token override
+        # (with an explicit token type) for consuming approval grants.
+        request.add_header("X-Code-CCTV-Token", token if token is not None else config["token"])
+        if token_type is not None:
+            request.add_header("X-Code-CCTV-Token-Type", token_type)
         if body is not None:
             request.add_header("Content-Type", "application/json; charset=utf-8")
             request.data = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -191,9 +217,14 @@ class StatusClient:
                     for raw_line in response:
                         if self._stop.is_set():
                             break
-                        parsed = parse_sse_line(raw_line)
-                        if parsed is not None:
-                            self._apply_state(parsed[1])
+                        envelope = parse_sse_envelope(raw_line)
+                        if envelope is None:
+                            continue
+                        event_type = envelope.get("type", "")
+                        if event_type == "state" and isinstance(envelope.get("state"), dict):
+                            self._apply_state(envelope["state"])
+                        elif event_type in _CASE_EVENT_TYPES:
+                            self._fire_case_event(envelope)
                 self._set_stream_connected(False)
             except OSError:
                 self._set_stream_connected(False)
@@ -249,6 +280,116 @@ class StatusClient:
 
     def _sleep_or_stop(self, seconds: float) -> None:
         self._stop.wait(max(seconds, 0.1))
+
+    def _fire_case_event(self, envelope: dict[str, Any]) -> None:
+        """Notify a listener of a Case-level SSE event (no Qt dependency)."""
+        callback = self.on_case_event
+        if callback is not None:
+            callback(envelope)
+
+    # -- Case calls ----------------------------------------------------------
+
+    def list_cases(self, status: str | None = None, limit: int = 100) -> list[dict[str, Any]] | None:
+        """GET /api/cases — return the Case list (or None on failure)."""
+        query = f"?limit={int(limit)}"
+        if status:
+            query += f"&status={urllib.parse.quote(status)}"
+        try:
+            code, body = self._request("GET", f"/api/cases{query}")
+        except OSError:
+            return None
+        if not 200 <= code < 300:
+            return None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        cases = payload.get("cases") if isinstance(payload, dict) else None
+        return cases if isinstance(cases, list) else None
+
+    def get_case(self, case_id: str) -> dict[str, Any] | None:
+        """GET /api/cases/{id} — return the Case dict (or None)."""
+        try:
+            code, body = self._request("GET", f"/api/cases/{case_id}")
+        except OSError:
+            return None
+        if not 200 <= code < 300:
+            return None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        case = payload.get("case") if isinstance(payload, dict) else None
+        return case if isinstance(case, dict) else None
+
+    def get_case_evidence(self, case_id: str) -> dict[str, Any] | None:
+        """GET /api/cases/{id}/evidence — full evidence bundle (or None)."""
+        try:
+            code, body = self._request("GET", f"/api/cases/{case_id}/evidence")
+        except OSError:
+            return None
+        if not 200 <= code < 300:
+            return None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        evidence = payload.get("evidence") if isinstance(payload, dict) else None
+        return evidence if isinstance(evidence, dict) else None
+
+    def request_approval_grant(
+        self, case_id: str, action: str, target_ref: str, approver: str,
+    ) -> dict[str, Any] | None:
+        """POST /api/cases/{id}/approval-grant — issue a one-shot approval token.
+
+        Uses the service token (this is the *issuing* side of the two-step
+        approval; the token is consumed separately via post_case_action).
+        """
+        try:
+            code, body = self._request(
+                "POST", f"/api/cases/{case_id}/approval-grant",
+                body={"action": action, "target_ref": target_ref, "approver": approver},
+            )
+        except OSError:
+            return None
+        if not 200 <= code < 300:
+            return None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        grant = payload.get("grant") if isinstance(payload, dict) else None
+        return grant if isinstance(grant, dict) else None
+
+    def post_case_action(
+        self, case_id: str, action: str, approval_token: str,
+        target_ref: str, reason: str = "",
+    ) -> dict[str, Any] | None:
+        """POST /api/cases/{id}/actions — consume an approval grant.
+
+        The one-shot approval_token is sent both as the auth token and in the
+        body (approval token type), matching the backend's grant-consumption
+        path.
+        """
+        try:
+            code, body = self._request(
+                "POST", f"/api/cases/{case_id}/actions",
+                body={
+                    "action": action, "approval_token": approval_token,
+                    "target_ref": target_ref, "reason": reason,
+                },
+                token=approval_token, token_type="approval",
+            )
+        except OSError:
+            return None
+        if not 200 <= code < 300:
+            return None
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        case = payload.get("case") if isinstance(payload, dict) else None
+        return case if isinstance(case, dict) else None
 
     # -- Management calls ---------------------------------------------------
 

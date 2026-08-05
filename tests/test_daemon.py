@@ -1855,5 +1855,213 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
             store.close()
 
 
+class DevLoopApprovalGrantEndpointTests(unittest.TestCase):
+    """POST /api/cases/{id}/approval-grant — issue one-time approval grants.
+
+    Issuing uses the service token; consuming goes through /actions with the
+    approval token type + one-shot grant.  A service token alone must not be
+    able to complete an approval.
+    """
+
+    def _make_plan_approval_case(self, store: StateStore, nonce: str) -> str:
+        result = store.create_or_find_case({
+            "source_type": "issue", "source_uri": f"grant-{nonce}",
+            "client_nonce": f"grant-nonce-{nonce}",
+            "raw_content": "KeyError: missing projects",
+            "repository_ref": "/test",
+            "extracted_signals": {
+                "exception_type": "KeyError", "message_pattern": "x",
+                "key_frames": ["cli.py:1"], "keywords": ["k"], "repository_ref": "/test",
+            },
+        })
+        case_id = result["case_id"]
+        store.transition_case(case_id, "TRIAGED")
+        store.transition_case(case_id, "DIAGNOSED")
+        store.connection.execute(
+            "UPDATE cases SET base_commit = 'base-01' WHERE case_id = ?", (case_id,))
+        store.connection.commit()
+        store.transition_case(case_id, "PLAN_APPROVAL", "approve_plan")
+        return case_id
+
+    def _post_grant(self, base_url: str, case_id: str, token: str,
+                    action: str, target_ref: str, approver: str = "reviewer"):
+        body = json.dumps({
+            "action": action, "target_ref": target_ref, "approver": approver,
+        }).encode()
+        request = Request(
+            f"{base_url}/api/cases/{case_id}/approval-grant",
+            data=body, method="POST",
+            headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+        )
+        return urlopen(request, timeout=10)
+
+    def test_issue_grant_success(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "issue-ok")
+                with self._post_grant(base_url, case_id, token, "approve_plan", "base-01") as response:
+                    body = json.loads(response.read())
+                self.assertTrue(body["ok"])
+                grant = body["grant"]
+                self.assertTrue(grant["approval_token"].startswith("at-"))
+                self.assertEqual(grant["action"], "approve_plan")
+                self.assertEqual(grant["target_ref"], "base-01")
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_issue_consume_loop(self) -> None:
+        """Issued grant can be consumed once via /actions; second use rejected."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "loop")
+                with self._post_grant(base_url, case_id, token, "approve_plan", "base-01") as response:
+                    grant = json.loads(response.read())["grant"]
+                approval_token = grant["approval_token"]
+
+                # Consume via /actions with approval type header
+                body = json.dumps({
+                    "action": "approve_plan", "approval_token": approval_token,
+                    "target_ref": "base-01", "reason": "approved",
+                }).encode()
+                request = Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=body, method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": approval_token,
+                        "X-Code-CCTV-Token-Type": "approval",
+                    },
+                )
+                with urlopen(request, timeout=10) as response:
+                    result = json.loads(response.read())
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["case"]["status"], "REPAIRING")
+
+                # Second use of the same token → 401 (one-shot)
+                request2 = Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=body, method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": approval_token,
+                        "X-Code-CCTV-Token-Type": "approval",
+                    },
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request2, timeout=10)
+                self.assertEqual(raised.exception.code, 401)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_issue_grant_requires_auth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, _ = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "noauth")
+                body = json.dumps({"action": "approve_plan", "target_ref": "base-01",
+                                   "approver": "reviewer"}).encode()
+                request = Request(
+                    f"{base_url}/api/cases/{case_id}/approval-grant",
+                    data=body, method="POST",
+                    headers={"Content-Type": "application/json"},
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=10)
+                self.assertEqual(raised.exception.code, 401)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_issue_grant_bad_body(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "badbody")
+                # Missing target_ref → 400
+                body = json.dumps({"action": "approve_plan", "approver": "r"}).encode()
+                request = Request(
+                    f"{base_url}/api/cases/{case_id}/approval-grant",
+                    data=body, method="POST",
+                    headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=10)
+                self.assertEqual(raised.exception.code, 400)
+                # Unknown action → 400
+                body2 = json.dumps({"action": "delete", "target_ref": "x", "approver": "r"}).encode()
+                request2 = Request(
+                    f"{base_url}/api/cases/{case_id}/approval-grant",
+                    data=body2, method="POST",
+                    headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request2, timeout=10)
+                self.assertEqual(raised.exception.code, 400)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_issue_grant_case_not_found(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                with self.assertRaises(HTTPError) as raised:
+                    self._post_grant(base_url, "case-nope", token, "approve_plan", "base-01")
+                self.assertEqual(raised.exception.code, 404)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_issue_grant_state_mismatch(self) -> None:
+        """Issuing approve_release while case is at PLAN_APPROVAL → 409."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "statemismatch")
+                with self.assertRaises(HTTPError) as raised:
+                    self._post_grant(base_url, case_id, token, "approve_release", "patch-x")
+                self.assertEqual(raised.exception.code, 409)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_issue_grant_target_ref_mismatch(self) -> None:
+        """target_ref must match the case's base_commit → 409 otherwise."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "targetmismatch")
+                with self.assertRaises(HTTPError) as raised:
+                    self._post_grant(base_url, case_id, token, "approve_plan", "wrong-commit")
+                self.assertEqual(raised.exception.code, 409)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_cancel_still_uses_service_token(self) -> None:
+        """Regression: cancel on /actions still works with a service token."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "cancel")
+                body = json.dumps({"action": "cancel", "reason": "not needed"}).encode()
+                request = Request(
+                    f"{base_url}/api/cases/{case_id}/actions",
+                    data=body, method="POST",
+                    headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+                )
+                with urlopen(request, timeout=10) as response:
+                    result = json.loads(response.read())
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["case"]["status"], "ESCALATED")
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

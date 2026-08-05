@@ -122,6 +122,7 @@ RECEIVED → TRIAGED → DIAGNOSED → PLAN_APPROVAL → REPAIRING
 | `GET` | `/api/cases` | `service_token` | 按状态/仓库查询 Case 队列 |
 | `GET` | `/api/cases/{id}` | `service_token` | 获取 Case 详情 |
 | `POST` | `/api/cases/{id}/actions` | `approval_token`（审批类）/ `service_token`（cancel） | 审批通过/拒绝/取消 |
+| `POST` | `/api/cases/{id}/approval-grant` | `service_token` | 签发一次性审批 Grant（供 UI 消费） |
 | `GET` | `/api/cases/{id}/evidence` | `service_token` | 导出完整证据索引（含哈希链） |
 
 ### 令牌分离
@@ -132,6 +133,12 @@ RECEIVED → TRIAGED → DIAGNOSED → PLAN_APPROVAL → REPAIRING
 | `approval_token` | 人工审批者 | 一次性审批 Grant（签发与消费分离） |
 
 Agent 持有的 `service_token` 不能执行审批动作 — 调用审批类端点返回 `403 Forbidden`。
+
+**审批两步流（原生 UI 演示）**：
+1. **签发**：UI 用 `service_token` 调 `POST /api/cases/{id}/approval-grant`，body `{action, target_ref, approver}` → 返回一次性 `approval_token`。
+2. **消费**：UI 调 `POST /api/cases/{id}/actions`，带 `X-Code-CCTV-Token-Type: approval` 头 + body 的 `approval_token` → 服务端按 `token_hash` 校验一次性 Grant 并转移状态。
+
+签发（service token）与消费（一次性 approval_token + approval 类型）分离，仅凭 `service_token` 无法完成审批闭环。
 
 ### 两级指纹
 
@@ -237,6 +244,30 @@ python agent_runtime/smoke_test.py
 | Case API & Agent 编排 | ✅ | ✅ |
 | AgentTeams 生产模式 | ✅ | ✅ |
 | 原生界面 | ✅ SwiftUI | ✅ PySide6 |
+| Case 队列 + 审批视图 | ✅ `CaseListView` | ✅ Case tab |
+
+---
+
+## 原生界面构建
+
+### macOS（swiftc 手工编译，无 Xcode 工程）
+
+```bash
+cd macos
+swiftc -O -parse-as-library \
+  CodeCCTVApp.swift CodeCCTVViews.swift ManagementView.swift StatusStore.swift CaseViews.swift \
+  -o ../build/macos/CodeCCTV
+```
+
+语法检查：`swiftc -typecheck macos/*.swift`。编译产物打包为 `dist/CodeCCTV.app`。
+
+### Windows（PySide6）
+
+```bash
+pip install -r windows/requirements-windows.txt
+python -m daemon.serve   # 先起后端，生成 service.json
+python -m windows.main
+```
 
 ---
 

@@ -5,6 +5,9 @@ Production mode (P2):
     identities.yaml, dispatches CaseContext as structured tasks,
     and captures Team / Task / Trace evidence.
 
+    Failure detection: iteration exhaustion, empty output, and model
+    errors are recorded as 'failed', never as 'completed'.
+
 Mock mode (unit tests / offline dev):
     Loads identities, calls Agent entry functions in-process.
 
@@ -18,12 +21,61 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Protocol
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+# ── Failure detection patterns ────────────────────────────────────────────
+_ITERATION_EXHAUSTED_PATTERNS = [
+    r"maximum\s+reasoning-acting\s+iterations?\s+(?:are\s+)?exceeded",
+    r"max\s+iteration\s+(?:numbers?\s+)?(?:is\s+)?(?:exceeded|reached)",
+    r"react\s+loop\s+(?:stopped|ended|terminated)",
+]
+_EMPTY_OUTPUT_PATTERNS = [
+    r"^\s*$",
+    r"^\s*\[\s*\]\s*$",
+]
+
+
+def _detect_failure(text: str) -> str | None:
+    """Return a failure reason string if the output indicates a problem,
+    or None if the output looks healthy."""
+    if not text or not text.strip():
+        return "empty_output"
+    stripped = text.strip()
+    for pattern in _ITERATION_EXHAUSTED_PATTERNS:
+        if re.search(pattern, stripped, re.IGNORECASE):
+            return "iteration_exhausted"
+    if len(stripped) < 3:
+        return "empty_output"
+    # Check for model-level error markers
+    lower = stripped.lower()
+    if any(marker in lower for marker in ["an error occurred", "i'm sorry, but", "i cannot", "i am unable"]):
+        return "model_refusal"
+    return None
+
+
+def _extract_json_block(text: str) -> dict[str, Any] | None:
+    """Try to extract a JSON object from agent output (```json ... ``` or bare {})."""
+    # Try fenced block first
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    # Try bare JSON object
+    m = re.search(r"\{.*\}", text, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 class AgentEntrypoint(Protocol):
@@ -66,10 +118,10 @@ class AgentTeamsAdapter:
             config = yaml.safe_load(fh)
 
         from agentscope.agent import Agent
+        from agentscope.agent._config import ReActConfig
         from agentscope.tool import Toolkit
         from agentscope.tool._builtin import Read
 
-        # Use DeepSeek model if key is available
         api_key = os.environ.get("DEEPSEEK_API_KEY", "")
         model = None
         if api_key:
@@ -78,7 +130,21 @@ class AgentTeamsAdapter:
             credential = DeepSeekCredential(api_key=api_key)
             model = DeepSeekChatModel(credential=credential, model="deepseek-chat")
 
-        toolkit = Toolkit(tools=[Read()])
+        read_toolkit = Toolkit(tools=[Read()])
+        # Agents that don't need tool access use an empty toolkit for
+        # faster, cheaper completion without ReAct loop overhead.
+        no_tools = Toolkit(tools=[])
+
+        # Triage and Verification are analysis-only — no tools needed
+        toolkit_map = {
+            "triage":       no_tools,
+            "diagnosis":    read_toolkit,
+            "repair":       read_toolkit,
+            "verification": no_tools,
+        }
+
+        # 5 iterations is enough for a direct JSON response
+        react_cfg = ReActConfig(max_iters=5, stop_on_reject=True)
 
         team_id = f"team-{uuid.uuid4().hex[:12]}"
         agents: dict[str, Any] = {}
@@ -89,7 +155,8 @@ class AgentTeamsAdapter:
                 name=ident["name"],
                 system_prompt=ident["description"],
                 model=model,
-                toolkit=toolkit,
+                toolkit=toolkit_map.get(agent_id, read_toolkit),
+                react_config=react_cfg,
             )
 
         self._team = {
@@ -131,18 +198,15 @@ class AgentTeamsAdapter:
     def _dispatch_mock(
         self, case_id: str, state: str, module_path: str, context: dict[str, Any],
     ) -> dict[str, Any]:
-        """In-process Agent call for local dev and offline demos."""
         import time
-
         run_id = f"run-{uuid.uuid4().hex[:8]}"
         self._store.connection.execute(
-            """INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at)
-               VALUES (?, ?, ?, 'running', ?, ?)""",
+            "INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at) "
+            "VALUES (?, ?, ?, 'running', ?, ?)",
             (run_id, case_id, module_path, context.get("trace_id", ""),
              time.strftime("%Y-%m-%dT%H:%M:%SZ")),
         )
         self._store.connection.commit()
-
         try:
             mod = importlib.import_module(module_path)
             agent_fn = getattr(mod, "run", None)
@@ -150,15 +214,12 @@ class AgentTeamsAdapter:
                 raise RuntimeError(f"Agent module {module_path} has no run() function")
             result = agent_fn(context)
             self._store.connection.execute(
-                """UPDATE agent_runs SET status = 'completed', output_ref = ?,
-                   finished_at = ? WHERE run_id = ?""",
-                (json.dumps(result, ensure_ascii=False),
-                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
+                "UPDATE agent_runs SET status = 'completed', output_ref = ?, finished_at = ? WHERE run_id = ?",
+                (json.dumps(result, ensure_ascii=False), time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
             )
         except Exception as exc:
             self._store.connection.execute(
-                """UPDATE agent_runs SET status = 'failed', output_ref = ?,
-                   finished_at = ? WHERE run_id = ?""",
+                "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
                 (json.dumps({"error": str(exc)}, ensure_ascii=False),
                  time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
             )
@@ -171,10 +232,15 @@ class AgentTeamsAdapter:
     def _dispatch_production(
         self, case_id: str, state: str, agent_key: str, context: dict[str, Any],
     ) -> dict[str, Any]:
-        """Real AgentScope Agent dispatch.
+        """Real AgentScope Agent dispatch with failure detection.
 
-        Builds a structured prompt from the CaseContext, sends it to the
-        Agent, and captures the reply + trace evidence.
+        Returns:
+            On success:  {agent, case_id, task_id, trace_id, team_id,
+                          status: "completed", structured_output: {...},
+                          result_summary: "...", raw_text: "..."}
+            On failure:  {agent, case_id, task_id, trace_id, team_id,
+                          status: "failed", failure_reason: "...",
+                          raw_text: "..."}
         """
         import time
 
@@ -187,55 +253,79 @@ class AgentTeamsAdapter:
         run_id = f"run-{uuid.uuid4().hex[:8]}"
 
         self._store.connection.execute(
-            """INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at)
-               VALUES (?, ?, ?, 'running', ?, ?)""",
-            (run_id, case_id, agent_key, trace_id,
-             time.strftime("%Y-%m-%dT%H:%M:%SZ")),
+            "INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at) "
+            "VALUES (?, ?, ?, 'running', ?, ?)",
+            (run_id, case_id, agent_key, trace_id, time.strftime("%Y-%m-%dT%H:%M:%SZ")),
         )
         self._store.connection.commit()
 
-        # Build task prompt from CaseContext
         prompt = self._build_task_prompt(state, context)
 
         try:
             from agentscope.message import UserMsg
             import asyncio
 
-            # Agent.reply() is async — run in event loop
             reply = asyncio.run(agent.reply(UserMsg("Orchestrator", prompt)))
 
-            # Extract result
-            result_text = ""
-            if hasattr(reply, "content"):
-                result_text = str(reply.content)[:4000]
+            # Extract text — reply.content may be a list of TextBlock objects
+            raw_text = ""
+            content = getattr(reply, "content", None)
+            if content is not None:
+                if isinstance(content, list):
+                    raw_text = "\n".join(
+                        getattr(block, "text", str(block))
+                        for block in content
+                    )
+                else:
+                    raw_text = str(content)
             elif hasattr(reply, "text"):
-                result_text = str(reply.text)[:4000]
+                raw_text = str(reply.text)
             else:
-                result_text = str(reply)[:4000]
+                raw_text = str(reply)
 
-            result = {
-                "agent": agent_key,
-                "case_id": case_id,
-                "task_id": task_id,
-                "trace_id": trace_id,
-                "team_id": self._team["team_id"] if self._team else "",
-                "status": "completed",
-                "result_summary": result_text[:500],
-                "full_result_length": len(result_text),
-            }
-
-            self._store.connection.execute(
-                """UPDATE agent_runs SET status = 'completed', output_ref = ?,
-                   finished_at = ? WHERE run_id = ?""",
-                (json.dumps(result, ensure_ascii=False),
-                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-            )
+            # ── Failure detection ────────────────────────────────────
+            failure = _detect_failure(raw_text)
+            if failure:
+                result = {
+                    "agent": agent_key, "case_id": case_id,
+                    "task_id": task_id, "trace_id": trace_id,
+                    "team_id": self._team["team_id"] if self._team else "",
+                    "status": "failed",
+                    "failure_reason": failure,
+                    "raw_text": raw_text[:2000],
+                }
+                self._store.connection.execute(
+                    "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
+                    (json.dumps(result, ensure_ascii=False),
+                     time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
+                )
+            else:
+                # ── Try structured JSON extraction ──────────────────
+                structured = _extract_json_block(raw_text)
+                result = {
+                    "agent": agent_key, "case_id": case_id,
+                    "task_id": task_id, "trace_id": trace_id,
+                    "team_id": self._team["team_id"] if self._team else "",
+                    "status": "completed",
+                    "structured_output": structured,
+                    "result_summary": raw_text[:500],
+                    "raw_text": raw_text[:4000],
+                }
+                self._store.connection.execute(
+                    "UPDATE agent_runs SET status = 'completed', output_ref = ?, finished_at = ? WHERE run_id = ?",
+                    (json.dumps(result, ensure_ascii=False),
+                     time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
+                )
         except Exception as exc:
-            result = {"agent": agent_key, "case_id": case_id,
-                      "error": str(exc), "task_id": task_id, "trace_id": trace_id}
+            result = {
+                "agent": agent_key, "case_id": case_id,
+                "task_id": task_id, "trace_id": trace_id,
+                "team_id": self._team["team_id"] if self._team else "",
+                "status": "failed",
+                "failure_reason": f"exception: {exc}",
+            }
             self._store.connection.execute(
-                """UPDATE agent_runs SET status = 'failed', output_ref = ?,
-                   finished_at = ? WHERE run_id = ?""",
+                "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
                 (json.dumps({"error": str(exc)}, ensure_ascii=False),
                  time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
             )
@@ -244,35 +334,60 @@ class AgentTeamsAdapter:
 
     @staticmethod
     def _build_task_prompt(state: str, context: dict[str, Any]) -> str:
-        """Build a structured task prompt from the CaseContext."""
+        """Build a structured task prompt that requests JSON output."""
         case_id = context.get("case_id", "unknown")
         repo = context.get("repository_ref", "")
+        ctx_json = json.dumps(context, ensure_ascii=False)
+
+        base_instruction = (
+            "Return your response as a JSON object inside a ```json code block. "
+            "Do not include any text outside the JSON block. "
+            "The JSON object must include an 'action' field describing what you did.\n\n"
+        )
 
         prompts = {
             "TRIAGED": (
-                f"Case {case_id}: Triage the following inputs. "
+                f"{base_instruction}"
+                f"Case {case_id}: Triage the following software defect inputs. "
                 f"Aggregate, deduplicate, and classify severity. "
-                f"Repository: {repo}. Context: {json.dumps(context, ensure_ascii=False)[:2000]}"
+                f"Extract reproduction conditions and build an evidence index.\n\n"
+                f"Repository: {repo}\n"
+                f"Context: {ctx_json[:2000]}\n\n"
+                f"Return JSON with fields: action, priority (low|medium|high|critical), "
+                f"classification, symptoms[], evidence_sources[], confidence (0.0-1.0)"
             ),
             "DIAGNOSED": (
+                f"{base_instruction}"
                 f"Case {case_id}: Diagnose the root cause. "
-                f"Search relevant code in {repo}, check git history, "
-                f"and assess impact scope. "
-                f"Evidence: {json.dumps(context.get('evidence_refs', []), ensure_ascii=False)}"
+                f"Search relevant code paths in {repo}, check git history for recent changes, "
+                f"and assess impact scope.\n\n"
+                f"Evidence refs: {json.dumps(context.get('evidence_refs', []), ensure_ascii=False)}\n"
+                f"Context: {ctx_json[:2000]}\n\n"
+                f"Return JSON with fields: action, hypotheses[{{description, confidence, code_locations[]}}], "
+                f"impact_scope, risk_level (low|medium|high|critical), remediation_strategy"
             ),
             "REPAIRING": (
+                f"{base_instruction}"
                 f"Case {case_id}: Generate a minimal patch. "
-                f"Repository: {repo}. Create an isolated branch and apply the fix. "
-                f"Diagnosis: {json.dumps(context.get('diagnosis_hypotheses', []), ensure_ascii=False)[:1000]}"
+                f"Create or describe the fix for the diagnosed issue.\n\n"
+                f"Repository: {repo}\n"
+                f"Diagnosis: {json.dumps(context.get('diagnosis_hypotheses', []), ensure_ascii=False)[:1000]}\n\n"
+                f"Return JSON with fields: action, patch_ref (string identifying the patch), "
+                f"branch, files_changed[], test_results[{{test, passed}}]"
             ),
             "VERIFYING": (
+                f"{base_instruction}"
                 f"Case {case_id}: Run quality gates on the patch. "
-                f"Execute tests, static checks, and canary simulation. "
-                f"Return quality_gate_passed: true/false and a recommendation."
+                f"Execute tests, static checks, and assess whether the fix is safe to release.\n\n"
+                f"Return JSON with fields: action, quality_gate_passed (true|false), "
+                f"checks[{{name, passed, detail}}], recommendation (release|reject|rollback)"
             ),
         }
-        return prompts.get(state, f"Case {case_id}: Process state {state}. "
-                                  f"Context: {json.dumps(context, ensure_ascii=False)[:2000]}")
+        return prompts.get(state, (
+            f"{base_instruction}"
+            f"Case {case_id}: Process state {state}. "
+            f"Context: {ctx_json[:2000]}"
+        ))
 
     # ── Trace export ────────────────────────────────────────────────────
 

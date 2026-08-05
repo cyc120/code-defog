@@ -1,0 +1,24 @@
+# Code CCTV DevLoop — pinned dependencies for reproducible builds
+# Python 3.10+ required
+#
+# Install:  pip install -r requirements.txt
+#
+# Core DevLoop / AgentTeams Runtime
+agentscope==2.0.5
+# Model SDKs (at least one needed for production AgentTeams mode)
+dashscope==1.26.5
+# Optional: openai, anthropic, deepseek SDKs — agentscope bundles adapters
+# for all of these; install whichever you have API keys for.
+
+# Credential & config
+PyYAML==6.0.2
+pydantic==2.13.4
+pydantic-core==2.46.4
+
+# Testing
+pytest==9.0.3
+pytest-asyncio==1.3.0
+
+# Code CCTV GUI (optional — only needed for native desktop views)
+# Windows: pip install PySide6
+# macOS:   pre-built SwiftUI app, no Python GUI deps

@@ -1,0 +1,68 @@
+{
+  "case_id": "case-a0399c1c13a2",
+  "result": {
+    "agent": "triage",
+    "case_id": "case-a0399c1c13a2",
+    "task_id": "task-298ab685f0e8",
+    "trace_id": "trace-b1e947cb5c2f4337",
+    "team_id": "team-9e0488f91161",
+    "status": "completed",
+    "structured_output": {
+      "action": "TRIAGED",
+      "priority": "high",
+      "classification": "Unhandled KeyError Exception",
+      "symptoms": [
+        "KeyError crash"
+      ],
+      "evidence_sources": [
+        {
+          "source_type": "issue",
+          "source_uri": "triage-v3",
+          "description": "Reported KeyError crash in repository D:\\cctv\\code-cctv-general\\demo_target"
+        }
+      ],
+      "confidence": 0.85
+    },
+    "result_summary": "```json\n{\n  \"action\": \"TRIAGED\",\n  \"priority\": \"high\",\n  \"classification\": \"Unhandled KeyError Exception\",\n  \"symptoms\": [\"KeyError crash\"],\n  \"evidence_sources\": [\n    {\n      \"source_type\": \"issue\",\n      \"source_uri\": \"triage-v3\",\n      \"description\": \"Reported KeyError crash in repository D:\\\\cctv\\\\code-cctv-general\\\\demo_target\"\n    }\n  ],\n  \"confidence\": 0.85\n}\n```",
+    "raw_text": "```json\n{\n  \"action\": \"TRIAGED\",\n  \"priority\": \"high\",\n  \"classification\": \"Unhandled KeyError Exception\",\n  \"symptoms\": [\"KeyError crash\"],\n  \"evidence_sources\": [\n    {\n      \"source_type\": \"issue\",\n      \"source_uri\": \"triage-v3\",\n      \"description\": \"Reported KeyError crash in repository D:\\\\cctv\\\\code-cctv-general\\\\demo_target\"\n    }\n  ],\n  \"confidence\": 0.85\n}\n```"
+  },
+  "trace": {
+    "case_id": "case-a0399c1c13a2",
+    "team": {
+      "team_id": "team-9e0488f91161",
+      "created_at": "2026-08-05T02:18:19.355584Z",
+      "agents": {
+        "triage": {
+          "agent_id": "triage-eb2e2c9c",
+          "name": "Triage Evidence Agent"
+        },
+        "diagnosis": {
+          "agent_id": "diagnosis-b4d9ec1c",
+          "name": "Diagnosis Impact Agent"
+        },
+        "repair": {
+          "agent_id": "repair-781d3b4f",
+          "name": "Repair Agent"
+        },
+        "verification": {
+          "agent_id": "verification-a1b00268",
+          "name": "Verification Release Agent"
+        }
+      }
+    },
+    "agent_runs": [
+      {
+        "run_id": "run-d50d1f9f",
+        "case_id": "case-a0399c1c13a2",
+        "agent_id": "triage",
+        "input_ref": null,
+        "output_ref": "{\"agent\": \"triage\", \"case_id\": \"case-a0399c1c13a2\", \"task_id\": \"task-298ab685f0e8\", \"trace_id\": \"trace-b1e947cb5c2f4337\", \"team_id\": \"team-9e0488f91161\", \"status\": \"completed\", \"structured_output\": {\"action\": \"TRIAGED\", \"priority\": \"high\", \"classification\": \"Unhandled KeyError Exception\", \"symptoms\": [\"KeyError crash\"], \"evidence_sources\": [{\"source_type\": \"issue\", \"source_uri\": \"triage-v3\", \"description\": \"Reported KeyError crash in repository D:\\\\cctv\\\\code-cctv-general\\\\demo_target\"}], \"confidence\": 0.85}, \"result_summary\": \"```json\\n{\\n  \\\"action\\\": \\\"TRIAGED\\\",\\n  \\\"priority\\\": \\\"high\\\",\\n  \\\"classification\\\": \\\"Unhandled KeyError Exception\\\",\\n  \\\"symptoms\\\": [\\\"KeyError crash\\\"],\\n  \\\"evidence_sources\\\": [\\n    {\\n      \\\"source_type\\\": \\\"issue\\\",\\n      \\\"source_uri\\\": \\\"triage-v3\\\",\\n      \\\"description\\\": \\\"Reported KeyError crash in repository D:\\\\\\\\cctv\\\\\\\\code-cctv-general\\\\\\\\demo_target\\\"\\n    }\\n  ],\\n  \\\"confidence\\\": 0.85\\n}\\n```\", \"raw_text\": \"```json\\n{\\n  \\\"action\\\": \\\"TRIAGED\\\",\\n  \\\"priority\\\": \\\"high\\\",\\n  \\\"classification\\\": \\\"Unhandled KeyError Exception\\\",\\n  \\\"symptoms\\\": [\\\"KeyError crash\\\"],\\n  \\\"evidence_sources\\\": [\\n    {\\n      \\\"source_type\\\": \\\"issue\\\",\\n      \\\"source_uri\\\": \\\"triage-v3\\\",\\n      \\\"description\\\": \\\"Reported KeyError crash in repository D:\\\\\\\\cctv\\\\\\\\code-cctv-general\\\\\\\\demo_target\\\"\\n    }\\n  ],\\n  \\\"confidence\\\": 0.85\\n}\\n```\"}",
+        "status": "completed",
+        "trace_id": "trace-b1e947cb5c2f4337",
+        "started_at": "2026-08-05T10:18:19Z",
+        "finished_at": "2026-08-05T10:18:22Z"
+      }
+    ],
+    "mode": "production"
+  }
+}

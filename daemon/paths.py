@@ -7,8 +7,8 @@ restricted to the owning user.
 
 Standalone scripts (scripts/event_client.py, scripts/manage_service.py) add a
 sys.path shim and ``from daemon import paths``; the daemon package imports this
-module relatively. The Windows app duplicates the resolution in
-windows/app_paths.py so it can run without importing the daemon package.
+module relatively. The Web console is served by the daemon and therefore uses
+this same configuration source.
 """
 
 from __future__ import annotations
@@ -43,13 +43,18 @@ def config_path() -> Path:
     return data_dir() / "service.json"
 
 
+def service_registry_dir() -> Path:
+    """Directory containing public descriptors for locally running services."""
+    return data_dir() / "services"
+
+
 def state_path() -> Path:
     """Path to the SQLite state database."""
     return data_dir() / "state.sqlite3"
 
 
 def log_path(kind: str) -> Path:
-    """Standard output log for a component (daemon, lifecycle, desktop)."""
+    """Standard output log for a local service component."""
     return data_dir() / f"{kind}.log"
 
 

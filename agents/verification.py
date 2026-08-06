@@ -92,7 +92,7 @@ def _record_gate_evidence(
 
 
 def run(context: dict[str, Any]) -> dict[str, Any]:
-    """Entry point called by AgentTeams Adapter (or its mock).
+    """Entry point called by the configured execution adapter or its mock.
 
     If *context* contains ``repository_ref`` pointing to a directory
     with cli.py, the agent runs the real quality gate.  Otherwise it

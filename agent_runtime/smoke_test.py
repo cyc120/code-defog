@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""AgentTeams Runtime smoke test for Code CCTV DevLoop.
+"""Local AgentScope smoke test for Code CCTV DevLoop.
 
-Creates a minimal Team with the four DevLoop Agent identities,
-submits a Task, and captures real team_id / task_id / trace evidence.
+Creates a local AgentScope team with the four DevLoop Agent identities and
+records application-layer mapping IDs.  It does not deploy, invoke, or
+validate an external AgentTeams Team/Task/Handoff/Trace workflow.
 
 Usage:
     python agent_runtime/smoke_test.py
@@ -34,7 +35,7 @@ def utc_now() -> str:
 
 
 def save_evidence(filename: str, data: dict[str, Any]) -> Path:
-    """Save smoke test evidence to evidence/ directory."""
+    """Save local smoke-test output; it is not AgentTeams evidence."""
     evidence_dir = _REPO_ROOT / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     path = evidence_dir / filename
@@ -118,7 +119,7 @@ def create_devloop_team() -> dict[str, Any]:
     # NOTE: these are APPLICATION-LAYER mapping IDs, not runtime-native
     # identifiers.  Real runtime identifiers (reply_id, session_id) and the
     # event stream (MODEL_CALL_*, REPLY_END, EXCEED_MAX_ITERS) are captured
-    # by the Production Adapter via AgentScope reply_stream.
+    # by the AgentScope execution adapter via reply_stream.
     team_id = f"team-{uuid.uuid4().hex[:12]}"
     return {
         "team_id": team_id,
@@ -127,7 +128,7 @@ def create_devloop_team() -> dict[str, Any]:
             "team_id / agent_id are application-layer mapping IDs created "
             "locally. Runtime-native identifiers (runtime_reply_id, "
             "runtime_session_id) and the event stream are captured by the "
-            "Production Adapter via AgentScope reply_stream."
+            "AgentScope execution adapter via reply_stream."
         ),
         "agents": {
             role: {
@@ -151,8 +152,8 @@ def submit_task(team: dict[str, Any], case_context: dict[str, Any]) -> dict[str,
     """Submit a Case task to the Team and capture task metadata.
 
     The task/trace IDs returned here are application-layer mapping IDs.
-    Runtime-native trace evidence is captured separately by the Production
-    Adapter (runtime_reply_id, runtime_events from reply_stream).
+    Runtime-native trace evidence is captured separately by the AgentScope
+    execution adapter (runtime_reply_id, runtime_events from reply_stream).
     """
     task_id = f"devtask-{uuid.uuid4().hex[:12]}"
     trace_id = f"devtrace-{uuid.uuid4().hex[:16]}"
@@ -167,7 +168,7 @@ def submit_task(team: dict[str, Any], case_context: dict[str, Any]) -> dict[str,
         "id_provenance": (
             "devloop_task_id / devloop_trace_id are application-layer mapping "
             "IDs. They correlate DevLoop state machine events with the runtime "
-            "evidence captured by the Production Adapter."
+            "evidence captured by the AgentScope execution adapter."
         ),
         "agent_assignments": {
             "TRIAGED": team["agents"]["triage"]["agent_id"],
@@ -180,7 +181,7 @@ def submit_task(team: dict[str, Any], case_context: dict[str, Any]) -> dict[str,
 
 def main() -> int:
     print("=" * 60)
-    print("Code CCTV DevLoop — AgentTeams Runtime Smoke Test")
+    print("Code CCTV DevLoop — Local AgentScope Smoke Test")
     print("=" * 60)
 
     # ── Step 1: Create Team ───────────────────────────────────────────
@@ -219,7 +220,7 @@ def main() -> int:
     print(f"  devloop_trace_id: {task['devloop_trace_id']}")
     print(f"  team_id:          {task['team_id']}")
     print("  (These are application-layer mapping IDs — runtime-native")
-    print("   identifiers are captured by the Production Adapter.)")
+    print("   identifiers are captured by the AgentScope execution adapter.)")
 
     save_evidence("smoke_test_task.json", task)
 
@@ -243,13 +244,14 @@ def main() -> int:
     save_evidence("smoke_test_bundle.json", bundle)
 
     print("\n" + "=" * 60)
-    print("SMOKE TEST PASSED")
+    print("LOCAL AGENTSCOPE SMOKE TEST PASSED")
     print(f"  Team:  {team['team_id']}  (application-layer mapping ID)")
     print(f"  Task:  {task['devloop_task_id']}  (application-layer mapping ID)")
     print(f"  Trace: {task['devloop_trace_id']}  (application-layer mapping ID)")
     print(f"  Evidence saved to: {_REPO_ROOT / 'evidence'}")
     print("  NOTE: runtime-native identifiers (runtime_reply_id, session_id)")
-    print("  and the event stream are captured by the Production Adapter.")
+    print("  and the event stream are captured by the AgentScope execution adapter.")
+    print("  This output is not evidence of an AgentTeams deployment.")
     print("=" * 60)
     return 0
 

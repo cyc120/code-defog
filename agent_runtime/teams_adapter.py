@@ -1,6 +1,13 @@
-"""AgentTeams Runtime Adapter — interface + local mock + production AgentScope.
+"""Local AgentScope execution adapter with an in-process mock fallback.
 
-Production mode (P2):
+This historical module path used to call its AgentScope wrapper an
+``AgentTeamsAdapter``.  It does not communicate with an AgentTeams control
+plane, create AgentTeams workers, or emit AgentTeams-native traces.  The
+public implementation is therefore named :class:`AgentScopeExecutionAdapter`.
+``AgentTeamsAdapter`` remains only as a source-compatible alias for older
+callers and must not be used as evidence of an AgentTeams integration.
+
+AgentScope mode:
     Wraps the AgentScope SDK.  Creates real Agent objects from
     identities.yaml, dispatches CaseContext as structured tasks,
     and captures Team / Task / Trace evidence.
@@ -19,9 +26,8 @@ Production mode (P2):
 Mock mode (unit tests / offline dev):
     Loads identities, calls Agent entry functions in-process.
 
-P2 HARD REQUIREMENT (framework Section 6.1):
-    Both demo cases must run on the real Runtime and export real
-    Team / Task / Trace evidence.
+The AgentScope reply stream is useful local runtime evidence, but it is not
+AgentTeams Team / Task / Trace evidence.
 """
 
 from __future__ import annotations
@@ -161,12 +167,15 @@ class AgentEntrypoint(Protocol):
     def __call__(self, case_context: dict[str, Any]) -> dict[str, Any]: ...
 
 
-class AgentTeamsAdapter:
-    """AgentScope SDK wrapper with local mock fallback.
+class AgentScopeExecutionAdapter:
+    """AgentScope SDK wrapper with a local mock fallback.
 
     Modes:
         "mock"       — in-process stub calls (unit tests, offline dev)
-        "production" — real AgentScope Agent dispatch with LLM
+        "agentscope" — real AgentScope Agent dispatch with an LLM
+
+    This adapter is intentionally local.  It must never be presented as a
+    substitute for the external AgentTeams runtime.
     """
 
     def __init__(self, store: Any) -> None:
@@ -180,15 +189,20 @@ class AgentTeamsAdapter:
         return self._mode
 
     def set_mode(self, mode: str) -> None:
-        if mode not in ("mock", "production"):
+        # ``production`` was the previous public spelling.  Retain it only
+        # for callers upgrading in place; the resulting mode is explicitly
+        # AgentScope rather than AgentTeams.
+        if mode == "production":
+            mode = "agentscope"
+        if mode not in ("mock", "agentscope"):
             raise ValueError(f"Unknown mode: {mode}")
         self._mode = mode
-        if mode == "production":
-            self._init_production_team()
+        if mode == "agentscope":
+            self._init_agentscope_team()
 
-    # ── Production team initialisation ───────────────────────────────────
+    # ── AgentScope team initialisation ────────────────────────────────────
 
-    def _init_production_team(self) -> None:
+    def _init_agentscope_team(self) -> None:
         """Create the four DevLoop Agents as real AgentScope Agent objects."""
         import yaml
 
@@ -266,7 +280,7 @@ class AgentTeamsAdapter:
             module_path = f"agents.{agent_key}"
             return self._dispatch_mock(case_id, state, module_path, context)
         else:
-            return self._dispatch_production(case_id, state, agent_key, context)
+            return self._dispatch_agentscope(case_id, state, agent_key, context)
 
     # ── Mock dispatch ────────────────────────────────────────────────────
 
@@ -288,11 +302,11 @@ class AgentTeamsAdapter:
             if agent_fn is None:
                 raise RuntimeError(f"Agent module {module_path} has no run() function")
             # The StateStore is injected only into the in-process mock. It is
-            # never serialized into a production Runtime task prompt.
+            # never serialized into an AgentScope runtime task prompt.
             result = agent_fn({**context, "_state_store": self._store})
             if not isinstance(result, dict):
                 raise RuntimeError(f"Agent module {module_path} returned a non-object result")
-            # Mock and production modes expose the same completion contract so
+            # Mock and AgentScope modes expose the same completion contract so
             # the orchestrator never has to infer success from the execution mode.
             result.setdefault("status", "completed")
             self._store.connection.execute(
@@ -309,12 +323,12 @@ class AgentTeamsAdapter:
         self._store.connection.commit()
         return result
 
-    # ── Production dispatch ──────────────────────────────────────────────
+    # ── AgentScope dispatch ──────────────────────────────────────────────
 
-    def _dispatch_production(
+    def _dispatch_agentscope(
         self, case_id: str, state: str, agent_key: str, context: dict[str, Any],
     ) -> dict[str, Any]:
-        """Real AgentScope Agent dispatch with failure detection and
+        """AgentScope Agent dispatch with failure detection and
         structured output validation.
 
         Returns:
@@ -330,7 +344,7 @@ class AgentTeamsAdapter:
 
         agent = self._agents.get(agent_key)
         if agent is None:
-            return {"error": f"Agent '{agent_key}' not initialised — call set_mode('production') first"}
+            return {"error": f"Agent '{agent_key}' not initialised — call set_mode('agentscope') first"}
 
         # Application-layer IDs (NOT runtime-native identifiers)
         devloop_task_id = f"devtask-{uuid.uuid4().hex[:12]}"
@@ -603,3 +617,9 @@ class AgentTeamsAdapter:
                 "TOOL_CALL_*, REPLY_END, EXCEED_MAX_ITERS)."
             ),
         }
+
+
+# Source compatibility for callers written before the adapter was named
+# correctly.  This alias is local AgentScope execution only, never an
+# AgentTeams control-plane integration.
+AgentTeamsAdapter = AgentScopeExecutionAdapter

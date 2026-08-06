@@ -310,6 +310,48 @@ class StateStoreTests(unittest.TestCase):
 
 
 class ServerTests(unittest.TestCase):
+    def test_health_and_ui_config_expose_only_same_origin_connection_data(self) -> None:
+        class DiscoveryStub:
+            def discover(self) -> list[dict[str, object]]:
+                return [{
+                    "id": "local-0001", "label": "Code CCTV", "host": "127.0.0.1",
+                    "port": 43210, "ui_url": "http://127.0.0.1:43210/ui",
+                    "status": "ready", "source": "registry", "pid": 1,
+                    "updated_at": "2026-08-06T08:00:00Z",
+                }]
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            ui_dir = Path(__file__).resolve().parents[1] / "web"
+            server = CodeCCTVServer(
+                ("127.0.0.1", 0), "test-token", store, ui_dir=str(ui_dir),
+                discovery_agent=DiscoveryStub(), instance_id="local-0001",
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                with urlopen(f"{base_url}/health", timeout=1) as response:
+                    health = json.loads(response.read())
+                self.assertEqual(health["instance_id"], "local-0001")
+                self.assertTrue(health["ui"])
+
+                with urlopen(f"{base_url}/ui/config", timeout=1) as response:
+                    config = json.loads(response.read())
+                    self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+                self.assertEqual(config["config"]["token"], "test-token")
+
+                with urlopen(f"{base_url}/ui/services", timeout=1) as response:
+                    services = json.loads(response.read())
+                    self.assertIsNone(response.headers.get("Access-Control-Allow-Origin"))
+                self.assertEqual(services["services"][0]["id"], "local-0001")
+                self.assertNotIn("token", json.dumps(services))
+            finally:
+                server.shutdown()
+                server.server_close()
+                store.close()
+                thread.join(timeout=1)
+
     def test_http_api_authenticates_and_ingests_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
@@ -996,7 +1038,7 @@ class DevLoopAgentContextTests(unittest.TestCase):
 
             def dispatch_task(self, case_id: str, state: str, context: dict) -> dict:
                 self.context = context
-                return {"status": "completed", "action": "triaged"}
+                return {"status": "failed", "failure_reason": "stop after capture"}
 
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
@@ -1021,6 +1063,145 @@ class DevLoopAgentContextTests(unittest.TestCase):
             self.assertEqual(source["signals"]["message_pattern"], "missing projects key")
             self.assertIn("KeyError: missing projects key", teams.context["normalized_symptoms"])
             store.close()
+
+    def test_completed_handoffs_auto_advance_and_survive_orchestrator_restart(self) -> None:
+        """Repair receives the diagnosis persisted by the earlier Agent run."""
+        from agent_runtime.orchestrator import Orchestrator
+
+        class PersistingTeams:
+            agent_ids = {"TRIAGED": "triage", "DIAGNOSED": "diagnosis"}
+
+            def __init__(self, store: StateStore) -> None:
+                self.store = store
+                self.contexts: list[tuple[str, dict]] = []
+
+            def dispatch_task(self, case_id: str, state: str, context: dict) -> dict:
+                self.contexts.append((state, context))
+                outputs = {
+                    "TRIAGED": {
+                        "status": "completed",
+                        "structured_output": {
+                            "action": "triaged", "priority": "high", "confidence": 0.92,
+                        },
+                    },
+                    "DIAGNOSED": {
+                        "status": "completed",
+                        "structured_output": {
+                            "action": "diagnosed",
+                            "hypotheses": [{
+                                "description": "missing projects fallback",
+                                "confidence": 0.96,
+                                "code_locations": ["demo_target/cli.py:25"],
+                            }],
+                            "impact_scope": "CLI list command",
+                            "risk_level": "high",
+                            "remediation_strategy": "Use config.get('projects', [])",
+                        },
+                    },
+                }
+                output = outputs[state]
+                run_number = len(self.contexts)
+                self.store.connection.execute(
+                    """INSERT INTO agent_runs
+                       (run_id, case_id, agent_id, output_ref, status, trace_id, started_at, finished_at)
+                       VALUES (?, ?, ?, ?, 'completed', 'trace-handoff', ?, ?)""",
+                    (
+                        f"run-handoff-{run_number}", case_id, self.agent_ids[state],
+                        json.dumps(output), "2026-08-06T00:00:00Z", "2026-08-06T00:00:00Z",
+                    ),
+                )
+                self.store.connection.commit()
+                return output
+
+        class RepairCapture:
+            def __init__(self) -> None:
+                self.context: dict | None = None
+
+            def dispatch_task(self, case_id: str, state: str, context: dict) -> dict:
+                self.context = context
+                if state != "REPAIRING":
+                    raise AssertionError(f"expected REPAIRING, got {state}")
+                return {"status": "failed", "failure_reason": "capture only"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            created = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "test-persisted-handoff",
+                "client_nonce": "nonce-persisted-handoff", "raw_content": "KeyError",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "projects",
+                    "key_frames": ["demo_target/cli.py:25"], "keywords": ["projects"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = created["case_id"]
+            teams = PersistingTeams(store)
+
+            final = Orchestrator(store, teams).advance(case_id, "TRIAGED")
+            self.assertEqual(final["status"], "PLAN_APPROVAL")
+            self.assertEqual(final["pending_action"], "approve_plan")
+            diagnosis_context = dict(teams.contexts)["DIAGNOSED"]
+            self.assertEqual(diagnosis_context["priority"], "high")
+
+            store.connection.execute(
+                "UPDATE cases SET base_commit = 'base-handoff' WHERE case_id = ?", (case_id,)
+            )
+            store.connection.commit()
+            grant = store.issue_approval_grant(case_id, "approve_plan", "base-handoff", "reviewer")
+            self.assertIsNotNone(grant)
+            approved = store.perform_case_action(case_id, "approve_plan", {
+                "approval_token": grant["approval_token"], "target_ref": "base-handoff",
+                "reason": "approved", "approver": "reviewer",
+            })
+            self.assertEqual(approved["status"], "REPAIRING")
+
+            repair = RepairCapture()
+            resumed = Orchestrator(store, repair).run_active_state(case_id)
+            self.assertEqual(resumed["status"], "REPAIRING")
+            self.assertIsNotNone(repair.context)
+            self.assertEqual(repair.context["diagnosis_hypotheses"][0]["description"], "missing projects fallback")
+            self.assertEqual(repair.context["impact_scope"], "CLI list command")
+            self.assertEqual(repair.context["risk_level"], "high")
+            self.assertEqual(repair.context["remediation_plan"], "Use config.get('projects', [])")
+            store.close()
+
+    def test_failed_triage_or_diagnosis_never_auto_advances(self) -> None:
+        """Failure leaves the Case at the active state for retry or escalation."""
+        from agent_runtime.orchestrator import Orchestrator
+
+        class FailingTeams:
+            def __init__(self, fail_state: str) -> None:
+                self.fail_state = fail_state
+                self.calls: list[str] = []
+
+            def dispatch_task(self, case_id: str, state: str, context: dict) -> dict:
+                self.calls.append(state)
+                if state == self.fail_state:
+                    return {"status": "failed", "failure_reason": f"{state} failed"}
+                return {"status": "completed", "action": state.lower()}
+
+        for fail_state, expected_status, expected_calls in (
+            ("TRIAGED", "TRIAGED", ["TRIAGED"]),
+            ("DIAGNOSED", "DIAGNOSED", ["TRIAGED", "DIAGNOSED"]),
+        ):
+            with self.subTest(fail_state=fail_state), tempfile.TemporaryDirectory() as directory:
+                store = StateStore(Path(directory) / "state.sqlite3")
+                created = store.create_or_find_case({
+                    "source_type": "issue", "source_uri": f"test-failed-{fail_state}",
+                    "client_nonce": f"nonce-failed-{fail_state}", "raw_content": "KeyError",
+                    "repository_ref": "/test",
+                    "extracted_signals": {
+                        "exception_type": "KeyError", "message_pattern": "projects",
+                        "key_frames": ["demo_target/cli.py:25"], "keywords": ["projects"],
+                        "repository_ref": "/test",
+                    },
+                })
+                teams = FailingTeams(fail_state)
+                result = Orchestrator(store, teams).advance(created["case_id"], "TRIAGED")
+                self.assertEqual(result["status"], expected_status)
+                self.assertEqual(teams.calls, expected_calls)
+                store.close()
 
 
 class DevLoopEndToEndReleaseTests(unittest.TestCase):
@@ -1173,13 +1354,12 @@ class ControlledRepairWorkflowTests(unittest.TestCase):
         return result["case_id"]
 
     def _approve_plan(self, store: StateStore, case_id: str, orchestrator: object) -> None:
-        orchestrator.advance(case_id, "TRIAGED")
-        orchestrator.advance(case_id, "DIAGNOSED")
+        plan = orchestrator.advance(case_id, "TRIAGED")
+        self.assertEqual(plan["status"], "PLAN_APPROVAL")
         store.connection.execute(
             "UPDATE cases SET base_commit = 'demo-base-1' WHERE case_id = ?", (case_id,)
         )
         store.connection.commit()
-        orchestrator.advance(case_id, "PLAN_APPROVAL")
         grant = store.issue_approval_grant(case_id, "approve_plan", "demo-base-1", "reviewer")
         result = store.perform_case_action(case_id, "approve_plan", {
             "approval_token": grant["approval_token"],
@@ -1475,13 +1655,19 @@ class DevLoopFingerprintTests(unittest.TestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+_TEST_APPROVAL_KEY = "test-human-approval-key"
+
+
 def _start_server(
     store: StateStore, orchestrator: object | None = None,
 ) -> tuple[CodeCCTVServer, str, str]:
     """Start the daemon on a random port and return (server, base_url, token)."""
     port = 0
     token = secrets.token_hex(16)
-    server = CodeCCTVServer(("127.0.0.1", port), token, store, orchestrator)
+    server = CodeCCTVServer(
+        ("127.0.0.1", port), token, store, orchestrator,
+        approval_secret=_TEST_APPROVAL_KEY,
+    )
     actual_port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -1517,13 +1703,12 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
                     },
                 })
                 case_id = created["case_id"]
-                orchestrator.advance(case_id, "TRIAGED")
-                orchestrator.advance(case_id, "DIAGNOSED")
+                plan = orchestrator.advance(case_id, "TRIAGED")
+                self.assertEqual(plan["status"], "PLAN_APPROVAL")
                 store.connection.execute(
                     "UPDATE cases SET base_commit = 'http-demo-base' WHERE case_id = ?", (case_id,)
                 )
                 store.connection.commit()
-                orchestrator.advance(case_id, "PLAN_APPROVAL")
                 grant = store.issue_approval_grant(
                     case_id, "approve_plan", "http-demo-base", "reviewer"
                 )
@@ -1858,9 +2043,9 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
 class DevLoopApprovalGrantEndpointTests(unittest.TestCase):
     """POST /api/cases/{id}/approval-grant — issue one-time approval grants.
 
-    Issuing uses the service token; consuming goes through /actions with the
-    approval token type + one-shot grant.  A service token alone must not be
-    able to complete an approval.
+    Issuing requires both the service token and a human approval key;
+    consuming goes through /actions with the approval token type + one-shot
+    grant. A service token alone must not be able to complete an approval.
     """
 
     def _make_plan_approval_case(self, store: StateStore, nonce: str) -> str:
@@ -1891,7 +2076,11 @@ class DevLoopApprovalGrantEndpointTests(unittest.TestCase):
         request = Request(
             f"{base_url}/api/cases/{case_id}/approval-grant",
             data=body, method="POST",
-            headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+            headers={
+                "Content-Type": "application/json",
+                "X-Code-CCTV-Token": token,
+                "X-Code-CCTV-Approval-Key": _TEST_APPROVAL_KEY,
+            },
         )
         return urlopen(request, timeout=10)
 
@@ -1976,6 +2165,27 @@ class DevLoopApprovalGrantEndpointTests(unittest.TestCase):
             finally:
                 server.shutdown(); server.server_close(); store.close()
 
+    def test_issue_grant_requires_human_approval_key(self) -> None:
+        """A service token without the independent human key is forbidden."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            server, base_url, token = _start_server(store)
+            try:
+                case_id = self._make_plan_approval_case(store, "no-human-key")
+                body = json.dumps({
+                    "action": "approve_plan", "target_ref": "base-01", "approver": "reviewer",
+                }).encode()
+                request = Request(
+                    f"{base_url}/api/cases/{case_id}/approval-grant",
+                    data=body, method="POST",
+                    headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+                )
+                with self.assertRaises(HTTPError) as raised:
+                    urlopen(request, timeout=10)
+                self.assertEqual(raised.exception.code, 403)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
     def test_issue_grant_bad_body(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
@@ -1987,7 +2197,11 @@ class DevLoopApprovalGrantEndpointTests(unittest.TestCase):
                 request = Request(
                     f"{base_url}/api/cases/{case_id}/approval-grant",
                     data=body, method="POST",
-                    headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": token,
+                        "X-Code-CCTV-Approval-Key": _TEST_APPROVAL_KEY,
+                    },
                 )
                 with self.assertRaises(HTTPError) as raised:
                     urlopen(request, timeout=10)
@@ -1997,7 +2211,11 @@ class DevLoopApprovalGrantEndpointTests(unittest.TestCase):
                 request2 = Request(
                     f"{base_url}/api/cases/{case_id}/approval-grant",
                     data=body2, method="POST",
-                    headers={"Content-Type": "application/json", "X-Code-CCTV-Token": token},
+                    headers={
+                        "Content-Type": "application/json",
+                        "X-Code-CCTV-Token": token,
+                        "X-Code-CCTV-Approval-Key": _TEST_APPROVAL_KEY,
+                    },
                 )
                 with self.assertRaises(HTTPError) as raised:
                     urlopen(request2, timeout=10)

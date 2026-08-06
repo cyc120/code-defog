@@ -33,12 +33,18 @@ from retrospective.skills import (
 )
 
 
+_TEST_APPROVAL_KEY = "test-human-approval-key"
+
+
 def _start_server(
     store: StateStore, orchestrator: object | None = None,
 ) -> tuple[CodeCCTVServer, str, str]:
     """Start the daemon on a random port and return (server, base_url, token)."""
     token = secrets.token_hex(16)
-    server = CodeCCTVServer(("127.0.0.1", 0), token, store, orchestrator)
+    server = CodeCCTVServer(
+        ("127.0.0.1", 0), token, store, orchestrator,
+        approval_secret=_TEST_APPROVAL_KEY,
+    )
     actual_port = server.server_address[1]
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -495,7 +501,7 @@ class DevLoopKnowledgeHttpTests(unittest.TestCase):
                     headers={
                         "Content-Type": "application/json",
                         "X-Code-CCTV-Token": token,
-                        "X-Code-CCTV-Token-Type": "approval",
+                        "X-Code-CCTV-Approval-Key": _TEST_APPROVAL_KEY,
                     },
                 )
                 with urlopen(request, timeout=10) as response:
@@ -512,7 +518,7 @@ class DevLoopKnowledgeHttpTests(unittest.TestCase):
                 server.shutdown(); server.server_close(); store.close()
 
     def test_post_knowledge_review_rejects_service_token(self) -> None:
-        """Service tokens (held by Agents) must not be able to verify knowledge."""
+        """A service token without the human approval key must be forbidden."""
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
             server, base_url, token = _start_server(store)
@@ -547,7 +553,7 @@ class DevLoopKnowledgeHttpTests(unittest.TestCase):
                     headers={
                         "Content-Type": "application/json",
                         "X-Code-CCTV-Token": token,
-                        "X-Code-CCTV-Token-Type": "approval",
+                        "X-Code-CCTV-Approval-Key": _TEST_APPROVAL_KEY,
                     },
                 )
                 with self.assertRaises(HTTPError) as raised:

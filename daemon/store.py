@@ -1156,6 +1156,41 @@ class StateStore:
                 "retrospective": self.get_retrospective(case_id),
             }
 
+    def get_latest_completed_agent_output(
+        self, case_id: str, agent_id: str,
+    ) -> dict[str, Any] | None:
+        """Return the newest valid, completed output for an Agent.
+
+        Mock runs use module paths such as ``agents.diagnosis`` while the
+        AgentScope adapter stores the short identity ``diagnosis``.  Both are
+        evidence records for the same handoff and must survive a process
+        restart.  ``structured_output`` is flattened for callers while the
+        raw audit record remains unchanged in ``agent_runs.output_ref``.
+        """
+        aliases = (agent_id, f"agents.{agent_id}")
+        with self.lock:
+            rows = self.connection.execute(
+                """SELECT run_id, output_ref FROM agent_runs
+                   WHERE case_id = ? AND agent_id IN (?, ?) AND status = 'completed'
+                   ORDER BY COALESCE(finished_at, started_at) DESC, rowid DESC""",
+                (case_id, *aliases),
+            ).fetchall()
+
+        for row in rows:
+            try:
+                output = json.loads(row["output_ref"] or "")
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(output, dict) or output.get("status") not in (None, "completed"):
+                continue
+
+            structured = output.get("structured_output")
+            if isinstance(structured, dict):
+                output = {**output, **structured}
+            output["agent_run_id"] = row["run_id"]
+            return output
+        return None
+
     # ── DevLoop: knowledge records & retrospective ─────────────────────────
 
     def record_knowledge_records(

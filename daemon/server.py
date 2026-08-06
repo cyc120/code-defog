@@ -8,6 +8,8 @@ import hmac
 import json
 import os
 import queue
+import secrets
+import sys
 import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,12 +32,22 @@ class CodeCCTVServer(ThreadingHTTPServer):
 
     def __init__(
         self, address: tuple[str, int], token: str, store: StateStore,
-        orchestrator: Any | None = None,
+        orchestrator: Any | None = None, ui_dir: str | None = None,
+        discovery_agent: Any | None = None, instance_id: str | None = None,
+        approval_secret: str | None = None, runtime_mode: str = "mock",
     ) -> None:
         super().__init__(address, CodeCCTVHandler)
         self.token = token
         self.store = store
         self.orchestrator = orchestrator
+        self.ui_dir = ui_dir
+        self.discovery_agent = discovery_agent
+        self.instance_id = instance_id
+        # This second factor is deliberately not included in /ui/config or the
+        # service descriptor. A service-token holder therefore cannot issue
+        # its own approval Grants.
+        self.approval_secret = approval_secret or secrets.token_urlsafe(32)
+        self.runtime_mode = runtime_mode
         self.started_at = time.monotonic()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscriber_lock = Lock()
@@ -50,6 +62,12 @@ class CodeCCTVServer(ThreadingHTTPServer):
             "uptime_seconds": round(time.monotonic() - self.started_at, 1),
         })
         return payload
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """Ignore expected disconnects when a dashboard switches its SSE stream."""
+        if isinstance(sys.exception(), (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
 
     def subscribe(self) -> queue.Queue[dict[str, Any]]:
         subscriber: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=8)
@@ -82,9 +100,6 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        return
-
     # ── Auth helpers ─────────────────────────────────────────────────────
 
     def _supplied_token(self) -> str:
@@ -98,12 +113,32 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         supplied = self._supplied_token()
         return bool(supplied) and hmac.compare_digest(supplied, self.server.token)
 
+    def authorized_human_approval(self) -> bool:
+        supplied = self.headers.get("X-Code-CCTV-Approval-Key", "")
+        return bool(supplied) and hmac.compare_digest(supplied, self.server.approval_secret)
+
     # ── Response helpers ─────────────────────────────────────────────────
 
-    def send_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK) -> None:
+    def send_json(self, payload: dict[str, Any], status: int = HTTPStatus.OK,
+                  *, cors: bool = True) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        if cors:
+            self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        self.wfile.write(body)
+
+    def send_text(self, content: str, content_type: str,
+                  status: int = HTTPStatus.OK) -> None:
+        """Serve a text/HTML payload (used by the static Web console)."""
+        body = content.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -111,6 +146,52 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
         self.wfile.write(body)
+
+    def serve_ui(self) -> None:
+        """Serve the self-contained Web console (web/index.html) if present."""
+        ui_dir = self.server.ui_dir
+        if not ui_dir:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        index = Path(ui_dir) / "index.html"
+        try:
+            content = index.read_text(encoding="utf-8")
+        except OSError:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_text(content, "text/html")
+
+    def serve_ui_config(self) -> None:
+        """Hand the browser the connection config (host/port/token/user).
+
+        The service token is intentionally separate from the human approval
+        key, which is never returned by this endpoint. The daemon binds
+        localhost and uses a fresh random port per start.
+        """
+        import getpass as _getpass
+
+        self.send_json({
+            "ok": True,
+            "config": {
+                "host": self.server.server_address[0],
+                "port": self.server.server_address[1],
+                "token": self.server.token,
+                "user": _getpass.getuser(),
+                "served": True,
+                "runtime_mode": self.server.runtime_mode,
+                "approval_required": True,
+            },
+        }, cors=False)
+
+    def serve_ui_services(self) -> None:
+        """Return public loopback service descriptors for the UI picker."""
+        agent = self.server.discovery_agent
+        services = agent.discover() if agent is not None else []
+        self.send_json({
+            "ok": True,
+            "agent": "local-service-discovery",
+            "services": services,
+        }, cors=False)
 
     def read_json_body(self) -> dict[str, Any] | None:
         try:
@@ -135,13 +216,24 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         self.send_json({"error": "unauthorized — service token required"}, HTTPStatus.UNAUTHORIZED)
         return False
 
+    def require_human_approval(self) -> bool:
+        if not self.require_service_auth():
+            return False
+        if self.authorized_human_approval():
+            return True
+        self.send_json(
+            {"error": "forbidden — human approval key required"},
+            HTTPStatus.FORBIDDEN,
+        )
+        return False
+
     # ── Routing ──────────────────────────────────────────────────────────
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers",
-                         "Content-Type, X-Code-CCTV-Token, X-Code-CCTV-Token-Type")
+                         "Content-Type, X-Code-CCTV-Token, X-Code-CCTV-Token-Type, X-Code-CCTV-Approval-Key")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
@@ -149,8 +241,28 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         route = urlparse(self.path).path
 
         if route == "/health":
-            self.send_json({"ok": True, "service": "code-cctv"})
+            self.send_json({
+                "ok": True,
+                "service": "code-cctv",
+                "instance_id": self.server.instance_id,
+                "ui": bool(self.server.ui_dir),
+            })
             return
+
+        # ── Static Web console (no auth: the UI is served from the same
+        #    localhost, and /ui/config hands the browser the service token
+        #    exactly as /health is open.  Port is a fresh random one per
+        #    daemon start, and the daemon binds 127.0.0.1 only.) ───────────
+        if route in ("/", "/ui", "/ui/"):
+            self.serve_ui()
+            return
+        if route == "/ui/config":
+            self.serve_ui_config()
+            return
+        if route == "/ui/services":
+            self.serve_ui_services()
+            return
+
         if not self.require_service_auth():
             return
         if route == "/api/state":
@@ -215,7 +327,10 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             payload = self.read_json_body()
             if payload is None:
                 return
-            result = self.server.store.create_or_find_case(payload)
+            if self.server.orchestrator is not None:
+                result = self.server.orchestrator.on_source_received(payload)
+            else:
+                result = self.server.store.create_or_find_case(payload)
             if result.get("duplicate"):
                 self.send_json({"ok": True, "duplicate": True,
                                 "observation_id": result["observation_id"]}, HTTPStatus.CONFLICT)
@@ -241,17 +356,17 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.handle_generate_retrospective(case_id)
             return
 
-        # ── DevLoop: knowledge review (service token) ─────────────────────
+        # ── DevLoop: knowledge review (independent human authority) ───────
         if route.startswith("/api/knowledge/") and route.endswith("/review"):
-            if not self.require_service_auth():
+            if not self.require_human_approval():
                 return
             record_id = route.split("/")[3]
             self.handle_knowledge_review(record_id)
             return
 
-        # ── DevLoop: approval grant issuance (service token only) ─────────
+        # ── DevLoop: approval grant issuance (independent human authority) ─
         if route.startswith("/api/cases/") and route.endswith("/approval-grant"):
-            if not self.require_service_auth():
+            if not self.require_human_approval():
                 return
             case_id = route.split("/")[3]
             self.handle_issue_approval_grant(case_id)
@@ -357,18 +472,10 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         """POST /api/knowledge/{record_id}/review — human review of a
         knowledge entry.  decision ∈ {'verified', 'rejected'}.
 
-        Unlike Case actions (which use one-time approval grants), knowledge
-        review is a stateless human act: the caller must present an
-        ``approval`` token type (service tokens — held by Agents — are
-        rejected), and the reviewer identity is taken from the server-side
-        system user rather than trusted from the request body, so an Agent
-        cannot self-verify a knowledge entry or impersonate a reviewer.
+        Knowledge review requires the independent human approval authority at
+        routing time. The reviewer identity is still taken from the server
+        process rather than trusted from the request body.
         """
-        if self._token_type() != TOKEN_TYPE_APPROVAL:
-            self.send_json(
-                {"error": "knowledge review requires X-Code-CCTV-Token-Type: approval"},
-                HTTPStatus.FORBIDDEN)
-            return
         payload = self.read_json_body()
         if payload is None:
             return
@@ -396,11 +503,11 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
     def handle_issue_approval_grant(self, case_id: str) -> None:
         """POST /api/cases/{case_id}/approval-grant
 
-        Service-token guarded.  Issues a one-time approval_token (stored as
+        Human-approval guarded. Issues a one-time approval_token (stored as
         SHA-256) that the caller then consumes via POST /actions with
-        X-Code-CCTV-Token-Type: approval.  Issuing and consuming use
-        different credentials, so a service token alone cannot complete an
-        approval — the grant token is one-shot and bound to the Case state.
+        X-Code-CCTV-Token-Type: approval. The service token alone cannot
+        obtain this bearer credential; the Grant is one-shot and bound to the
+        Case state.
         """
         payload = self.read_json_body()
         if payload is None:

@@ -1,7 +1,7 @@
 # Agent identity definitions for Code CCTV DevLoop.
 #
-# These identities are loaded by the AgentTeams Adapter (or its mock)
-# to configure the team, tool allowlists, and I/O schemas.
+# These identities are loaded by the local AgentScope execution adapter (or
+# its mock) to configure the team, tool allowlists, and I/O schemas.
 #
 # Each entry maps to an Agent in Section 5.2 of the framework document.
 

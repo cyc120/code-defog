@@ -8,8 +8,8 @@ venv/
 AI_WORKLOG.md
 build/
 dist/
-evidence/production_dispatch*.json
-evidence/artifacts/
-evidence/*.sqlite3
-evidence/runtime_*.json
+# Generated local runtime evidence is never source material. Keep only the
+# package marker so imports continue to work.
+/evidence/*
+!/evidence/__init__.py
 docs/_shots/

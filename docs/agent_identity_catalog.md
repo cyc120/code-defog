@@ -1,7 +1,9 @@
 # Agent Identity 清单
 
 > Code CCTV DevLoop · GOAI Agent Infra 方向三 · 竞赛材料
-> 依据框架 §5 扩展，来源：`agent_runtime/identities.yaml`（代码权威定义）+ 生产模式实测行为。
+> 依据框架 §5 扩展，来源：`agent_runtime/identities.yaml`（代码权威定义）+ 当前本地执行契约。
+
+> **实施状态：** 当前公开运行时是本地 `AgentScopeExecutionAdapter`（Mock/AgentScope 实验）；真实 AgentTeams Worker、Team/Task/Handoff 与官方 Trace 尚未配置或验证。本文的 AgentTeams 协同要求是赛事目标，不是已部署事实。
 
 ## 1. 角色边界总览
 
@@ -18,13 +20,13 @@
 |------|---------|------|
 | Case 创建与任务拆解 | `agent_runtime/orchestrator.py` | 接收规范化事件，创建 Case，按状态机推进 |
 | 状态机维护与失败转移 | `agent_runtime/state_machine.py` | 12 状态转移表、超时和升级 |
-| AgentTeams 任务分发 | `agent_runtime/teams_adapter.py` | 状态迁移 → AgentTeams 任务，收集结果 |
+| 本地任务分发与目标 AgentTeams Bridge | `agent_runtime/teams_adapter.py` 中的 `AgentScopeExecutionAdapter` | 当前执行 Mock/AgentScope 实验；真实 AgentTeams 任务、Handoff 和 Trace 待单独接入 |
 | 审批门禁与回滚 | `policy/` + orchestrator | 高风险动作请求审批，**Agent 不持有审批凭证** |
 | 复盘知识沉淀 | `retrospective/`（异步批处理） | Case 终态后生成复盘报告 + 知识条目 |
 
-## 3. 生产模式运行时行为（实测）
+## 3. 本地 AgentScope 运行时行为
 
-生产模式使用真实 AgentScope + DeepSeek LLM。经生产修复后，**4 个 Agent 均以空工具集单轮输出结构化 JSON**——避免带工具 ReAct 循环不收敛（`EXCEED_MAX_ITERS`）。
+`--runtime-mode agentscope` 使用 AgentScope + 可配置 DeepSeek 凭证的本地实验路径。4 个 Agent 当前以空工具集输出结构化 JSON，避免带工具 ReAct 循环不收敛（`EXCEED_MAX_ITERS`）。这不是 AgentTeams 生产运行或官方 Trace 证据。
 
 | Agent | toolkit | 状态映射 | 结构化输出字段 |
 |-------|---------|---------|---------------|
@@ -41,11 +43,11 @@
 
 - 迭代耗尽、空输出、模型拒绝 → `failed`（绝不冒充 `completed`）。
 - `action`/`hypotheses` 等核心 LLM 输出嵌套在 `structured_output`，复盘层 `_parse_output_ref` 会展开。
-- 失败的 Agent 运行不得驱动任何状态转移 → 编排层转 `ESCALATED`。
+- 分诊或诊断失败不得驱动后续状态转移；Case 停在当前阶段，等待重试、取消或人工升级。验证阶段的执行错误或失败会进入 `ESCALATED`，避免未验证补丁继续流转。
 
 ## 5. 审批安全边界（不可简化为 UI 约定）
 
-1. **令牌分离**：`service_token`（Agent/脚本持有）不能执行审批动作，调用返回 `403`。
-2. **一次性 Grant**：`approval_token` 绑定 case/action/target_ref/时效，消费即失效；仅存 `SHA256(token_hash)`。
-3. **知识复核隔离**：`POST /api/knowledge/{record_id}/review` 要求 `approval` token 类型（service token 被拒），reviewer 身份取服务端系统用户，客户端不可伪造。
+1. **双因子签发**：`service_token`（Agent/脚本持有）不能单独签发审批 Grant；签发还要求 `X-Code-CCTV-Approval-Key`，缺失时返回 `403`。
+2. **一次性 Grant**：`approval_token` 绑定 case/action/target_ref/时效，以 `X-Code-CCTV-Token-Type: approval` 消费即失效；仅存 `SHA256(approval_token)`。
+3. **知识复核隔离**：`POST /api/knowledge/{record_id}/review` 要求服务令牌和独立人工审批密钥；reviewer 身份取服务端系统用户，客户端不可伪造。
 4. **证据哈希链**：`tool_runs` 的 `chain_hash` 保证工具调用序列不可篡改。

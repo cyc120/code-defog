@@ -2,14 +2,16 @@
 
 > **项目暂定名：** Code CCTV DevLoop（可观测、可审计的多 Agent 软件研发闭环）  
 > **版本：** v0.5 Reviewed  
-> **状态：** 已审核，本文不对应任何已实施的功能改动。  
+> **状态：** 已审核的赛题目标架构；实现状态与规划分开记录。
 > **赛道对应：** GOAI Agent Infra - 方向三「软件研发全流程协同」
+
+> **当前实现说明（Web-only 收敛后）：** 本项目保留本文的赛题目标与验收口径，但管理界面已收敛为本地 Web 控制台，`macos/`、`windows/` 和旧静态看板已移除。现有 `agent_runtime/teams_adapter.py` 中的公开实现是 `AgentScopeExecutionAdapter`，仅用于本地 Mock/AgentScope 实验，**不代表真实 AgentTeams 接入**；官方控制面、身份凭证、Team/Task/Handoff 工作流和可导出 Trace 尚未配置或验证。下文出现的“真实 AgentTeams”均为赛事目标，不能作为当前已部署能力或运行证据的表述。
 
 ---
 
 ## 1. 一页结论
 
-Code CCTV 已经具备本项目最难替代的基础能力：本地结构化事件采集、按工作区/会话隔离的 SQLite 事件留存、SSE 实时状态流、中文工作日志和 Windows/macOS 可视化界面。
+Code CCTV 已经具备本项目最难替代的基础能力：本地结构化事件采集、按工作区/会话隔离的 SQLite 事件留存、SSE 实时状态流、中文工作日志，以及 Web 管理与本机服务发现入口。
 
 新项目不应推倒重来，而应在现有"**研发过程可见**"的产品上增加"**受控的多 Agent 研发处置闭环**"：将 Issue、日志、测试失败和用户反馈聚合为研发事件；由 AgentTeams 编排的多个 Agent 完成诊断、修复、验证和复盘；全部中间结论、审批和结果都作为可审计证据保留。
 
@@ -21,8 +23,8 @@ Code CCTV 已经具备本项目最难替代的基础能力：本地结构化事�
 
 | 赛道要求 | 本项目的响应 |
 | --- | --- |
-| 不少于 3 个不同职能 Agent | 设计 4 个核心业务 Agent（分诊、诊断、修复、验证），编排与安全门禁由 AgentTeams Adapter + 编排层负责，复盘知识沉淀为异步批处理模块。 |
-| 必须以 AgentTeams 为协同设计基点 | 引入 `AgentTeams Runtime Adapter`，将角色、任务、上下文、状态和审批门禁映射到 AgentTeams 的团队与任务能力。本地 mock 仅用于单元测试与离线开发；P2 完成条件为两条案例在真实 AgentTeams Runtime 跑通并导出 Team/Task/Trace 证据。 |
+| 不少于 3 个不同职能 Agent | 设计 4 个核心业务 Agent（分诊、诊断、修复、验证），编排与安全门禁由目标 AgentTeams Bridge + 编排层负责，复盘知识沉淀为异步批处理模块。 |
+| 必须以 AgentTeams 为协同设计基点 | 目标是引入真实 AgentTeams 控制面，将角色、任务、上下文、状态和审批门禁映射到团队与任务能力。本地 Mock/AgentScope 仅用于单元测试、离线开发与实验；P2 完成条件仍为两条案例在真实 AgentTeams Runtime 跑通并导出可核验的 Team/Task/Trace 证据。 |
 | 输入、拆解、上下文、工具、验证、证据、审批、经验沉淀 | 以"研发事件（Case）"为主线，定义状态机、交接契约、证据包和知识沉淀记录。 |
 | Demo 可运行、可审计 | 使用可重复回放的故障演练样本（2 个预置案例：成功修复 + 验证失败/回滚），展示从多源输入到灰度验证/回滚判定的全链路。 |
 | Skill 复用与开源价值 | 将分诊、诊断、补丁评审、验证、复盘拆为可独立复用的 Skill 与工具接口，每类提供 2-3 个具体候选条目（详见第 11 节）。 |
@@ -32,14 +34,14 @@ Code CCTV 已经具备本项目最难替代的基础能力：本地结构化事�
 MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结构，而非将所有能力都建模为 Agent：
 
 - **4 个核心 Agent**（Triage → Diagnosis → Repair → Verification）完成业务闭环，每个都有清晰的身份定义、工具白名单和输入输出 Schema。
-- **编排与安全门禁**由 `agent_runtime/` 层的状态机和 AgentTeams Adapter 负责，不作为独立 Agent。Orchestrator 的职责（创建 Case、拆解任务、请求审批、推进状态机）属于编排基础设施，不应被建模为一个"与其他 Agent 对等的 Agent"。
+- **编排与安全门禁**由 `agent_runtime/` 层的状态机和目标 AgentTeams Bridge 负责，不作为独立 Agent。Orchestrator 的职责（创建 Case、拆解任务、请求审批、推进状态机）属于编排基础设施，不应被建模为一个"与其他 Agent 对等的 Agent"。
 - **复盘知识沉淀**（Retrospective）降级为 Case 关闭后的异步批处理模块，不参与实时协同链。这样既减少实时 Agent 间的交接复杂度，也避免复盘 Agent 在等待 Case 关闭时占用协同上下文。
 
 ### 1.3 本轮设计边界
 
 - 首个 Demo 运行在本地沙箱和受控测试仓库中，不直接修改生产环境或自动发布生产版本。
 - 现有 `POST /api/events`、`GET /api/state` 和 SSE 流保持兼容；新增研发闭环数据不破坏 Code CCTV 的监控功能。
-- AgentTeams 的具体 SDK、部署方式和鉴权方案须在 P0 阶段通过 Hello World 验证确认；本设计先固定其职责边界和适配接口。本地 mock（见第 6.1 节）仅用于单元测试与离线开发，不作为赛事 Demo 的替代路径。
+- AgentTeams 的具体 SDK、部署方式和鉴权方案仍须在 P0 阶段通过官方 Hello World 验证确认；目前尚未完成。本文先固定职责边界和适配接口。本地 Mock/AgentScope（见第 6.1 节）仅用于单元测试、离线开发和实验，不作为赛事 Demo 的替代路径。
 
 ---
 
@@ -52,12 +54,12 @@ MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结�
 | `scripts/event_client.py` | 向 daemon 上报结构化事件 | 作为各 Agent 的统一观测事件客户端 | 扩展事件类型，不让 Agent 直接写 SQLite。 |
 | `scripts/update_worklog.py` | 中文工作日志、文件/验证/决策记录 | 生成面向人的案件摘要和复盘材料 | 工作日志是可读证据的投影，不是唯一事实来源。 |
 | `skills/code-cctv/SKILL.md` | AI 编程过程的可见性规范 | 形成"每一步都留下证据"的通用研发协作 Skill | 新增竞赛专用 Skill，不改变当前日常工作流。 |
-| `windows/` 与 `macos/` | 多工作区、会话、事件流和管理界面 | 增加 Case 队列、审批、证据链与发布状态视图 | 先完成后端和 Web/CLI 演示，再接入原生界面。 |
+| `web/`、`daemon/dashboard.py` 与 `daemon/service_discovery.py` | 本机 Web 控制台、服务选择和状态展示 | 展示 Case 队列、审批、证据链和发布状态视图 | 保持 Web-only；不再维护原生桌面界面。 |
 | `tests/` | Python 单元测试、HTTP/SSE 覆盖 | 作为修复验证证据和演示中的质量门禁 | 所有 Agent 产生的补丁必须经过测试。 |
 
 ### 2.1 现有能力与竞赛差距
 
-当前 Code CCTV 擅长"记录编程过程"，但尚未具备以下能力：标准化研发事件模型、自动分诊与根因分析、受控补丁执行、审批/回滚、部署验证、可查询知识库及 AgentTeams 编排。这些能力正是新框架需要补齐的部分。
+当前 Code CCTV 已具备 Case、审批、证据与 Web 展示的基础闭环；真实 AgentTeams 编排、受控补丁执行、生产部署验证和可核验的官方 Trace 仍是待完成能力。这些缺口正是本框架后续需要补齐的部分。
 
 ---
 
@@ -87,7 +89,7 @@ MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结�
 | 在隔离分支/工作树中生成补丁 | 无限制的 Shell、数据库或云资源写入 |
 | 测试、静态检查和模拟灰度指标验证 | 承诺通用的自主修复准确率 |
 | 人工审批、失败回滚和完整证据包 | 以模型文本作为唯一验证依据 |
-| SQLite + SSE + CLI/页面演示 | 首阶段同步完成 Windows 与 macOS 全量 UI |
+| SQLite + SSE + Web 页面演示 | 并行维护额外的原生桌面界面 |
 
 ### 3.3 演练案例原则与具体内容
 
@@ -133,7 +135,7 @@ MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结�
 flowchart LR
     I["Issue / 日志 / 用户反馈 / CI"] --> C["Case Intake API"]
     C --> S["Case Store: SQLite"]
-    S --> O["AgentTeams Runtime Adapter"]
+    S --> O["目标 AgentTeams Workflow Bridge"]
     O --> A1["分诊证据 Agent"]
     O --> A2["诊断影响 Agent"]
     O --> A3["修复执行 Agent"]
@@ -159,19 +161,19 @@ flowchart LR
 | 层 | 模块 | 职责 |
 | --- | --- | --- |
 | 接入层 | `connectors/`、Case API | 规范化 Issue、日志、反馈和 CI 输入，完成两级指纹计算、幂等和去重。 |
-| 编排层 | `agent_runtime/` | 通过 AgentTeams 分派任务、持久化上下文、推进状态机、处理超时和失败。 |
+| 编排层 | `agent_runtime/` | 当前负责本地状态机和 Mock/AgentScope 实验；目标 AgentTeams Bridge 负责真实任务分派、上下文、超时和失败。 |
 | Agent 层 | `agents/` | 4 个核心 Agent 按身份边界执行分诊、诊断、修复和验证任务。 |
 | 工具层 | `tools/` | 对 Git、代码检索、测试、CI、部署模拟、知识库实行最小权限访问。 |
 | 治理层 | `policy/`、`approval/` | 风险分类、审批门禁、执行白名单、回滚和审计。**Agent 不持有审批凭证。** |
 | 证据层 | `evidence/`、SQLite、工作日志 | 保存不可变引用、工具输出摘要、Trace、测试报告和决策。 |
-| 体验层 | CLI/HTTP/SSE、Windows/macOS UI | 展示 Case 队列、执行轨迹、审批动作和最终证据。 |
+| 体验层 | Web 控制台、HTTP/SSE 与本机服务发现 | 展示 Case 队列、执行轨迹、审批动作和最终证据。 |
 | 复盘层 | `retrospective/`（异步批处理） | Case 关闭后生成复盘报告、知识条目和 Skill 候选（详见第 5.3 节）。 |
 
 ---
 
 ## 5. Agent Identity 清单
 
-> **MVP 策略：** 4 个核心业务 Agent 完成实时协同闭环。编排/安全门禁由 `agent_runtime/` 层的状态机与 AgentTeams Adapter 负责；复盘知识沉淀为 Case 关闭后的异步批处理模块，不占用实时协同链。
+> **MVP 策略：** 4 个核心业务 Agent 完成实时协同闭环。编排/安全门禁由 `agent_runtime/` 层的状态机与目标 AgentTeams Bridge 负责；复盘知识沉淀为 Case 关闭后的异步批处理模块，不占用实时协同链。当前只具备本地 Mock/AgentScope 实验路径。
 
 ### 5.1 编排职责（不属于 Agent）
 
@@ -181,7 +183,7 @@ flowchart LR
 | --- | --- | --- |
 | Case 创建与任务拆解 | `agent_runtime/orchestrator.py` | 接收规范化事件，创建 Case，按状态机推进。 |
 | 状态机维护与失败转移 | `agent_runtime/state_machine.py` | 管理 Case 状态迁移、超时和升级。 |
-| AgentTeams 任务分发 | `agent_runtime/teams_adapter.py` | 将状态迁移映射为 AgentTeams 任务，收集结果。 |
+| 本地任务分发与目标 AgentTeams Bridge | `agent_runtime/teams_adapter.py` 中的 `AgentScopeExecutionAdapter`（当前）及后续 Bridge | 当前实现提供 Mock/AgentScope 实验；`agentteams` 模式在 Bridge 未配置时失败关闭，真实任务分派、Handoff 与 Trace 需单独接入。 |
 | 审批门禁与回滚 | `policy/` + `agent_runtime/orchestrator.py` | 高风险动作请求审批，拒绝时触发回滚。**Agent 不持有审批凭证。** |
 
 ### 5.2 核心业务 Agent（4 个）
@@ -220,7 +222,9 @@ patch_ref, test_reports[], release_report, approval_refs[], trace_id
 
 ## 6. AgentTeams 编排与状态机
 
-### 6.1 编排映射与 Adapter 降级方案
+> **实施状态：** 本节定义的是竞赛所需的目标 AgentTeams 架构。当前仓库尚未配置真实 AgentTeams；`agent_runtime/teams_adapter.py` 中的 `AgentScopeExecutionAdapter` 仅能执行本地 Mock 和 AgentScope 实验。`--runtime-mode agentteams` 在前置检查未满足或 Workflow Bridge 缺失时失败关闭。不要把本地 `team_id`、`devloop_task_id`、`devloop_trace_id` 或 AgentScope 事件当作官方 AgentTeams 证据。
+
+### 6.1 编排映射、目标 Bridge 与本地降级方案
 
 | 研发闭环需要 | AgentTeams 映射 | 本项目实现要求 |
 | --- | --- | --- |
@@ -231,13 +235,13 @@ patch_ref, test_reports[], release_report, approval_refs[], trace_id
 | 状态追踪 | Run/Trace | 关联 Case、Agent Run、工具调用、审批和结果。 |
 | 失败处置 | Retry/Escalation | 诊断置信度不足、测试失败或策略拒绝时转人工或回退状态。 |
 
-**AgentTeams Adapter 接口契约：**
+**目标 AgentTeams Bridge 接口契约：**
 
-所有 Agent 业务逻辑只依赖以下抽象接口，不直接调用 AgentTeams SDK：
+真实接入后，所有 Agent 业务逻辑只依赖以下抽象接口，不直接调用 AgentTeams SDK：
 
 ```python
-class AgentTeamsAdapter:
-    """AgentTeams SDK 的薄封装 + 降级能力。"""
+class AgentTeamsWorkflowBridge:
+    """AgentTeams 控制面、工作流与 Trace 的薄封装。"""
 
     def create_team(self, identities: list[AgentIdentity]) -> TeamHandle: ...
     def dispatch_task(self, team: TeamHandle, task: CaseTask) -> TaskHandle: ...
@@ -246,16 +250,16 @@ class AgentTeamsAdapter:
     def cancel_task(self, handle: TaskHandle) -> None: ...
 ```
 
-**降级方案（仅限单元测试与离线开发）：**
+**本地降级方案（仅限单元测试、离线开发和实验）：**
 
-当 AgentTeams SDK 不可用（本地开发、CI 环境或 SDK 缺少某原语）时，Adapter 自动切换为本地 mock 模式：
+在真实 AgentTeams 尚未配置或不可用时，本地适配器可以运行 Mock：
 
 - `create_team` → 从 `identities.yaml` 加载角色定义，使用本地进程内调用。
 - `dispatch_task` → 直接调用 `agents/` 下对应 Agent 的入口函数，传递 `CaseContext`。
 - `await_result` → 同步等待 Agent 函数返回，超时时抛出 `TaskTimeoutError`。
 - `get_trace` → 从 `agent_runs` 和 `tool_runs` 表中重建 Trace。
 
-本地 mock 模式确保：(1) 业务逻辑零依赖 AgentTeams SDK 即可开发调试；(2) P0-P1 阶段可先跑通完整闭环再接入真实 AgentTeams。
+本地 Mock 确保：(1) 业务逻辑可在不依赖 AgentTeams 的环境中开发调试；(2) 在真实接入之前可以验证状态机、API、审批和界面，但不能证明 AgentTeams 合规性。
 
 > **硬性验收要求：** mock 仅用于单元测试与离线开发。**P2 的完成条件为两条演练案例必须在真实 AgentTeams Runtime 跑通**，并导出真实 Team/Task/Trace 证据，作为初赛演示和答辩的核心技术证明。若评审时两条案例都跑在 mock 上，AgentTeams 的合规性和真实 Trace 将被质疑。
 
@@ -302,7 +306,7 @@ stateDiagram-v2
 - `ROLLED_BACK` 的补丁已合并后被撤销，证据包关注"为什么线上表现与预期不一致"以及回滚的影响范围。
 - 两者面向不同的评审关注点，在答辩中是两种不同性质的技术叙事。
 
-**服务端强制校验：** 每个审批状态（`PLAN_APPROVAL`、`RELEASE_APPROVAL`）迁移时，服务端必须校验 `pending_action` 字段（取值为 `approve_plan` / `approve_release`）、审批令牌（非 Agent 令牌）、审批人、目标 `base_commit` 或 `patch_sha256`、以及审批有效期。缺少任一字段或令牌类型不匹配，状态迁移被拒绝。详见第 6.4 节。
+**服务端强制校验：** 每个审批状态（`PLAN_APPROVAL`、`RELEASE_APPROVAL`）迁移时，服务端必须校验 `pending_action` 字段（取值为 `approve_plan` / `approve_release`）、审批 Grant（非 Agent 凭证）、审批人、目标 `base_commit` 或 `patch_ref`，以及审批有效期。缺少任一字段或令牌类型不匹配，状态迁移被拒绝。详见第 6.4 节。
 
 ### 6.3 风险与审批门禁
 
@@ -316,73 +320,32 @@ stateDiagram-v2
 
 ### 6.4 审批身份与凭证隔离
 
-当前 Code CCTV 使用统一的 `X-Code-CCTV-Token` 进行 API 鉴权。在 DevLoop 中，Agent 为上报事件和读取 Case 状态也需要访问 daemon。如果 `/api/cases/{case_id}/actions` 沿用同一令牌，则 Repair/Verification Agent 在技术上有能力自行调用 `approve`，审批仅停留在 UI 约定层面，不构成真正的安全边界。
+当前实现将普通服务访问、人工签发权限和一次性审批 Grant 分为三个凭证层次。它替代了早期“原生界面/IPC 签发、无 HTTP 签发接口”的设计草案；当前 Web-only 控制台通过受保护的 HTTP 接口完成签发。
 
-**解决方案：分离"机器执行凭证"与"人工审批身份"。**
-
-#### 令牌类型
-
-| 令牌类型 | 持有者 | 可访问接口 | 不可访问接口 |
+| 凭证 | 持有者 | 允许的操作 | 明确禁止 |
 | --- | --- | --- | --- |
-| `service_token` | Agent、event_client、watch_worklog | `/api/events`、`GET /api/state`、`GET /api/cases`、`GET /api/cases/{id}`、`GET /api/stream` | `/api/cases/{id}/actions`（审批类动作） |
-| `approval_token` | 人工审批者（通过看板交互签发的一次性 Grant） | `/api/cases/{id}/actions` | 无（仅单次审批有效） |
+| `service_token`（`X-Code-CCTV-Token`） | 本地服务页面、受限脚本、普通 API 调用方 | 事件、Case 创建与查询、SSE、取消 Case | 单独签发审批 Grant、知识复核、消费审批 Grant |
+| 人工审批密钥（`X-Code-CCTV-Approval-Key`） | 人工审批者 | 与有效 `service_token` 一起签发 Grant；复核知识条目 | 不经 `/ui/config`、`service.json` 或服务发现描述符下发 |
+| `approval_token` | 单次审批流程 | 在 `X-Code-CCTV-Token-Type: approval` 下消费对应 Grant | 重复使用、跨 Case/动作/目标引用使用 |
 
-#### 审批令牌的签发链
+#### 当前签发与消费流程
 
-审批令牌不是"看板点击即签发"的简单字符串，而是一条**服务端签名的一次性 Grant**。关键约束：不存在可供 Agent 调用的"签发 approval token"的 HTTP 接口。
+1. 人工在 Web 控制台输入独立审批密钥。该密钥不会由服务端配置端点返回，也不会登记到本机服务发现记录。
+2. 页面以 `service_token` 和 `X-Code-CCTV-Approval-Key` 调用 `POST /api/cases/{case_id}/approval-grant`，提交 `{action, target_ref, approver}`。
+3. 服务端验证当前 Case 状态、`pending_action`、`target_ref` 与待审批版本的匹配，然后生成一次性 `approval_token`，只持久化其 SHA-256 哈希和有效期。
+4. 页面以 `X-Code-CCTV-Token-Type: approval` 调用 `POST /api/cases/{case_id}/actions`，提交 `action`、`target_ref`、`reason` 和 `approval_token`。
+5. 服务端校验 Grant 的哈希、Case/动作/目标绑定、有效期和未使用状态；成功后标记为已使用，写入 `approvals`，再推进状态机。
 
-**签发流程：**
+`POST /api/knowledge/{record_id}/review` 同样要求服务令牌与独立人工审批密钥，且审阅人由服务进程所属用户记录，不信任请求体伪造的身份。
 
-1. 看板检测到人工交互（鼠标点击审批按钮，非 API 调用），在本地生成 `nonce`。
-2. 看板构造 Grant 请求并在本地计算 `token_hash`，仅将 hash 发送到服务端：
-   ```json
-   {
-     "case_id": "...",
-     "action": "approve_plan | approve_release",
-     "target_ref": "base_commit 或 patch_sha256",
-     "approver": "审批人标识",
-     "nonce": "看板生成的随机数（16 字节 hex）",
-     "expires_at": "ISO8601",
-     "token_hash": "SHA256(approval_token)"
-   }
-   ```
-3. 服务端验证：(a) 该请求来自本地交互通道（非 `/api/` HTTP 端点）、(b) `case_id` 当前处于对应审批状态、(c) `target_ref` 与 Case 的当前版本一致、(d) `expires_at` 不超过默认有效期（最长 30 分钟）。
-4. 验证通过后，服务端存储 `token_hash`（不存储明文令牌），返回 `{grant_id, status: "issued"}`。
-5. 审批者通过看板获得明文 `approval_token`，在审批确认时随请求一并提交。服务端计算 `SHA256(approval_token)` 并与存储的 `token_hash` 比对——匹配且未被使用过，审批生效。
+#### 当前服务端校验规则
 
-**为什么不提供 Agent 可调用的签发接口：**
+1. **双因子签发：** 仅有 `service_token` 的调用返回 `403 Forbidden`，不能获得 `approval_token`。
+2. **Grant 类型：** 审批或拒绝动作必须声明 `X-Code-CCTV-Token-Type: approval`；普通服务令牌不能替代一次性 Grant。
+3. **绑定与时效：** Grant 绑定 Case、动作、目标引用和当前待审批状态，过期或状态变化后拒绝消费。
+4. **单次使用与审计：** Grant 消费后立即标记为已用；审批记录保存 `grant_id`、`token_hash`、审批人、目标引用、有效期与处理时间。
 
-- 签发 Grant 的通道是看板本地交互（GUI 点击事件 → 本地 IPC/管道 → 服务端），不是 HTTP API。
-- `POST /api/cases/{id}/actions` 只能**消费**已签发的 `approval_token`，不能**签发**新令牌。
-- Agent 持有的 `service_token` 既不能访问签发通道（非 HTTP），也不能通过 `/actions` 签发（该端点只接受消费，不接受签发请求）。
-
-#### 审批请求的必需字段
-
-`POST /api/cases/{case_id}/actions` 的审批类请求（`action = approve_plan | approve_release`）必须携带：
-
-```json
-{
-  "action": "approve_plan | approve_release",
-  "approver": "审批人标识（邮箱或用户名）",
-  "reason": "审批理由",
-  "target_ref": "base_commit 或 patch_sha256（审批绑定的代码版本）",
-  "expires_at": "审批有效期 ISO8601",
-  "approval_token": "一次性审批令牌明文"
-}
-```
-
-#### 服务端校验规则
-
-1. **令牌类型校验：** `approval_token` 与 `service_token` 分离。Agent 持有的 `service_token` 调用 `/actions` 的审批类动作时返回 `403 Forbidden`。
-2. **令牌哈希校验：** 服务端计算 `SHA256(approval_token)`，与已签发的 `token_hash` 比对。无匹配的已签发 Grant → `401 Unauthorized`。
-3. **绑定校验：** `target_ref` 必须与签发 Grant 时锁定的值一致——防止审批一个版本、实际执行另一个版本。
-4. **时效校验：** 审批在 `expires_at` 后自动失效，服务端拒绝过期令牌，状态机回退到审批前状态。
-5. **单次使用：** 同一 `token_hash` 消费后立即标记为 `used`，再次使用返回 `409 Conflict`。
-6. **审计：** 每次审批动作写入 `approvals` 表（含 `approval_id`、`case_id`、`action`、`decision`、`approver`、`reason`、`target_ref`、`token_hash`、`grant_id`、`expires_at`、`resolved_at`）。
-
-> **Demo 中的简化：** MVP 阶段审批者身份从系统用户名或手动输入获取，`nonce` 由看板客户端的 `secrets.token_hex(16)` 生成。不要求对接企业 SSO 或硬件密钥。但签发通道隔离（非 HTTP API）和 `token_hash` 存储机制必须在 P1 实现，不可简化为纯 UI 约定。
->
-> **安全边界声明：** 本方案的审批隔离保证的是"Agent 无法通过服务 HTTP API 自行批准高风险动作"——即持有 `service_token` 的进程调用 `/actions` 审批类端点时被拒绝。GUI/IPC 通道将审批签发与 HTTP API 切分到不同的访问路径，在同一 OS 用户下是职责隔离而非对抗恶意本地进程的强安全边界。答辩中应准确表述为"防止 Agent 经服务 API 自行审批"，不承诺抵抗同用户恶意程序对本地 IPC 或 SQLite 的直接读写。
+> **安全边界声明：** 当前隔离保证“持有 `service_token` 的 Agent 不能通过服务 HTTP API 独立签发或消费高风险审批”。这是 localhost 环境中的职责隔离，不承诺抵抗同一操作系统用户下可读取进程内存、环境变量或 SQLite 文件的恶意本地进程。
 
 ---
 
@@ -504,7 +467,9 @@ incident_signature = SHA256(
 | `POST` | `/api/cases` | 创建或接收一条规范化研发事件。 | `service_token` |
 | `GET` | `/api/cases` | 按状态、优先级、工作区、仓库查询 Case 队列。 | `service_token` |
 | `GET` | `/api/cases/{case_id}` | 获取 Case、状态、Agent Run、证据和审批摘要。 | `service_token` |
-| `POST` | `/api/cases/{case_id}/actions` | 对 Case 执行指定动作（`approve_plan` / `approve_release` / `reject` / `cancel`）。审批类动作须携带 `approval_token`。 | `approval_token`（审批类）；`service_token`（cancel） |
+| `POST` | `/api/cases/{case_id}/approval-grant` | 为批准或拒绝签发一次性 Grant。 | `service_token` + `X-Code-CCTV-Approval-Key` |
+| `POST` | `/api/cases/{case_id}/actions` | 执行 `approve_plan`、`approve_release`、`reject_plan`、`reject_release` 或 `cancel`。前四种消费一次性 Grant。 | `approval_token` + `X-Code-CCTV-Token-Type: approval`（Grant 动作）；`service_token`（cancel） |
+| `POST` | `/api/knowledge/{record_id}/review` | 复核知识条目。 | `service_token` + `X-Code-CCTV-Approval-Key` |
 | `GET` | `/api/cases/{case_id}/evidence` | 返回可下载/可查看的证据索引，而非未授权原始敏感数据。 | `service_token` |
 
 所有接口沿用 Code CCTV 的 `127.0.0.1` 本地绑定。Case 的状态变化通过现有 SSE 机制发布新的事件类型，不让界面轮询多个互不一致的来源。
@@ -518,7 +483,7 @@ incident_signature = SHA256(
 3. 修复计划、风险分级和审批记录（含 `target_ref` 绑定）。
 4. 补丁引用、测试命令、退出码和测试报告。
 5. 模拟灰度前后指标、最终放行/回滚/拦截结论。
-6. AgentTeams Trace、工具调用清单和 Case 状态迁移记录。
+6. 真实接入完成后导出的 AgentTeams Trace、工具调用清单和 Case 状态迁移记录。当前本地 UUID 与 AgentScope 事件必须明确标为本地实验数据，不可替代此项。
 7. 复盘报告及其"已验证/待验证"的知识状态。
 
 ### 7.4 工具运行记录的不可变字段
@@ -550,15 +515,16 @@ incident_signature = SHA256(
 
 ## 8. 建议目录结构
 
-以下为目标结构，标有"新增"的目录尚未创建：
+以下为目标与当前实现的对应结构；`web/` 是唯一管理界面，真实 AgentTeams Bridge 尚未创建：
 
 ```text
 code-cctv-general/
-├── daemon/                         # 现有：HTTP、SSE、SQLite
-│   ├── server.py                    # 扩展 Case API、审批令牌校验（P1）
-│   └── store.py                     # 扩展 Case 存储与迁移（P1）
-├── agent_runtime/                  # 新增：AgentTeams 适配、状态机、编排
-│   ├── teams_adapter.py            # Adapter 接口 + mock 降级
+├── daemon/                         # HTTP、SSE、SQLite、Web 托管与服务发现
+│   ├── server.py                    # Case API、双因子审批、SSE
+│   └── store.py                     # Case 存储与迁移
+├── web/                            # 唯一的本地 Web 管理界面
+├── agent_runtime/                  # 状态机、本地 Mock/AgentScope 实验、后续 Bridge
+│   ├── teams_adapter.py            # AgentScopeExecutionAdapter；非真实 AgentTeams
 │   ├── orchestrator.py
 │   ├── case_context.py
 │   ├── state_machine.py
@@ -573,11 +539,9 @@ code-cctv-general/
 ├── connectors/                     # 新增：Issue、日志、反馈、CI 规范化接入
 ├── tools/                          # 新增：Git、代码检索、测试、部署模拟工具
 ├── policy/                         # 新增：权限、审批、风险、回滚策略；令牌管理
-├── evidence/                       # 新增：证据对象、脱敏、报告渲染
+├── evidence/                       # 包标记；生成的本地运行证据不入库
 ├── demo_target/                    # 新增：P1 创建，隔离的故障演练仓库/样本
 ├── scripts/                        # 现有：保留 event_client、worklog 等
-├── windows/                        # 现有：后期增加 Case/审批视图
-├── macos/                          # 现有：后期增加 Case/审批视图
 ├── tests/                          # 扩展：状态机、策略、接口、令牌校验、演练回归测试
 └── docs/                           # 新增：身份清单、Skill 清单、演示材料
 ```
@@ -592,7 +556,7 @@ code-cctv-general/
 
 1. 载入同一故障的 Issue、错误日志和用户反馈，系统生成一个 Case 并展示 `incident_signature` 匹配理由。
 2. Triage Agent 标记优先级和复现条件；Diagnosis Agent 输出带代码/测试证据的根因与影响面。
-3. 系统进入 `PLAN_APPROVAL`（修复计划审批），演示者在看板使用 `approval_token` 批准本地沙箱修改（非 Agent 令牌）。
+3. 系统进入 `PLAN_APPROVAL`（修复计划审批），演示者在 Web 看板输入独立人工审批密钥，签发并消费一次性 `approval_token` 批准本地沙箱修改（非 Agent 凭证）。
 4. Repair Agent 在隔离分支生成补丁和新增/调整测试；所有工具调用写入 `tool_runs` 表，含 `input_sha256` 和 `output_sha256`。
 5. Verification Agent 执行测试和模拟灰度：
    - **案例 A：** 质量门禁通过 → 进入 `RELEASE_APPROVAL` → 演示者批准模拟发布 → `RELEASED` → 指标健康 → `CLOSED`。
@@ -606,8 +570,8 @@ code-cctv-general/
 | 端到端闭环 | 至少 1 个成功修复案例（到 `CLOSED`）和 1 个预发布拦截案例（到 `PATCH_REJECTED`）可重复回放。 |
 | 多源归并 | 每个案例至少包含 3 种来源，通过 `incident_signature` 关联为同一 Case。 |
 | Agent 协同 | 4 个核心业务 Agent 的输入、输出、交接和 Trace 可展示。 |
-| 审批隔离 | Agent 令牌无法执行 `approve_plan` 或 `approve_release`；审批动作有独立 `approval_token` 和服务端校验。 |
-| AgentTeams 合规 | P2 完成时两条案例均在真实 AgentTeams Runtime 跑通，可导出 Team/Task/Trace 证据。 |
+| 审批隔离 | `service_token` 无法单独签发 Grant；签发要求独立人工审批密钥，动作消费一次性 `approval_token` 并由服务端校验。 |
+| AgentTeams 合规 | **未完成。** P2 完成时两条案例须在真实 AgentTeams Runtime 跑通，并导出可核验 Team/Task/Trace 证据。 |
 | 结果验证 | 每个补丁都有可执行测试、退出码、报告和明确的发布/回滚/拦截判定。 |
 | 安全治理 | 所有写代码、发布和回滚动作都符合策略；高风险动作无审批不得执行。 |
 | 可审计性 | 每个终态 Case 可以导出完整证据索引（含 `tool_runs` 的输入/输出哈希），证据可反查到 Agent/工具/审批。 |
@@ -621,10 +585,10 @@ code-cctv-general/
 | --- | --- | --- |
 | P0：方案定稿 | 固定场景、AgentTeams 选型、数据边界、Demo 案例 | 项目框架、Identity 清单、Skill 清单、Demo Case 说明书。 |
 | P1：案件底座 | Case schema、两级指纹、迁移、API（含令牌分离）、SSE 事件和 CLI 查询 | 可创建、查询、追踪研发事件的本地服务；`demo_target/` 创建并植入案例。 |
-| P2：受控编排 | AgentTeams Adapter（mock + 真实）、状态机、策略、审批和 Trace | 可运行的多 Agent 任务链；两条案例在真实 AgentTeams Runtime 跑通。 |
+| P2：受控编排 | AgentTeams Workflow Bridge（本地 Mock + 真实接入）、状态机、策略、审批和 Trace | 可运行的多 Agent 任务链；两条案例在真实 AgentTeams Runtime 跑通。 |
 | P3：研发工具链 | Git/检索/测试/部署模拟工具（含 `tool_runs` 不可变记录），隔离工作树 | 从诊断到补丁和验证的闭环。 |
 | P4：证据与展示 | 证据包、复盘知识、演示看板、竞赛材料 | 可重复 Demo、技术文档、验证材料。 |
-| P5：产品化增强 | 原生 UI、真实系统连接器、权限与性能加强 | 复赛/决赛的工程化版本。 |
+| P5：产品化增强 | Web 控制台、真实系统连接器、权限与性能加强 | 复赛/决赛的工程化版本；不恢复旧原生桌面端。 |
 
 优先级必须遵守：P1-P4 先于 P5。赛道对"可运行、可验证、可审计"的要求高于界面完整度。
 
@@ -696,7 +660,7 @@ code-cctv-general/
 | AgentTeams 真实运行 | **P2 完成条件为两条案例在真实 AgentTeams Runtime 跑通。** Mock 仅用于单元测试与离线开发。 | 赛题明确要求以 AgentTeams 为协同设计基点。若评审时案例跑在 mock 上，合规性和真实 Trace 将被质疑。 |
 | 首个演示目标仓库 | 使用独立 `demo_target/`，并复用 Code CCTV 的事件与展示底座。 | 避免把正在使用的主仓库作为故障注入目标，也便于重复回放。 |
 | AgentTeams 具体实现 | 审核后选定官方可用 SDK；本地代码只依赖 Adapter 接口。 | 赛题强制使用 AgentTeams，但当前文档未提供具体版本、鉴权与部署约束。 |
-| 审批令牌分离 | 在 P1 Case API 中实现 `service_token` 与 `approval_token` 分离，服务端强制校验。 | Agent 不持有审批凭证是安全模型的底线。如果审批仅靠 UI 约定，答辩时会被质疑。 |
+| 审批令牌分离 | 当前已实现 `service_token`、独立人工审批密钥和一次性 `approval_token` 的三层模型，服务端强制校验。 | Agent 不持有独立人工审批密钥是安全模型的底线；本地同用户环境仍不是对抗性安全边界。 |
 | 模型与外部服务 | 先支持可替换模型和本地 mock；真实云资源作为可选适配。 | 保证 Demo 可离线复现，降低密钥、额度和网络风险。 |
 | 模型修复质量不可控 | 准备 2-3 个"预验证"的修复案例，确保 GenAI 在给定 prompt 下可产出通过测试的补丁。 | 竞赛评审会看 Demo 的实际效果；补丁如果不能通过测试会导致演示失败。 |
 | 多 Agent Token 消耗 | 在 P2 阶段测试单 Case 的 token 消耗，必要时合并 Agent。 | 4 个 Agent 的一次完整闭环可能消耗大量 token，影响 Demo 流畅性和成本。 |

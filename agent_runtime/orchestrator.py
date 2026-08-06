@@ -3,7 +3,7 @@
 Responsibilities (not an Agent itself — see framework Section 5.1):
 - Create Case from normalized inputs
 - Advance the state machine
-- Dispatch tasks to AgentTeams Adapter
+- Dispatch tasks to the configured execution adapter
 - Request approvals at gate states
 - Handle verification results → PATCH_REJECTED or RELEASE_APPROVAL
 - Handle failures, timeouts, and escalations
@@ -25,14 +25,19 @@ from .case_context import CaseContext
 
 
 class Orchestrator:
-    """Thin coordinator — delegates to AgentTeams Adapter and StateStore."""
+    """Thin coordinator — delegates to an execution adapter and StateStore."""
 
     def __init__(self, store: Any, teams_adapter: Any) -> None:
         self.store = store
         self.teams = teams_adapter
 
     def _build_agent_context(self, case_id: str, case: dict[str, Any]) -> dict[str, Any]:
-        """Hydrate the canonical CaseContext with persisted source evidence."""
+        """Hydrate the canonical CaseContext with persisted handoffs.
+
+        Agent output is read back from ``agent_runs`` rather than kept in
+        process memory.  A resumed Repair task therefore receives the same
+        diagnosis that produced the plan awaiting approval.
+        """
         context = CaseContext.from_dict(case)
         evidence = self.store.get_case_evidence(case_id) or {}
         source_events: list[dict[str, Any]] = []
@@ -67,6 +72,30 @@ class Orchestrator:
             artifact["uri"] for artifact in evidence.get("artifacts", [])
             if artifact.get("uri")
         ]
+
+        triage = self.store.get_latest_completed_agent_output(case_id, "triage")
+        if triage:
+            priority = triage.get("priority")
+            if isinstance(priority, str) and priority:
+                context.priority = priority
+
+        diagnosis = self.store.get_latest_completed_agent_output(case_id, "diagnosis")
+        if diagnosis:
+            hypotheses = diagnosis.get("hypotheses")
+            if isinstance(hypotheses, list):
+                context.diagnosis_hypotheses = hypotheses
+            impact_scope = diagnosis.get("impact_scope")
+            if isinstance(impact_scope, str):
+                context.impact_scope = impact_scope
+            risk_level = diagnosis.get("risk_level")
+            if isinstance(risk_level, str) and risk_level:
+                context.risk_level = risk_level
+            remediation = diagnosis.get("remediation_strategy")
+            if not isinstance(remediation, str):
+                remediation = diagnosis.get("remediation_plan")
+            if isinstance(remediation, str):
+                context.remediation_plan = remediation
+
         context_dict = context.to_dict()
         # Repair execution is opt-in and carried as persisted source evidence.
         # A path by itself must never enable a mutating tool.
@@ -135,6 +164,16 @@ class Orchestrator:
                     # receive the persisted sandbox_ref, not the source path.
                     return self.advance(case_id, "VERIFYING")
 
+            # ── Persisted handoffs: Triage → Diagnosis → plan approval ──
+            # The adapter writes each completed result to agent_runs before it
+            # returns.  The recursive call rebuilds context from that durable
+            # evidence, so no Agent-to-Agent decision relies on RAM state.
+            if target_state == "TRIAGED" and completed:
+                return self.advance(case_id, "DIAGNOSED")
+
+            if target_state == "DIAGNOSED" and completed:
+                return self.advance(case_id, "PLAN_APPROVAL")
+
             # ── Verification gate: drive next transition ──────────────
             if target_state == "VERIFYING" and isinstance(agent_result, dict):
                 qg_error = agent_result.get("quality_gate_error")
@@ -175,7 +214,9 @@ class Orchestrator:
             return result
         case_id = result.get("case_id")
         if case_id:
-            self.advance(case_id, "TRIAGED")
+            advanced = self.advance(case_id, "TRIAGED")
+            if isinstance(advanced, dict) and "error" not in advanced:
+                return advanced
         return result
 
     def resolve_pending(self) -> list[str]:

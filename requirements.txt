@@ -3,12 +3,13 @@
 #
 # Install:  pip install -r requirements.txt
 #
-# Core DevLoop / AgentTeams Runtime
+# Core DevLoop runtime
 agentscope==2.0.5
-# Model SDKs (at least one needed for production AgentTeams mode)
+# Optional model SDK used by the local AgentScope experiment path.
+# This is not an AgentTeams runtime dependency.
 dashscope==1.26.5
-# Optional: openai, anthropic, deepseek SDKs — agentscope bundles adapters
-# for all of these; install whichever you have API keys for.
+# A DeepSeek credential is configured through DEEPSEEK_API_KEY when that
+# experimental path is explicitly selected.
 
 # Credential & config
 PyYAML==6.0.2
@@ -19,6 +20,6 @@ pydantic-core==2.46.4
 pytest==9.0.3
 pytest-asyncio==1.3.0
 
-# Code CCTV GUI (optional — only needed for native desktop views)
-# Windows: pip install PySide6
-# macOS:   pre-built SwiftUI app, no Python GUI deps
+# The management UI is served from web/ and has no native desktop dependency.
+# Real AgentTeams deployment dependencies are intentionally absent until the
+# control plane, credentials and workflow integration are configured.

@@ -10,7 +10,7 @@ from typing import Any
 
 
 def run(context: dict[str, Any]) -> dict[str, Any]:
-    """Entry point called by AgentTeams Adapter (or its mock)."""
+    """Entry point called by the configured execution adapter or its mock."""
     case_id = context.get("case_id", "unknown")
     # Stub: in production this would call issue_normalizer, symptom_extractor,
     # and incident_matcher tools via the model.

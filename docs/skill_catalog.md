@@ -3,6 +3,8 @@
 > Code CCTV DevLoop · GOAI Agent Infra 方向三 · 竞赛材料
 > 依据框架 §11.1 六类 Skill 候选扩展；标注每项的**实现状态**（✅ 已在代码实现 / 🟡 接口预留 / 📋 待独立化）。
 
+> **说明：** 本清单描述本地代码与赛事候选 Skill 的实现状态，不构成真实 AgentTeams Worker、Team、Handoff 或 Trace 已部署的声明。
+
 ## 1. 分诊类（Triage Skills）
 
 | Skill | 描述 | 输入 | 输出 | 复用潜力 | 状态 |
@@ -45,10 +47,10 @@
 | Skill | 描述 | 输入 | 输出 | 复用潜力 | 状态 |
 |-------|------|------|------|---------|------|
 | `evidence_indexer` | 生成可下载/可验证的证据索引（含工具哈希链） | Case ID | `{case_id, evidence_tree[], hashes[], trace}` | 通用审计导出 | ✅ `retrospective/skills.py::evidence_indexer` |
-| `compliance_checker` | 检查审批令牌类型、门禁和策略合规性 | Case ID | `{compliant, violations[], recommendations[]}` | 合规审计通用工具 | 🟡 由 `handle_knowledge_review` 令牌类型校验 + `handle_case_action` 覆盖 |
+| `compliance_checker` | 检查审批 Grant、门禁和策略合规性 | Case ID | `{compliant, violations[], recommendations[]}` | 合规审计通用工具 | 🟡 由 `handle_knowledge_review` 的人工审批密钥校验与 `handle_case_action` 覆盖 |
 
 ## 7. 实现映射说明
 
 - **确定性优先**：复盘类 Skill 为纯函数、离线可复现（同一证据 → 同一输出），不依赖 LLM 结果稳定性。
 - **受控工具链**：`patch_generator` 与 `quality_gate` 是 Repair/Verification 的权威动作源，LLM 结构化输出仅作补充说明，避免"以模型文本作为唯一验证依据"。
-- **知识安全边界**：`knowledge_extractor` 产出默认 `pending_review`，经人工复核（approval token）→ `verified` 才能被后续 Agent 引用，防止模型幻觉污染知识库。
+- **知识安全边界**：`knowledge_extractor` 产出默认 `pending_review`，经人工复核（服务令牌 + 独立人工审批密钥）→ `verified` 才能被后续 Agent 引用，防止模型幻觉污染知识库。

@@ -1,1 +1,1 @@
-"""AgentTeams orchestration layer for Code CCTV DevLoop."""
+"""Local DevLoop orchestration primitives for Code CCTV."""

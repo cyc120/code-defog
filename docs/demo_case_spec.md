@@ -3,6 +3,8 @@
 > Code CCTV DevLoop · GOAI Agent Infra 方向三 · 竞赛材料
 > 依据框架 §3.3 扩展。两个演练案例共享 `demo_target/` 仓库（P1 阶段创建，作为 P2–P4 测试目标）。
 
+> **实施状态：** 本文保留两条演练案例与验收目标。真实 AgentTeams 控制面、Team/Task/Handoff 工作流和可导出 Trace 尚未配置或验证；当前本地 Mock/AgentScope 运行不能替代该验收，也不存在可引用的已验证 `evidence/*.json` 运行证据。
+
 ## 0. 演示总览
 
 | 案例 | 演示目标 | 状态机终点 | 核心看点 |
@@ -10,7 +12,7 @@
 | **Case A：成功修复** | 端到端闭环到 `CLOSED` | `CLOSED` | 受控工具链 + 审批门禁 + 确定性验证 + 复盘知识沉淀 |
 | **Case B：预发布拦截** | 错误补丁被质量门禁拦下 | `PATCH_REJECTED` | 系统**不盲目信任模型输出**，门禁拦截有问题补丁 |
 
-> 两案例均已在**真实 AgentTeams Runtime + DeepSeek** 跑通，可导出真实 Team/Task/Trace 证据（`evidence/production_dispatch_*.json`）。
+> 两案例的目标是在真实 AgentTeams Runtime 完成可复核的 Team/Task/Trace 验收；该目标目前尚未完成。DeepSeek 仅可用于本地 AgentScope 实验路径，不能作为真实 AgentTeams 运行的证明。
 
 ## 1. 共享目标仓库：`demo_target/`
 
@@ -62,7 +64,7 @@ return {
 - 原有 `validate_config` 不受影响
 - 确定性质量门禁 `exit 0`
 
-### 生产闭环路径（已验证）
+### 目标闭环路径
 ```
 TRIAGED → DIAGNOSED → PLAN_APPROVAL →[审批]→ REPAIRING
   →(sandbox_copy → apply_case_a_patch，隔离沙箱)
@@ -96,7 +98,7 @@ TRIAGED → DIAGNOSED → PLAN_APPROVAL →[审批]→ REPAIRING
 - 补丁**未被合并**，源仓库 `demo_target/` 零改动
 - 证据包记录 `PATCH_REJECTED` 原因 + 后续处置建议
 
-### 生产闭环路径（已验证）
+### 目标闭环路径
 ```
 … → REPAIRING → VERIFYING →(quality_gate exit 1，确定性拦截)→ PATCH_REJECTED
 ```
@@ -108,8 +110,8 @@ TRIAGED → DIAGNOSED → PLAN_APPROVAL →[审批]→ REPAIRING
 ## 4. 演示剧本（评审演示建议）
 
 1. **输入聚合**：通过 `POST /api/cases` 提交 Issue/日志/测试三种输入 → 展示两级指纹归并到同一 Case。
-2. **Agent 编排**：观察 4 个 Agent 顺序执行，每个 Agent 的结构化输出 + 真实运行时事件流。
-3. **审批门禁**：展示 `PLAN_APPROVAL` / `RELEASE_APPROVAL` 需人工 grant 审批（`approval_token`，Agent 不可自审批）。
+2. **Agent 编排**：观察 4 个 Agent 的结构化输出与本地 Mock/AgentScope 事件；真实 AgentTeams Trace 在接入后单独验收。
+3. **审批门禁**：展示 `PLAN_APPROVAL` / `RELEASE_APPROVAL` 的人工审批：服务令牌加独立人工审批密钥签发一次性 `approval_token`，Agent 不能仅凭服务令牌自审批。
 4. **受控修复**：Case A 在隔离沙箱生成补丁，源仓库只读。
 5. **门禁拦截**：Case B 错误补丁被 `quality_gate exit 1` 拦下 → `PATCH_REJECTED`。
 6. **复盘沉淀**：Case 关闭后自动生成复盘报告 + 知识条目（pending_review），展示人工复核 → verified。
@@ -119,4 +121,5 @@ TRIAGED → DIAGNOSED → PLAN_APPROVAL →[审批]→ REPAIRING
 
 - 全部依赖本地（SQLite + demo_target + 可配置 DeepSeek key），无生产环境前置。
 - 知识提取为确定性纯函数，同一证据输出稳定，演示可重复。
-- `evidence/production_dispatch_*.json` 保留真实 Runtime 运行证据（gitignored，答辩时现场生成）。
+- Case 证据通过 SQLite 和 `GET /api/cases/{id}/evidence` 查询；`evidence/` 下的本地 JSON 生成物不入库，也不能当作当前真实 AgentTeams 运行证据。
+- 真实接入完成后，应以官方控制面导出的 Team/Task/Handoff/Trace 和可重放案例作为验收材料，而不是复用本地生成的 JSON 文件。

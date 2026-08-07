@@ -354,6 +354,23 @@
 
   #connect-screen { display: none; position: fixed; z-index: 50; inset: 0; place-items: center; padding: 20px; background: var(--page); }
   #connect-screen.show { display: grid; }
+  #projects-screen { display: none; position: fixed; z-index: 50; inset: 0; place-items: center; padding: 24px; background: var(--page); overflow-y: auto; }
+  #projects-screen.show { display: grid; }
+  #projects-screen .connect-card { width: min(720px, 100%); max-height: 90vh; overflow-y: auto; }
+  .proj-option { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; width: 100%; padding: 9px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink); cursor: pointer; text-align: left; font: inherit; }
+  .proj-option:hover:not(:disabled) { border-color: var(--blue); background: var(--blue-soft); }
+  .proj-option input[type="checkbox"] { accent-color: var(--blue); }
+  .proj-option-name { display: block; min-width: 0; font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+  .proj-option-meta { display: block; margin-top: 2px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
+  .proj-option-state { align-self: center; color: var(--ink-faint); font-size: 10px; white-space: nowrap; }
+  .monitored-card { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+  .monitored-card + .monitored-card { margin-top: 8px; }
+  .monitored-name { font-size: 12px; font-weight: 500; overflow-wrap: anywhere; }
+  .monitored-meta { margin-top: 3px; color: var(--ink-faint); font-size: 10px; overflow-wrap: anywhere; }
+  .monitored-status { font-size: 10px; font-weight: 500; white-space: nowrap; }
+  .monitored-status.watching { color: var(--green); }
+  .monitored-status.error { color: var(--red); }
+  .monitored-status.pending { color: var(--yellow); }
   .connect-card { width: min(390px, 100%); padding: 22px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
   .connect-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
   .connect-card h2 { margin: 4px 0 7px; font-size: 18px; font-weight: 500; }
@@ -419,6 +436,145 @@
     .pipe-step + .pipe-step, .chain-block + .chain-block { margin-left: 0; }
     .pipe-step + .pipe-step::before, .chain-block + .chain-block::before { display: none; }
   }
+
+  /* ── 项目进度 · 分控仪表盘（#view-overview）────────────────────── */
+  .overview-view { width: min(1440px, 100%); margin: 0 auto; padding: 26px 30px 52px; }
+  .overview-hero { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 22px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .overview-hero .metric { min-height: 118px; }
+  .overview-hero .metric-value { font-size: 36px; }
+  .overview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; margin-top: 22px; }
+  .overview-card { min-width: 0; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .overview-card h3 { margin: 0 0 4px; font-size: 13px; font-weight: 500; }
+  .overview-card .card-desc { margin: 0 0 12px; color: var(--ink-faint); font-size: 10px; }
+  .overview-card .card-body { min-height: 120px; }
+
+  .donut-wrap { display: flex; align-items: center; gap: 18px; }
+  .donut { position: relative; flex: 0 0 auto; width: 118px; height: 118px; border-radius: 50%; }
+  .donut::after { content: ""; position: absolute; inset: 30px; border-radius: 50%; background: var(--surface); }
+  .donut-center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; font-size: 19px; font-weight: 500; z-index: 1; }
+  .donut-center small { display: block; margin-top: 1px; font-size: 9px; font-weight: 400; color: var(--ink-faint); }
+  .donut-legend { display: grid; gap: 5px; min-width: 0; }
+
+  .bar-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) 48px; gap: 10px; align-items: center; padding: 6px 0; }
+  .bar-row + .bar-row { border-top: 1px solid var(--line); }
+  .bar-label { color: var(--ink-muted); font-size: 11px; overflow-wrap: anywhere; }
+  .bar-track { display: flex; height: 14px; overflow: hidden; border-radius: 4px; background: var(--surface-muted); }
+  .bar-seg { height: 100%; }
+  .bar-seg.completed { background: var(--green); }
+  .bar-seg.failed { background: var(--red); }
+  .bar-seg.running { background: var(--blue); }
+  .bar-seg.pending { background: var(--ink-faint); }
+  .bar-seg.other { background: var(--yellow); }
+  .bar-total { font-size: 11px; font-weight: 500; text-align: right; color: var(--ink-muted); }
+
+  .trend-chart { display: block; width: 100%; height: 130px; }
+  .trend-chart .axis { stroke: var(--line-strong); stroke-width: 1; }
+  .trend-chart text { fill: var(--ink-faint); font-size: 8.5px; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+  .trend-bar-cases { fill: var(--blue); }
+  .trend-bar-events { fill: var(--green); }
+
+  .overview-llm { margin-top: 22px; padding: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .overview-llm-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+  .overview-llm h3 { margin: 0; font-size: 15px; font-weight: 500; }
+  .llm-badge { display: inline-flex; align-items: center; min-height: 22px; padding: 3px 8px; border-radius: 4px; font-size: 10px; font-weight: 500; white-space: nowrap; border: 1px solid var(--line); color: var(--ink-muted); background: var(--surface-muted); }
+  .llm-badge.ok { border-color: transparent; background: var(--green-soft); color: var(--green); }
+  .llm-badge.warn { border-color: transparent; background: var(--yellow-soft); color: var(--yellow); }
+  .llm-badge.bad { border-color: transparent; background: var(--red-soft); color: var(--red); }
+  .llm-note { color: var(--ink-faint); font-size: 10px; }
+  .llm-overall { margin: 0 0 12px; padding: 10px 12px; border-left: 3px solid var(--blue); border-radius: 4px; background: var(--surface-muted); color: var(--ink); font-size: 12px; line-height: 1.55; }
+
+  .pyramid-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1.4fr); gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 11px; }
+  .pyramid-prio { color: var(--yellow); font-weight: 600; }
+  .pyramid-what { color: var(--ink); }
+  .pyramid-evi { color: var(--ink-muted); }
+  .section-label { margin: 14px 0 6px; color: var(--ink-faint); font-size: 10px; font-weight: 500; }
+  .risk-list, .next-list { margin: 4px 0 0; padding-left: 18px; color: var(--ink-muted); font-size: 11px; line-height: 1.65; }
+  .mini-table { width: 100%; min-width: 420px; }
+
+  @media (max-width: 1100px) {
+    .overview-hero { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .overview-hero .metric:nth-child(4), .overview-hero .metric:nth-child(5) { border-top: 1px solid var(--line); }
+    .overview-grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+  }
+  @media (max-width: 680px) {
+    .overview-view { padding: 16px 12px 30px; }
+    .overview-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .overview-hero .metric { min-height: 96px; }
+    .pyramid-row { grid-template-columns: 1fr; gap: 2px; }
+    .bar-row { grid-template-columns: 80px minmax(0, 1fr) 40px; }
+  }
+
+  /* ── 左侧边栏 + 全局顶栏（项目优先导航）───────────────────────── */
+  #app { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; align-items: start; }
+  #sidebar { position: sticky; top: 0; height: 100vh; align-self: start; display: flex;
+    flex-direction: column; gap: 20px; padding: 18px 14px; overflow-y: auto;
+    background: var(--surface); border-right: 1px solid var(--line); }
+  .sidebar-brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .sidebar-brand h1 { margin: 1px 0 0; font-size: 15px; font-weight: 500; line-height: 1.15; }
+  .sidebar-section { display: grid; gap: 8px; }
+  .sidebar-section-head { display: flex; align-items: center; justify-content: space-between; }
+  .sidebar-section-title { color: var(--ink-faint); font-size: 10px; font-weight: 500; letter-spacing: .04em; }
+  .sidebar-project-list { display: grid; gap: 4px; max-height: 38vh; overflow-y: auto; }
+  .sidebar-project-item { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 2px 8px;
+    align-items: center; width: 100%; padding: 7px 9px; border: 1px solid transparent;
+    border-radius: 6px; background: transparent; color: var(--ink); cursor: pointer;
+    text-align: left; font: inherit; }
+  .sidebar-project-item:hover { background: var(--surface-muted); }
+  .sidebar-project-item.active { background: var(--blue-soft); border-color: var(--blue); }
+  .sidebar-project-name { font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+  .sidebar-project-meta { grid-column: 1; font-size: 9.5px; color: var(--ink-faint);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overflow-wrap: anywhere; }
+  .sidebar-project-status { grid-column: 2; grid-row: 1 / span 2; font-size: 9.5px; font-weight: 500;
+    white-space: nowrap; align-self: center; }
+  .sidebar-project-status.watching { color: var(--green); }
+  .sidebar-project-status.error { color: var(--red); }
+  .sidebar-project-status.pending { color: var(--yellow); }
+  .sidebar-empty { padding: 8px 9px; color: var(--ink-faint); font-size: 11px;
+    border: 1px dashed var(--line-strong); border-radius: 6px; }
+  .sidebar-nav { display: grid; gap: 3px; margin-top: 6px; }
+  .sidebar-nav-item { display: flex; align-items: center; gap: 9px; padding: 8px 9px; border: 0;
+    border-radius: 6px; background: transparent; color: var(--ink-muted); cursor: pointer;
+    text-align: left; font-size: 12px; font-weight: 500; }
+  .sidebar-nav-item:hover { background: var(--surface-muted); color: var(--ink); }
+  .sidebar-nav-item[aria-pressed="true"] { background: var(--blue-soft); color: var(--ink); }
+  .app-main { min-width: 0; }
+  .app-topbar { display: flex; align-items: center; gap: 8px; justify-content: flex-end;
+    flex-wrap: wrap; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .topbar-project { margin-right: auto; color: var(--ink-muted); font-size: 12px; font-weight: 500;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .audit-toolbar { display: flex; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  .overview-llm-actions { display: inline-flex; align-items: center; gap: 9px; }
+  .drive-status { display: flex; align-items: center; gap: 12px; margin: 10px 0 4px;
+    padding: 9px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); }
+  .drive-timer { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 15px; font-weight: 600; color: var(--blue); }
+  .drive-note { color: var(--ink-muted); font-size: 11px; min-width: 0; }
+  .drive-report-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+  .drive-report-kpi { padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); }
+  .drive-report-kpi .kpi-label { color: var(--ink-faint); font-size: 10px; }
+  .drive-report-kpi .kpi-value { margin-top: 4px; font-size: 18px; font-weight: 500; }
+  .drive-report-list { display: grid; gap: 4px; margin-top: 10px; }
+  .drive-report-item { color: var(--ink-muted); font-size: 11px; line-height: 1.5; }
+  .drive-report-item .badge { display: inline-block; min-width: 54px; padding: 1px 5px; margin-right: 6px;
+    border-radius: 3px; background: var(--surface-muted); color: var(--ink-muted); font-size: 9px; font-weight: 500; }
+  .drive-report-item .good { color: var(--green); }
+  .drive-report-item .bad { color: var(--red); }
+  .drive-report-item .warn { color: var(--yellow); }
+  /* The overview/projects views now live inside .app-main (topbar above), so
+     they don't need the old full-page top padding. */
+  .app-main .overview-view { padding-top: 22px; }
+  @media (max-width: 900px) {
+    #app { grid-template-columns: 1fr; }
+    #sidebar { position: static; height: auto; flex-direction: row; flex-wrap: wrap;
+      align-items: center; gap: 12px 16px; border-right: 0; border-bottom: 1px solid var(--line); padding: 12px 14px; }
+    .sidebar-brand h1 { display: none; }
+    .sidebar-section { flex: 1 1 100%; order: 3; }
+    .sidebar-nav { order: 2; flex: 1; display: flex; }
+    .sidebar-nav-item { flex: 1; justify-content: center; }
+    .sidebar-project-list { max-height: none; grid-auto-flow: column;
+      grid-auto-columns: minmax(160px, 1fr); overflow-x: auto; }
+  }
 </style>
 </head>
 <body>
@@ -444,28 +600,52 @@
   </div>
 
   <div id="app">
-    <div class="offline-banner" id="offline-banner">本地服务连接中断，正在重试。</div>
-    <main class="dashboard">
-      <header class="app-header">
-        <div class="brand">
-          <div class="brand-mark" aria-hidden="true">CC</div>
-          <div>
-            <div class="eyebrow">Code CCTV</div>
-            <h1>DevLoop 审计总览</h1>
-          </div>
-          <span class="brand-copy">受控软件修复演练</span>
+    <aside id="sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-mark" aria-hidden="true">CC</div>
+        <div>
+          <div class="eyebrow">Code CCTV</div>
+          <h1>DevLoop 审计</h1>
         </div>
-        <div class="header-actions">
-          <span class="runtime-status" id="runtime-status" data-online="false" data-mode="mock"><span class="runtime-dot" aria-hidden="true"></span><span id="runtime-label">正在连接</span></span>
+      </div>
+
+      <section class="sidebar-section" aria-labelledby="sidebar-projects-title">
+        <div class="sidebar-section-head">
+          <span class="sidebar-section-title" id="sidebar-projects-title">监控项目</span>
+          <button class="icon-button" id="sidebar-add-project-btn" type="button" aria-label="添加项目" data-tooltip="添加项目"><i data-lucide="plus" aria-hidden="true">+</i></button>
+        </div>
+        <div class="sidebar-project-list" id="sidebar-project-list">
+          <div class="sidebar-empty">加载监控项目…</div>
+        </div>
+      </section>
+
+      <nav class="sidebar-nav" aria-label="视图切换">
+        <button class="sidebar-nav-item" type="button" data-view="overview" id="view-overview-btn" aria-pressed="false">总览</button>
+        <button class="sidebar-nav-item" type="button" data-view="audit" id="view-audit-btn" aria-pressed="true">Case 审计</button>
+        <button class="sidebar-nav-item" type="button" data-view="projects" id="view-projects-btn" aria-pressed="false">监控项目</button>
+      </nav>
+    </aside>
+
+    <div class="app-main">
+      <div class="app-topbar">
+        <span class="topbar-project" id="topbar-project">未选择项目</span>
+        <span class="runtime-status" id="runtime-status" data-online="false" data-mode="mock"><span class="runtime-dot" aria-hidden="true"></span><span id="runtime-label">正在连接</span></span>
+        <button class="icon-button" id="connect-btn" type="button" aria-label="切换本机服务" data-tooltip="切换本机服务"><i data-lucide="plug-zap" aria-hidden="true">↔</i></button>
+        <button class="icon-button" id="refresh-btn" type="button" aria-label="刷新数据" data-tooltip="刷新数据"><i data-lucide="refresh-cw" aria-hidden="true">↻</i></button>
+        <div class="theme-toggle" role="group" aria-label="主题">
+          <button class="icon-button" type="button" aria-label="浅色主题" data-tooltip="浅色主题" data-theme-btn="light" aria-pressed="true"><i data-lucide="sun" aria-hidden="true">☼</i></button>
+          <button class="icon-button" type="button" aria-label="深色主题" data-tooltip="深色主题" data-theme-btn="dark" aria-pressed="false"><i data-lucide="moon" aria-hidden="true">◐</i></button>
+        </div>
+      </div>
+
+      <div class="offline-banner" id="offline-banner">本地服务连接中断，正在重试。</div>
+
+      <div id="view-audit">
+      <main class="dashboard">
+        <div class="audit-toolbar">
           <label class="case-picker"><span class="field-label">当前 Case</span><select id="case-select" aria-label="选择当前 Case"><option value="">加载中</option></select></label>
-          <button class="icon-button" id="connect-btn" type="button" aria-label="切换本机服务" data-tooltip="切换本机服务"><i data-lucide="plug-zap" aria-hidden="true">↔</i></button>
-          <button class="icon-button" id="refresh-btn" type="button" aria-label="刷新数据" data-tooltip="刷新数据"><i data-lucide="refresh-cw" aria-hidden="true">↻</i></button>
-          <div class="theme-toggle" role="group" aria-label="主题">
-            <button class="icon-button" type="button" aria-label="浅色主题" data-tooltip="浅色主题" data-theme-btn="light" aria-pressed="true"><i data-lucide="sun" aria-hidden="true">☼</i></button>
-            <button class="icon-button" type="button" aria-label="深色主题" data-tooltip="深色主题" data-theme-btn="dark" aria-pressed="false"><i data-lucide="moon" aria-hidden="true">◐</i></button>
-          </div>
+          <span class="section-note">当前项目的数据</span>
         </div>
-      </header>
 
       <section class="metric-grid" aria-label="Case 摘要">
         <article class="metric"><div class="metric-label">全部 Case</div><div class="metric-value" id="metric-total">—</div><div class="metric-caption">当前本地工作队列</div></article>
@@ -552,6 +732,132 @@
 
       <footer class="footer">数据由本地 Case API、审批记录、工具运行与制品索引提供。模型叙述不是执行证据；以审批、沙箱、工具退出码与哈希记录为准。</footer>
     </main>
+    </div>
+
+    <section id="view-overview" class="overview-view" hidden aria-labelledby="overview-title">
+      <div class="audit-toolbar">
+        <h1 class="section-title" id="overview-title">项目进度 · 分控仪表盘</h1>
+        <span class="section-note">当前项目聚合与 Agent 分工</span>
+      </div>
+
+      <div class="overview-hero" id="overview-hero" aria-label="项目概览">
+        <article class="metric"><div class="metric-label">全部 Case</div><div class="metric-value" id="ov-total">—</div><div class="metric-caption">本地工作队列</div></article>
+        <article class="metric"><div class="metric-label">活跃 Case</div><div class="metric-value" id="ov-active">—</div><div class="metric-caption">未关闭/未升级</div></article>
+        <article class="metric"><div class="metric-label">Agent 运行</div><div class="metric-value" id="ov-agent-runs">—</div><div class="metric-caption">累计任务执行</div></article>
+        <article class="metric"><div class="metric-label">工具调用</div><div class="metric-value" id="ov-tool-runs">—</div><div class="metric-caption">受控工具记录</div></article>
+        <article class="metric"><div class="metric-label">监控活动</div><div class="metric-value" id="ov-events">—</div><div class="metric-caption">近 14 天事件</div></article>
+      </div>
+
+      <div class="overview-grid">
+        <article class="overview-card">
+          <h3>Case 状态分布</h3>
+          <p class="card-desc">确定性统计，来自本地 store。</p>
+          <div class="card-body" id="ov-status-card"></div>
+        </article>
+        <article class="overview-card">
+          <h3>Agent 分工</h3>
+          <p class="card-desc">各 Agent 运行记录（完成/失败/进行中）。</p>
+          <div class="card-body" id="ov-agent-card"></div>
+        </article>
+        <article class="overview-card">
+          <h3>近 14 天活动趋势</h3>
+          <p class="card-desc">Case 更新 / 事件按天。</p>
+          <div class="card-body" id="ov-trend-card"></div>
+        </article>
+        <article class="overview-card">
+          <h3>阶段进度</h3>
+          <p class="card-desc">LLM 判断的受控能力实施进度。</p>
+          <div class="card-body" id="ov-phase-card"></div>
+        </article>
+        <article class="overview-card">
+          <h3>工具调用统计</h3>
+          <p class="card-desc">受控工具链使用与退出码。</p>
+          <div class="card-body" id="ov-tool-card"></div>
+        </article>
+        <article class="overview-card">
+          <h3>审批与知识</h3>
+          <p class="card-desc">审批决策与知识条目状态。</p>
+          <div class="card-body" id="ov-approval-card"></div>
+        </article>
+      </div>
+
+      <div class="overview-llm" id="overview-llm">
+        <div class="overview-llm-head">
+          <div>
+            <h3>LLM 总结（信息金字塔）</h3>
+            <span class="llm-note">模型叙述不是执行证据；以审批、沙箱、工具退出码与哈希记录为准。</span>
+          </div>
+          <div class="overview-llm-actions">
+            <span class="llm-badge warn" id="ov-llm-badge">LLM 待生成</span>
+            <button class="button" id="overview-refresh-btn" type="button">刷新总结</button>
+            <button class="button primary" id="drive-btn" type="button">启动自动化驱动</button>
+          </div>
+        </div>
+        <div class="drive-status" id="ov-drive-status" hidden>
+          <span class="llm-badge warn" id="ov-drive-state">运行中</span>
+          <span class="drive-timer" id="ov-drive-timer">00:00</span>
+          <span class="drive-note" id="ov-drive-note">正在浏览项目、检测测试、静态扫描并生成总结…</span>
+        </div>
+        <div id="ov-llm-body"><div class="empty-data">正在生成项目总结…</div></div>
+      </div>
+
+      <div class="overview-llm" id="overview-drive" hidden>
+        <div class="overview-llm-head">
+          <div>
+            <h3>项目浏览报告</h3>
+            <span class="llm-note">确定性浏览结果（文件树 / git / 测试 / 静态扫描）。</span>
+          </div>
+          <span class="llm-badge warn" id="ov-drive-report-badge">—</span>
+        </div>
+        <div id="ov-drive-report-body"><div class="empty-data">尚未运行自动化驱动。</div></div>
+      </div>
+    </section>
+
+    <section id="view-projects" class="overview-view" hidden aria-labelledby="projects-title">
+      <div class="audit-toolbar">
+        <h1 class="section-title" id="projects-title">监控项目</h1>
+        <button class="button" id="open-project-picker-btn" type="button">选择要监控的项目</button>
+      </div>
+
+      <div class="overview-grid" style="margin-top:22px">
+        <article class="overview-card" style="grid-column:1/-1">
+          <h3>已监控项目</h3>
+          <p class="card-desc">选择后由本机监控服务跟踪文件变化与 git 提交。</p>
+          <div class="card-body" id="monitored-projects-list"><div class="empty-data">加载监控项目…</div></div>
+        </article>
+      </div>
+    </section>
+    </div>
+  </div>
+
+  <div id="projects-screen">
+    <section class="connect-card" aria-labelledby="proj-picker-title">
+      <div class="connect-title-row">
+        <div><div class="eyebrow">本机项目</div><h2 id="proj-picker-title">选择要监控的项目</h2></div>
+        <button class="icon-button" id="proj-picker-close-btn" type="button" aria-label="关闭项目选择" data-tooltip="关闭项目选择"><i data-lucide="x" aria-hidden="true">×</i></button>
+      </div>
+      <p id="proj-picker-copy">自动检索本机 git 仓库与运行中进程的工作目录；勾选后开始监控。</p>
+      <section class="connect-discovery" aria-labelledby="proj-git-title">
+        <div class="connect-discovery-head"><span class="connect-discovery-title" id="proj-git-title">发现的 git 仓库</span><button class="icon-button" id="proj-refresh-btn" type="button" aria-label="刷新本机项目" data-tooltip="刷新本机项目"><i data-lucide="refresh-cw" aria-hidden="true">↻</i></button></div>
+        <div class="connect-discovery-status" id="proj-discovery-status" aria-live="polite">正在检索本机项目…</div>
+        <div class="service-list" id="proj-git-list"></div>
+      </section>
+      <section class="connect-discovery" aria-labelledby="proj-proc-title">
+        <div class="connect-discovery-head"><span class="connect-discovery-title" id="proj-proc-title">运行中的进程工作目录</span></div>
+        <div class="connect-discovery-status" id="proj-proc-status" aria-live="polite">—</div>
+        <div class="service-list" id="proj-proc-list"></div>
+      </section>
+      <details class="manual-connect" id="proj-manual-connect">
+        <summary>手动添加项目路径</summary>
+        <div class="connect-fields">
+          <label class="connect-field"><span class="field-label">项目绝对路径</span><input id="proj-manual-path" placeholder="/path/to/project"></label>
+        </div>
+      </details>
+      <div class="connect-row">
+        <button class="button" id="proj-picker-cancel" type="button">取消</button>
+        <button class="button primary" id="proj-picker-confirm" type="button">开始监控所选项目</button>
+      </div>
+    </section>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -610,6 +916,14 @@
   let streamWake = null;
   let connectionEpoch = 0;
   const SERVICE_CACHE_KEY = "cc-discovered-services";
+  let currentView = "audit";
+  let summaryLlm = null;
+  let selectedProject = null;      // { workspace, name, canonical_ref, status, kind, ... }
+  let monitoredProjects = [];      // from GET /api/projects
+  let dataEpoch = 0;               // bumped on connect AND project switch (race guard)
+  const PROJECT_KEY = "cc-current-project";
+  let driveTimer = null;           // setInterval handle for the drive mm:ss clock
+  let driveStartedAt = 0;          // Date.now() when the current drive started
 
   const root = document.documentElement;
   const urlTheme = new URLSearchParams(location.search).get("theme");
@@ -623,6 +937,25 @@
     syncThemeButtons();
   }));
   syncThemeButtons();
+
+  // ── View switching (hash routes #/audit / #/overview / #/projects) ──
+  // Pure toggle — data loading is funneled through refreshActiveView()/
+  // refreshAll() (see data layer), so switching never double-fetches.
+  function setView(view) {
+    currentView = ["overview", "projects"].includes(view) ? view : "audit";
+    $("view-audit").hidden = currentView !== "audit";
+    $("view-overview").hidden = currentView !== "overview";
+    $("view-projects").hidden = currentView !== "projects";
+    document.querySelectorAll(".sidebar-nav-item").forEach((btn) =>
+      btn.setAttribute("aria-pressed", String(btn.dataset.view === currentView)));
+  }
+  function applyHash() {
+    const hash = location.hash.replace(/^#\/?/, "");
+    setView(hash === "overview" ? "overview" : hash === "projects" ? "projects" : "audit");
+  }
+  document.querySelectorAll(".sidebar-nav-item").forEach((btn) =>
+    btn.addEventListener("click", () => { location.hash = "#/" + btn.dataset.view; }));
+  window.addEventListener("hashchange", () => { applyHash(); refreshActiveView(); });
 
   function runtimeLabel() { return config.runtime_mode === "production" ? "生产 LLM 建议" : "Mock 演练流程"; }
   function setOnline(online) {
@@ -1160,34 +1493,51 @@
     } catch (error) { toast(error.message); }
   }
 
-  async function loadCases(epoch = connectionEpoch) {
-    const result = await api("/api/cases?limit=500");
-    if (epoch !== connectionEpoch) return false;
+  async function loadCases(epoch = dataEpoch) {
+    const repo = selectedProject ? selectedProject.canonical_ref : "";
+    const path = repo
+      ? `/api/cases?limit=500&repository_ref=${encodeURIComponent(repo)}`
+      : "/api/cases?limit=500";
+    const result = await api(path);
+    if (epoch !== dataEpoch) return false;
     cases = result.cases || [];
     if (!cases.some((item) => item.case_id === selectedId)) selectedId = cases[0]?.case_id || null;
     updateMetrics();
     renderSelector();
     return true;
   }
-  async function loadEvidence(caseId, epoch = connectionEpoch) {
+  async function loadEvidence(caseId, epoch = dataEpoch) {
     if (!caseId) {
-      if (epoch !== connectionEpoch) return false;
+      if (epoch !== dataEpoch) return false;
       evidence = null;
       renderCase();
       return true;
     }
     const result = await api(`/api/cases/${caseId}/evidence`);
-    if (epoch !== connectionEpoch) return false;
+    if (epoch !== dataEpoch) return false;
     evidence = result.evidence;
     renderCase();
     return true;
   }
-  async function refreshAll(epoch = connectionEpoch) {
-    try {
-      if (!await loadCases(epoch) || epoch !== connectionEpoch) return;
+  // Refresh only the data the ACTIVE view needs, plus the sidebar project list.
+  async function refreshActiveView(epoch = dataEpoch) {
+    if (currentView === "overview") {
+      await loadProjectSummary(false, epoch);
+      await loadDriveLatest(epoch);
+    } else if (currentView === "projects") {
+      await loadProjects(epoch);
+    } else {
+      if (!await loadCases(epoch) || epoch !== dataEpoch) return;
       await loadEvidence(selectedId, epoch);
+    }
+  }
+  async function refreshAll(epoch = dataEpoch) {
+    try {
+      await loadProjects(epoch);                  // cheap sidebar, always
+      if (epoch !== dataEpoch) return;
+      if (currentView !== "projects") await refreshActiveView(epoch); // projects already rendered
     } catch (error) {
-      if (epoch === connectionEpoch) toast(error.message);
+      if (epoch === dataEpoch) toast(error.message);
     }
   }
   $("case-select").addEventListener("change", async (event) => {
@@ -1254,21 +1604,662 @@
       retry *= 2;
     }
   }
+  // ── 自动化驱动：启动按钮 + 运行计时 + 结果渲染 ────────────────────
+  function fmtDuration(seconds) {
+    const s = Math.max(0, Math.floor(seconds));
+    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  }
+  function startDriveTimer() {
+    stopDriveTimer();
+    driveStartedAt = Date.now();
+    $("ov-drive-timer").textContent = "00:00";
+    driveTimer = setInterval(() => {
+      $("ov-drive-timer").textContent = fmtDuration((Date.now() - driveStartedAt) / 1000);
+    }, 1000);
+  }
+  function stopDriveTimer() {
+    if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+  }
+  function setDriveStatus(visible, stateText, stateClass) {
+    $("ov-drive-status").hidden = !visible;
+    if (!visible) return;
+    $("ov-drive-state").textContent = stateText;
+    $("ov-drive-state").className = `llm-badge ${stateClass}`;
+  }
+  async function startDrive() {
+    if (!selectedProject) { toast("请先选择要监控的项目"); return; }
+    const btn = $("drive-btn");
+    btn.disabled = true;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/drive`, { method: "POST" });
+      setDriveStatus(true, "运行中", "warn");
+      startDriveTimer();
+      $("ov-drive-note").textContent = `正在诊断 ${selectedProject.name || selectedProject.workspace}…`;
+    } catch (error) {
+      btn.disabled = false;
+      setDriveStatus(true, "失败", "bad");
+      $("ov-drive-note").textContent = error.message;
+    }
+  }
+  $("drive-btn").addEventListener("click", startDrive);
+
+  function onDriveStatus(event) {
+    const run = (event && event.run) || {};
+    const status = run.status;
+    if (status === "running") {
+      $("drive-btn").disabled = true;
+      setDriveStatus(true, "运行中", "warn");
+      if (!driveTimer) startDriveTimer();
+      $("ov-drive-note").textContent = "正在浏览项目、检测测试、静态扫描并生成总结…";
+    } else if (status === "complete") {
+      $("drive-btn").disabled = false;
+      stopDriveTimer();
+      if (run.duration_s != null) $("ov-drive-timer").textContent = fmtDuration(run.duration_s);
+      setDriveStatus(true, "已完成", "ok");
+      $("ov-drive-note").textContent = `诊断完成，用时 ${run.duration_s != null ? fmtDuration(run.duration_s) : "?"}。`;
+      renderDriveRun(run);
+    } else if (status === "error") {
+      $("drive-btn").disabled = false;
+      stopDriveTimer();
+      setDriveStatus(true, "失败", "bad");
+      $("ov-drive-note").textContent = run.error || "驱动失败";
+    }
+  }
   function handleEvent(event) {
+    if (event.type === "drive_status") { onDriveStatus(event); return; }
     if (!CASE_EVENTS.includes(event.type) && event.type !== "knowledge_reviewed") return;
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => refreshAll(), 300);
+  }
+
+  // 渲染项目浏览报告（确定性）+ 复用 LLM 信息金字塔
+  function renderDriveRun(run) {
+    const browse = run.browse;
+    const llm = run.llm;
+    if (llm && llm.status === "ok") {
+      summaryLlm = llm;
+      renderOverviewLlm(llm);
+    }
+    const report = $("overview-drive");
+    const badge = $("ov-drive-report-badge");
+    const body = $("ov-drive-report-body");
+    report.hidden = false;
+    body.innerHTML = "";
+    if (!browse) { body.append(create("div", "empty-data", "无浏览数据。")); return; }
+    const git = browse.git || {};
+    const test = browse.test || {};
+    const scan = browse.static_scan || {};
+    badge.textContent = run.status === "complete" ? "已完成" : run.status;
+    badge.className = "llm-badge " + (run.status === "complete" ? "ok" : "warn");
+    const grid = create("div", "drive-report-grid");
+    const kpis = [
+      ["文件数", String(browse.file_count ?? 0)],
+      ["代码符号", String(browse.symbol_total ?? 0)],
+      ["语言", Object.keys(browse.language_stats || {}).slice(0, 3).join("/") || "—"],
+      ["Git 分支", git.branch || "—"],
+      ["TODO/FIXME", String((scan.todo_count ?? 0) + (scan.fixme_count ?? 0))],
+      ["测试", test.detected ? (test.ran ? (test.passed ? "通过" : "失败") : "已检测") : "未检测"],
+    ];
+    kpis.forEach(([label, value]) => {
+      const kpi = create("div", "drive-report-kpi");
+      kpi.append(create("div", "kpi-label", label));
+      kpi.append(create("div", "kpi-value", value));
+      grid.append(kpi);
+    });
+    body.append(grid);
+    const list = create("div", "drive-report-list");
+    if (git.remote) list.append(create("div", "drive-report-item", `<span class="badge">remote</span>${git.remote}`));
+    if (git.head) list.append(create("div", "drive-report-item", `<span class="badge">HEAD</span>${git.head} · ${git.dirty_count ?? 0} 个未提交变更`));
+    if (git.recent_commits && git.recent_commits.length) {
+      git.recent_commits.slice(0, 4).forEach((c) => list.append(create("div", "drive-report-item", `<span class="badge">git</span>${c}`)));
+    }
+    if (test.detected) {
+      list.append(create("div", "drive-report-item", `<span class="badge">test</span>${test.detail || test.command || ""} ${test.ran ? (test.passed ? '<span class="good">通过</span>' : '<span class="bad">失败</span>') : ""}`));
+      if (test.output_summary) list.append(create("div", "drive-report-item", `<span class="badge">out</span>${test.output_summary.slice(0, 300)}`));
+    }
+    if ((scan.error_handling_gaps || []).length) {
+      list.append(create("div", "drive-report-item", `<span class="badge warn">风险</span>${scan.error_handling_gaps.length} 处错误处理缺口（bare except / 空 catch）`));
+      scan.error_handling_gaps.slice(0, 5).forEach((g) =>
+        list.append(create("div", "drive-report-item", `<span class="badge">gap</span>${g.file}:${g.line} ${g.snippet}`)));
+    }
+    body.append(list);
+  }
+
+  async function loadDriveLatest(epoch = dataEpoch) {
+    if (!selectedProject) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/drive`);
+      if (epoch !== dataEpoch) return;
+      const run = payload.run;
+      if (run) onDriveStatus({ type: "drive_status", run });
+    } catch (error) { /* no run yet — ignore */ }
   }
   async function boot() {
     const connection = ++connectionEpoch;
     stopSubscription();
     try {
-      await refreshAll(connection);
-      if (connection === connectionEpoch) subscribe(connection);
+      const epoch = ++dataEpoch;
+      await loadProjects(epoch);
+      if (connection !== connectionEpoch) return;
+      if (!monitoredProjects.length) {
+        applyHash();                        // default view (audit)
+        openProjectPicker(true);            // first-run: "先选择要监控的项目以开始"
+        subscribe(connection);
+        return;
+      }
+      const saved = localStorage.getItem(PROJECT_KEY);
+      const match = monitoredProjects.find((p) => p.workspace === saved) || monitoredProjects[0];
+      selectedProject = match;
+      renderSidebarProjects();
+      if (!location.hash || location.hash === "#/") {
+        history.replaceState(null, "", "#/overview");
+      }
+      applyHash();                          // toggle only (no load)
+      await refreshAll(connection);         // loads active view + sidebar once
+      subscribe(connection);
     } catch (error) { toast(error.message); }
   }
+
+  // ── 监控项目：选择窗口 + 监控列表 ──────────────────────────────────
+
+  let discoveredGit = [];
+  let discoveredProcesses = [];
+
+  function statusText(s) { return s === "watching" ? "监控中" : s === "error" ? "错误" : s === "pending" ? "待启动" : (s || "未知"); }
+
+  async function loadProjects(epoch = dataEpoch) {
+    try {
+      const payload = await api("/api/projects");
+      if (epoch !== dataEpoch) return false;
+      monitoredProjects = payload.projects || [];
+      renderSidebarProjects();
+      if (currentView === "projects") renderMonitoredProjects(monitoredProjects);
+      setOnline(true);
+      return true;
+    } catch (error) {
+      if (epoch === dataEpoch) {
+        setOnline(false);
+        const list = $("monitored-projects-list");
+        if (list) { list.innerHTML = ""; list.append(create("div", "empty-data", "无法连接监控服务。")); }
+      }
+      return false;
+    }
+  }
+
+  function renderSidebarProjects() {
+    const target = $("sidebar-project-list");
+    target.innerHTML = "";
+    $("topbar-project").textContent = selectedProject
+      ? (selectedProject.name || selectedProject.workspace) : "未选择项目";
+    if (!monitoredProjects.length) {
+      target.append(create("div", "sidebar-empty", "尚未监控项目"));
+      return;
+    }
+    monitoredProjects.forEach((p) => {
+      const item = create("button", "sidebar-project-item");
+      item.type = "button";
+      item.classList.toggle("active", !!selectedProject && selectedProject.workspace === p.workspace);
+      item.append(create("span", "sidebar-project-name", p.name || p.workspace));
+      item.append(create("span", "sidebar-project-meta", shortRepo(p.workspace)));
+      item.append(create("span", `sidebar-project-status ${p.status || "pending"}`, statusText(p.status)));
+      item.addEventListener("click", () => selectProject(p.workspace));
+      target.append(item);
+    });
+  }
+
+  async function selectProject(workspace, opts = {}) {
+    const project = monitoredProjects.find((p) => p.workspace === workspace);
+    if (!project) return;
+    selectedProject = project;
+    localStorage.setItem(PROJECT_KEY, workspace);
+    const epoch = ++dataEpoch;                 // invalidate in-flight loads from the old project
+    renderSidebarProjects();
+    resetDriveUI();
+    if (opts.navigateToOverview && currentView !== "overview") {
+      location.hash = "#/overview";           // hashchange → refreshActiveView loads
+      return;
+    }
+    await refreshActiveView(epoch);
+  }
+
+  function resetDriveUI() {
+    stopDriveTimer();
+    const btn = $("drive-btn");
+    if (btn) btn.disabled = false;
+    setDriveStatus(false);
+    const report = $("overview-drive");
+    if (report) report.hidden = true;
+    const body = $("ov-drive-report-body");
+    if (body) body.replaceChildren(create("div", "empty-data", "尚未运行自动化驱动。"));
+  }
+
+  function renderMonitoredProjects(projects) {
+    const target = $("monitored-projects-list");
+    target.innerHTML = "";
+    if (!projects.length) {
+      target.append(create("div", "empty-data", "还没有监控项目。点击「选择要监控的项目」开始。"));
+      return;
+    }
+    projects.forEach((p) => {
+      const card = create("article", "monitored-card");
+      const info = create("div", "");
+      info.append(create("div", "monitored-name", p.name || p.workspace));
+      info.append(create("div", "monitored-meta", `${p.kind === "git" ? "git" : "进程"} · ${p.workspace}${p.canonical_ref ? " · " + p.canonical_ref.split("|")[0] : ""}`));
+      const status = create("span", `monitored-status ${p.status || "pending"}`, statusText(p.status));
+      const removeBtn = create("button", "button", "停止监控");
+      removeBtn.type = "button";
+      removeBtn.addEventListener("click", async () => {
+        try {
+          await api(`/api/projects/${encodeURIComponent(p.workspace)}`, { method: "DELETE" });
+          toast("已停止监控该项目");
+          await loadProjects();
+          if (selectedProject && selectedProject.workspace === p.workspace) {
+            if (monitoredProjects.length) await selectProject(monitoredProjects[0].workspace);
+            else { selectedProject = null; renderSidebarProjects(); openProjectPicker(true); }
+          }
+        } catch (error) { toast(error.message); }
+      });
+      card.append(info, status, removeBtn);
+      target.append(card);
+    });
+  }
+
+  function openProjectPicker(firstRun = false) {
+    $("projects-screen").classList.add("show");
+    $("proj-manual-connect").open = false;
+    $("proj-picker-copy").textContent = firstRun
+      ? "先选择要监控的项目以开始。当前还没有任何被监控的项目。"
+      : "自动检索本机 git 仓库与运行中进程的工作目录；勾选后开始监控。";
+    refreshProjectDiscovery();
+  }
+  function closeProjectPicker() { $("projects-screen").classList.remove("show"); }
+  async function refreshProjectDiscovery() {
+    $("proj-discovery-status").textContent = "正在检索本机项目…";
+    $("proj-git-list").innerHTML = "";
+    $("proj-proc-list").innerHTML = "";
+    try {
+      const payload = await api("/api/projects/discover");
+      discoveredGit = payload.git || [];
+      discoveredProcesses = payload.processes || [];
+      $("proj-discovery-status").textContent = `发现 ${discoveredGit.length} 个 git 仓库 · ${discoveredProcesses.length} 个运行进程工作目录`;
+      renderGitCandidates();
+      renderProcessCandidates();
+    } catch (error) {
+      $("proj-discovery-status").textContent = "项目发现暂不可用。";
+      $("proj-git-list").append(create("div", "empty-data", error.message));
+    }
+  }
+
+  function projOption(candidate) {
+    const option = create("button", "proj-option");
+    option.type = "button";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.path = candidate.path || candidate.cwd || candidate.workspace || "";
+    box.dataset.kind = candidate.kind || "git";
+    box.dataset.name = candidate.name || "";
+    box.addEventListener("click", (event) => event.stopPropagation());
+    const copy = create("span", "");
+    copy.append(create("span", "proj-option-name", candidate.name || candidate.path || candidate.cwd));
+    const meta = candidate.git_remote || candidate.branch || candidate.last_commit || candidate.pid
+      ? [candidate.git_remote, candidate.branch, candidate.last_commit, candidate.pid ? `pid ${candidate.pid}` : ""].filter(Boolean).join(" · ")
+      : candidate.path || candidate.cwd;
+    copy.append(create("span", "proj-option-meta", meta));
+    option.append(box, copy);
+    return option;
+  }
+
+  function renderGitCandidates() {
+    const target = $("proj-git-list");
+    target.innerHTML = "";
+    if (!discoveredGit.length) { target.append(create("div", "empty-data", "未发现 git 仓库（可在下方手动添加路径）。")); return; }
+    discoveredGit.forEach((c) => target.append(projOption(c)));
+  }
+  function renderProcessCandidates() {
+    const target = $("proj-proc-list");
+    target.innerHTML = "";
+    $("proj-proc-status").textContent = discoveredProcesses.length ? `发现 ${discoveredProcesses.length} 个运行中的项目工作目录` : "未发现运行中的项目进程";
+    if (!discoveredProcesses.length) { target.append(create("div", "empty-data", "暂无运行中的开发进程。")); return; }
+    discoveredProcesses.forEach((c) => target.append(projOption(c)));
+  }
+
+  async function confirmProjectSelection() {
+    const selected = [];
+    document.querySelectorAll("#projects-screen .proj-option input:checked").forEach((box) => {
+      selected.push({ workspace: box.dataset.path, kind: box.dataset.kind, name: box.dataset.name });
+    });
+    const manualPath = $("proj-manual-path").value.trim();
+    if (manualPath) {
+      selected.push({ workspace: manualPath, kind: "git", name: "" });
+    }
+    if (!selected.length) { toast("请至少选择一个项目"); return; }
+    let registered = 0;
+    for (const item of selected) {
+      try {
+        await api("/api/projects", { method: "POST", body: item });
+        registered += 1;
+      } catch (error) {
+        toast(`监控 ${item.workspace} 失败：${error.message}`);
+      }
+    }
+    toast(registered ? `已开始监控 ${registered} 个项目` : "未注册任何项目");
+    closeProjectPicker();
+    if (!registered) return;
+    await loadProjects();
+    if (monitoredProjects.length) {
+      await selectProject(monitoredProjects[0].workspace, { navigateToOverview: true });
+    } else {
+      openProjectPicker(true);
+    }
+  }
+
+  $("open-project-picker-btn").addEventListener("click", () => openProjectPicker(false));
+  $("sidebar-add-project-btn").addEventListener("click", () => openProjectPicker(false));
+  $("proj-picker-close-btn").addEventListener("click", closeProjectPicker);
+  $("proj-picker-cancel").addEventListener("click", closeProjectPicker);
+  $("proj-refresh-btn").addEventListener("click", refreshProjectDiscovery);
+  $("proj-picker-confirm").addEventListener("click", confirmProjectSelection);
+
+  // ── 项目进度 · 分控仪表盘 ──────────────────────────────────────────
+
+  function statusCssVar(status) {
+    const meta = statusMeta(status);
+    const colors = { "var(--ink-muted)": "var(--ink-muted)", "var(--blue)": "var(--blue)", "var(--orange)": "var(--orange)", "var(--yellow)": "var(--yellow)", "var(--green)": "var(--green)", "var(--red)": "var(--red)", "var(--rose)": "var(--rose)" };
+    return colors[meta.color] || "var(--ink-muted)";
+  }
+
+  async function loadProjectSummary(force = false, epoch = dataEpoch) {
+    try {
+      const query = new URLSearchParams();
+      if (selectedProject) query.set("workspace", selectedProject.workspace);
+      if (force) query.set("refresh", "1");
+      const qs = query.toString();
+      const payload = await api(`/api/project/summary${qs ? `?${qs}` : ""}`);
+      if (epoch !== dataEpoch) return;
+      summaryLlm = payload.llm || null;
+      renderOverviewStats(payload.stats);
+      renderOverviewLlm(payload.llm);
+      setOnline(true);
+    } catch (error) {
+      if (epoch === dataEpoch) setOnline(false);
+    }
+  }
+  $("overview-refresh-btn").addEventListener("click", () => loadProjectSummary(true));
+
+  function renderOverviewStats(stats) {
+    if (!stats) return;
+    const totals = stats.totals || {};
+    $("ov-total").textContent = totals.cases ?? 0;
+    $("ov-active").textContent = totals.active_cases ?? 0;
+    $("ov-agent-runs").textContent = totals.agent_runs ?? 0;
+    $("ov-tool-runs").textContent = totals.tool_runs ?? 0;
+    // 监控活动 = 近 14 天 timeline 事件总数（监控事件，非 Case）
+    const timeline = stats.activity_timeline || [];
+    $("ov-events").textContent = timeline.reduce((sum, d) => sum + (d.events || 0), 0);
+    renderStatusDonut(stats.case_counts_by_status || []);
+    renderAgentBars(stats.agent_run_counts || []);
+    renderTrend(stats.activity_timeline || []);
+    renderToolBars(stats.tool_counts || []);
+    renderApprovalCard(stats.approval_counts || [], stats.knowledge_counts || []);
+    renderPhaseBars(summaryLlm?.status === "ok" ? (summaryLlm.summary.progress_by_phase || []) : null);
+  }
+
+  function renderStatusDonut(statuses) {
+    const target = $("ov-status-card");
+    target.innerHTML = "";
+    if (!statuses.length) { target.append(create("div", "empty-data", "暂无 Case 数据。")); return; }
+    const total = statuses.reduce((s, r) => s + r.count, 0);
+    const wrap = create("div", "donut-wrap");
+    const donut = create("div", "donut");
+    let acc = 0;
+    const stops = statuses.map((r) => {
+      const color = statusCssVar(r.status);
+      const start = (acc / total) * 360; acc += r.count; const end = (acc / total) * 360;
+      return `${color} ${start}deg ${end}deg`;
+    }).join(", ");
+    donut.style.background = `conic-gradient(${stops})`;
+    const center = create("div", "donut-center");
+    center.append(document.createTextNode(String(total)));
+    center.append(create("small", "", "Case"));
+    donut.append(center);
+    const legend = create("div", "donut-legend");
+    statuses.slice().sort((a, b) => b.count - a.count).forEach((r) => {
+      const row = create("div", "legend");
+      const mark = create("i", "legend-mark");
+      mark.style.background = statusCssVar(r.status);
+      row.append(mark);
+      row.append(create("span", "", `${statusMeta(r.status).label} · ${r.count}`));
+      legend.append(row);
+    });
+    wrap.append(donut, legend);
+    target.append(wrap);
+  }
+
+  function renderAgentBars(agentRuns) {
+    const target = $("ov-agent-card");
+    target.innerHTML = "";
+    if (!agentRuns.length) { target.append(create("div", "empty-data", "暂无 Agent 运行记录。")); return; }
+    const byAgent = {};
+    agentRuns.forEach((r) => {
+      byAgent[r.agent_id] = byAgent[r.agent_id] || {};
+      byAgent[r.agent_id][r.status] = (byAgent[r.agent_id][r.status] || 0) + r.count;
+    });
+    const maxTotal = Math.max(1, ...Object.values(byAgent).map((m) => Object.values(m).reduce((s, c) => s + c, 0)));
+    const AGENT_TITLES = { triage: "分诊", diagnosis: "诊断", repair: "修复", verification: "验证" };
+    Object.entries(byAgent).forEach(([agentId, statusMap]) => {
+      const total = Object.values(statusMap).reduce((s, c) => s + c, 0);
+      const row = create("div", "bar-row");
+      row.append(create("div", "bar-label", AGENT_TITLES[agentId] || agentId));
+      const track = create("div", "bar-track");
+      const SEG_STATUS = { completed: "completed", failed: "failed", running: "running" };
+      Object.entries(SEG_STATUS).forEach(([status, cls]) => {
+        const count = statusMap[status] || 0;
+        if (!count) return;
+        const seg = create("div", `bar-seg ${cls}`);
+        seg.style.width = `${(count / maxTotal) * 100}%`;
+        seg.title = `${status}: ${count}`;
+        track.append(seg);
+      });
+      row.append(track);
+      row.append(create("div", "bar-total", String(total)));
+      target.append(row);
+    });
+    const hint = create("div", "legend", "");
+    [["completed", "完成"], ["failed", "失败"], ["running", "进行中"]].forEach(([cls, label]) => {
+      hint.append(create("i", `legend-mark ${cls === "completed" ? "success" : cls === "failed" ? "blocked" : ""}`, ""));
+      const seg = hint.lastElementChild;
+      seg.style.background = cls === "completed" ? "var(--green)" : cls === "failed" ? "var(--red)" : "var(--blue)";
+      hint.append(create("span", "", label));
+    });
+    target.append(hint);
+  }
+
+  function renderTrend(timeline) {
+    const target = $("ov-trend-card");
+    target.innerHTML = "";
+    if (!timeline.length) { target.append(create("div", "empty-data", "暂无活动数据。")); return; }
+    const svgNS = "http://www.w3.org/2000/svg";
+    const W = 320, H = 130, padL = 6, padB = 18, padT = 8;
+    const n = timeline.length;
+    const cases = timeline.map((d) => d.cases_updated || 0);
+    const events = timeline.map((d) => d.events || 0);
+    const maxVal = Math.max(1, ...cases, ...events);
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("class", "trend-chart");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "近 14 天活动趋势");
+    const barW = Math.max(2, (W - padL - 4) / n / 2);
+    cases.forEach((c, i) => {
+      const h = (c / maxVal) * (H - padT - padB);
+      const x = padL + i * ((W - padL) / n);
+      const rect = document.createElementNS(svgNS, "rect");
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", String(H - padB - h));
+      rect.setAttribute("width", String(barW));
+      rect.setAttribute("height", String(h));
+      rect.setAttribute("class", "trend-bar-cases");
+      if (i === n - 1) {
+        const txt = document.createElementNS(svgNS, "text");
+        txt.setAttribute("x", String(x + barW / 2));
+        txt.setAttribute("y", String(H - 6));
+        txt.setAttribute("text-anchor", "middle");
+        txt.textContent = timeline[i].day.slice(5);
+        svg.append(txt);
+      }
+      svg.append(rect);
+    });
+    events.forEach((c, i) => {
+      const h = (c / maxVal) * (H - padT - padB);
+      const x = padL + i * ((W - padL) / n) + barW;
+      const rect = document.createElementNS(svgNS, "rect");
+      rect.setAttribute("x", String(x));
+      rect.setAttribute("y", String(H - padB - h));
+      rect.setAttribute("width", String(barW));
+      rect.setAttribute("height", String(h));
+      rect.setAttribute("class", "trend-bar-events");
+      svg.append(rect);
+    });
+    const line = document.createElementNS(svgNS, "line");
+    line.setAttribute("x1", "0"); line.setAttribute("y1", String(H - padB));
+    line.setAttribute("x2", String(W)); line.setAttribute("y2", String(H - padB));
+    line.setAttribute("class", "axis");
+    svg.append(line);
+    const hint = create("div", "legend", "");
+    [["cases", "var(--blue)", "Case 更新"], ["events", "var(--green)", "事件"]].forEach(([cls, color, label]) => {
+      const mark = create("i", "legend-mark");
+      mark.style.background = color;
+      hint.append(mark);
+      hint.append(create("span", "", label));
+    });
+    target.append(svg, hint);
+  }
+
+  function renderToolBars(toolCounts) {
+    const target = $("ov-tool-card");
+    target.innerHTML = "";
+    if (!toolCounts.length) { target.append(create("div", "empty-data", "暂无工具调用记录。")); return; }
+    const max = Math.max(1, ...toolCounts.map((t) => t.count));
+    const TOOL_TITLES = { sandbox_copy: "沙箱拷贝", apply_case_a_patch: "受控补丁", quality_gate: "质量门禁" };
+    toolCounts.forEach((t) => {
+      const row = create("div", "bar-row");
+      row.append(create("div", "bar-label", TOOL_TITLES[t.tool_name] || t.tool_name));
+      const track = create("div", "bar-track");
+      const seg = create("div", "bar-seg", "");
+      seg.style.width = `${(t.count / max) * 100}%`;
+      seg.style.background = (t.exit_zero ?? 0) >= t.count ? "var(--green)" : "var(--yellow)";
+      seg.title = `调用 ${t.count} · 成功 ${t.exit_zero ?? 0}`;
+      track.append(seg);
+      row.append(track);
+      row.append(create("div", "bar-total", String(t.count)));
+      target.append(row);
+    });
+  }
+
+  function renderApprovalCard(approvals, knowledge) {
+    const target = $("ov-approval-card");
+    target.innerHTML = "";
+    const apprMap = {};
+    approvals.forEach((a) => { apprMap[a.decision] = (apprMap[a.decision] || 0) + a.count; });
+    const knMap = {};
+    knowledge.forEach((k) => { knMap[k.status] = (knMap[k.status] || 0) + k.count; });
+    const labels = [
+      ["审批 · 通过", apprMap.approved || 0, "var(--green)"],
+      ["审批 · 拒绝", apprMap.rejected || 0, "var(--red)"],
+      ["知识 · 待复核", knMap.pending_review || 0, "var(--yellow)"],
+      ["知识 · 已验证", knMap.verified || 0, "var(--green)"],
+      ["知识 · 已拒绝", knMap.rejected || 0, "var(--red)"],
+    ];
+    if (!labels.some(([, c]) => c > 0)) { target.append(create("div", "empty-data", "暂无审批与知识记录。")); return; }
+    const list = create("div", "donut-legend");
+    labels.forEach(([label, count, color]) => {
+      if (!count) return;
+      const row = create("div", "legend");
+      const mark = create("i", "legend-mark");
+      mark.style.background = color;
+      row.append(mark);
+      row.append(create("span", "", `${label} · ${count}`));
+      list.append(row);
+    });
+    target.append(list);
+  }
+
+  function renderPhaseBars(phases) {
+    const target = $("ov-phase-card");
+    target.innerHTML = "";
+    if (!phases || !phases.length) { target.append(create("div", "empty-data", "LLM 未提供阶段进度（待刷新总结）。")); return; }
+    const list = create("div", "phase-list");
+    phases.forEach((p) => {
+      const phase = create("div", "phase");
+      const head = create("div", "");
+      head.append(create("div", "phase-name", p.phase));
+      head.append(create("div", "phase-meta", p.status || "待确认"));
+      const track = create("div", "phase-track");
+      const fill = create("div", `phase-fill ${p.status === "已验证" ? "good" : p.status === "进行中" ? "warn" : ""}`);
+      fill.style.width = `${p.progress}%`;
+      track.append(fill);
+      phase.append(head, track, create("div", "phase-value", `${p.progress}%`));
+      list.append(phase);
+    });
+    target.append(list);
+  }
+
+  function renderOverviewLlm(llm) {
+    const badge = $("ov-llm-badge");
+    const body = $("ov-llm-body");
+    body.innerHTML = "";
+    if (!llm) { badge.textContent = "LLM 待生成"; badge.className = "llm-badge warn"; body.append(create("div", "empty-data", "正在生成项目总结…")); return; }
+    if (llm.status === "unavailable") {
+      badge.textContent = "LLM 不可用"; badge.className = "llm-badge warn";
+      body.append(create("div", "empty-data", llm.reason || "DEEPSEEK_API_KEY 未配置。"));
+      return;
+    }
+    if (llm.status === "error") {
+      badge.textContent = "LLM 生成失败"; badge.className = "llm-badge bad";
+      body.append(create("div", "empty-data", llm.reason || "LLM 调用失败，请重试。"));
+      return;
+    }
+    badge.textContent = "LLM 已生成 · 非执行证据"; badge.className = "llm-badge ok";
+    const s = llm.summary || {};
+    body.append(create("p", "llm-overall", s.overall_status || "—"));
+    const prios = s.top_priorities || [];
+    if (prios.length) {
+      body.append(create("div", "section-label", "信息金字塔 · 优先级"));
+      prios.forEach((item) => {
+        const row = create("div", "pyramid-row");
+        const m = String(item).match(/^(P\d+|优先级)\s+(.*)$/);
+        row.append(create("div", "pyramid-prio", m ? m[1] : "P"));
+        row.append(create("div", "pyramid-what", m ? m[2] : item));
+        row.append(create("div", "pyramid-evi", "以本地统计为准"));
+        body.append(row);
+      });
+    }
+    const divisions = s.division_of_labor || [];
+    if (divisions.length) {
+      body.append(create("div", "section-label", "Agent 分工"));
+      const rows = divisions.map((d) => [
+        { text: d.agent || "—" },
+        { text: d.activity || "—" },
+        { text: `${d.share ?? 0}%`, className: "mono" },
+      ]);
+      body.append(table(["Agent", "活动", "相对投入"], rows));
+    }
+    if ((s.risks || []).length) {
+      body.append(create("div", "section-label", "风险与待确认"));
+      const ul = create("ul", "risk-list");
+      s.risks.forEach((r) => ul.append(create("li", "", r)));
+      body.append(ul);
+    }
+    if ((s.next_steps || []).length) {
+      body.append(create("div", "section-label", "下一步建议"));
+      const ul = create("ul", "next-list");
+      s.next_steps.forEach((n) => ul.append(create("li", "", n)));
+      body.append(ul);
+    }
+  }
+
   window.addEventListener("load", () => { if (window.lucide) window.lucide.createIcons({ attrs: { width: 16, height: 16 } }); });
-  (async () => { if (await initConnection()) boot(); })();
+  (async () => { if (await initConnection()) await boot(); })();
   </script>
 </body>
 </html>

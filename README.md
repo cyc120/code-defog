@@ -10,6 +10,9 @@
 
 - 管理界面已收敛为 `web/` 下的本地 Web 控制台，原 macOS SwiftUI、Windows PySide6 和旧静态看板已移除。
 - 本地服务提供 Case API、SQLite 留存、SSE 更新、Web 控制台和本机服务发现。
+- **企业级项目监控**：自动检索本机 git 仓库与运行中进程工作目录，选择要监控的项目，持续跟踪文件变化与 git 提交。
+- **项目优先导航**：左侧边栏展示监控项目列表，视图（总览 / Case 审计 / 监控项目）按当前选中项目隔离。
+- **自动化驱动**：对选中项目一键启动全量诊断（浏览文件树 / git / 测试探测 / 静态扫描），由 DeepSeek 生成中文总结，**即使无 Case 或错误也输出项目结论**，前端展示运行状态与计时。
 - 默认运行的是进程内 Mock 工作流；`--runtime-mode agentscope` 是 AgentScope + DeepSeek 的本地实验路径，`production` 仅保留为其旧别名，不是 AgentTeams 的真实接入。
 - **真实 AgentTeams 尚未配置、部署或验证。** 当前没有可作为 AgentTeams Team/Task/Handoff/Trace 的竞赛运行证据；本地生成的 UUID 和 AgentScope 事件不能这样表述。
 
@@ -63,14 +66,15 @@ python3 -m daemon.dashboard --open
 
 ## Web 控制台
 
-`web/index.html` 是唯一的管理界面来源。它提供：
+`web/index.html` 是唯一的管理界面来源，采用**项目优先导航**：左侧边栏固定展示品牌、监控项目列表（点击切换当前项目）和视图导航（总览 / Case 审计 / 监控项目），顶部栏显示当前项目与运行时状态。
 
-- Case 队列、状态/仓库/关键字筛选与详情概览
-- 来源、Agent 运行、工具、审批、制品、知识与复盘证据页签
-- 状态机轨迹、SSE 自动刷新和本机服务选择
-- 审批与知识复核的人工密钥输入
+- **项目选择窗口**：自动检索本机 git 仓库与运行中进程工作目录，勾选要监控的项目；支持手动添加路径。
+- **总览视图**：当前项目的聚合统计（状态分布 / Agent 分工 / 活动趋势 / 工具 / 审批），加上 LLM 信息金字塔总结与「启动自动化驱动」按钮。
+- **Case 审计**：Case 队列、详情与来源、Agent 运行、工具、审批、制品、知识与复盘证据页签。
+- **监控项目**：已监控项目列表、运行状态与停止监控。
+- SSE 自动刷新、主题切换、人工审批密钥输入。
 
-直接打开 HTML 文件时，需要手动填写本机 Host、Port 和服务令牌；通过服务端 `/ui` 打开时则使用同源连接配置。
+首次运行无监控项目时，会自动弹出项目选择窗口引导。直接打开 HTML 文件需要手动填写本机 Host、Port 和服务令牌；通过服务端 `/ui` 打开时则使用同源连接配置。
 
 ## 核心闭环
 
@@ -105,6 +109,34 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 ```
 
 `RELEASED` 在当前项目中表示本地模拟放行，不表示真实生产部署。
+
+## 项目监控与自动化驱动
+
+### 监控真实项目
+
+对选中的本机项目，服务会持续跟踪文件变化（复用 `watch_worklog` 快照/差异引擎）与 git 提交增量，将事件写入本地 SQLite 并显示在总览的活动趋势中。监控是**只读**的，从不修改项目本身。
+
+### 自动化驱动
+
+总览视图的「启动自动化驱动」按钮对当前项目执行一次完整诊断（在后台线程进行，前端显示运行状态与计时）：
+
+1. **浏览项目**：文件树、语言分布、规模、git 状态（remote / 分支 / HEAD / 未提交变更 / 近期提交）、关键文件与符号。
+2. **测试探测**：安全检测并运行项目自身测试命令（pytest / npm test / make test / go test），带硬超时。
+3. **静态扫描**：统计 TODO / FIXME 标记，定位错误处理缺口（Python `bare except`、JS 空 `catch`）。
+4. **LLM 总结**：将浏览结果与确定性统计交给 DeepSeek，生成中文信息金字塔总结——**即使 0 个 Case、无测试失败也输出项目结论**。
+
+结果以「项目浏览报告」（确定性 KPI）+「LLM 信息金字塔」双面板展示。驱动不改变项目文件。
+
+### 项目 API
+
+| 方法 | 路径 | 鉴权 | 用途 |
+| --- | --- | --- | --- |
+| `GET` | `/api/projects/discover` | `service_token` | 自动检索本机 git 仓库与运行进程工作目录 |
+| `GET` | `/api/projects` | `service_token` | 已监控项目列表 |
+| `POST` | `/api/projects` | `service_token` | 注册一个项目开始监控 |
+| `DELETE` | `/api/projects/{workspace}` | `service_token` | 停止监控并移除 |
+| `POST` | `/api/projects/{workspace}/drive` | `service_token` | 启动自动化驱动（202；已在运行则 409） |
+| `GET` | `/api/projects/{workspace}/drive` | `service_token` | 最近一次驱动运行结果 |
 
 ## Case API 与审批
 
@@ -156,12 +188,17 @@ python3 -m daemon.serve --agentteams-preflight
 
 ```text
 code-cctv-general/
-├── daemon/                  # HTTP、SSE、SQLite、服务发现与 Web 托管
-│   ├── server.py            # Case 路由、双因子审批与 SSE
+├── daemon/                  # HTTP、SSE、SQLite、项目监控与 Web 托管
+│   ├── server.py            # Case / 项目 / 驱动路由、双因子审批与 SSE
 │   ├── serve.py             # 本机服务入口
 │   ├── dashboard.py         # 本机服务发现入口
-│   └── store.py             # Case 与监控数据存储
-├── web/                     # 唯一 Web 管理界面
+│   ├── store.py             # Case、监控项目与驱动运行存储
+│   ├── project_discovery.py # 本机 git 仓库 + 进程工作目录自动发现
+│   ├── project_monitor.py   # 每项目监控线程（文件变化 + git 提交）
+│   ├── drive.py             # 自动化驱动（浏览 + 测试 + 静态扫描）
+│   ├── repo_identity.py     # 仓库身份规范化与 base_commit 解析
+│   └── llm_summary.py       # DeepSeek LLM 总结与缓存（含驱动 prompt）
+├── web/                     # 唯一 Web 管理界面（项目优先导航）
 ├── agent_runtime/           # 状态机、本地编排和 AgentScope 实验适配
 ├── agents/                  # 分诊、诊断、修复、验证角色
 ├── connectors/              # 外部输入规范化

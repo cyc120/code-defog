@@ -53,6 +53,21 @@ def state_path() -> Path:
     return data_dir() / "state.sqlite3"
 
 
+def monitor_state_dir() -> Path:
+    """Directory for per-project watcher state snapshots."""
+    return data_dir() / "monitor_state"
+
+
+def project_registry_dir() -> Path:
+    """Directory for optional per-project JSON descriptors (cache layer)."""
+    return data_dir() / "projects"
+
+
+def worktree_root() -> Path:
+    """Root under which isolated git worktrees are created (repair milestone)."""
+    return data_dir() / "worktrees"
+
+
 def log_path(kind: str) -> Path:
     """Standard output log for a local service component."""
     return data_dir() / f"{kind}.log"

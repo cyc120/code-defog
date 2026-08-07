@@ -5,7 +5,7 @@
 > **状态：** 已审核的赛题目标架构；实现状态与规划分开记录。
 > **赛道对应：** GOAI Agent Infra - 方向三「软件研发全流程协同」
 
-> **当前实现说明（Web-only 收敛后）：** 本项目保留本文的赛题目标与验收口径，但管理界面已收敛为本地 Web 控制台，`macos/`、`windows/` 和旧静态看板已移除。现有 `agent_runtime/teams_adapter.py` 中的公开实现是 `AgentScopeExecutionAdapter`，仅用于本地 Mock/AgentScope 实验，**不代表真实 AgentTeams 接入**；官方控制面、身份凭证、Team/Task/Handoff 工作流和可导出 Trace 尚未配置或验证。下文出现的“真实 AgentTeams”均为赛事目标，不能作为当前已部署能力或运行证据的表述。
+> **当前实现说明（企业级里程碑后）：** 本项目保留本文的赛题目标与验收口径。管理界面为本地 Web 控制台（`web/index.html`，项目优先导航：左侧边栏监控项目列表 + 总览/Case 审计/监控项目三视图，视图按当前项目隔离）。新增企业级项目能力：自动发现本机 git 仓库与运行进程工作目录（`daemon/project_discovery.py`）、持续监控文件变化与 git 提交（`daemon/project_monitor.py`）、仓库身份规范化（`daemon/repo_identity.py`）与「启动自动化驱动」一键全量诊断（浏览 + 测试探测 + 静态扫描 + DeepSeek 总结，即使无 Case/错误也输出，`daemon/drive.py`、`daemon/llm_summary.py`）。现有 `agent_runtime/teams_adapter.py` 中的公开实现是 `AgentScopeExecutionAdapter`，仅用于本地 Mock/AgentScope 实验，**不代表真实 AgentTeams 接入**；官方控制面、身份凭证、Team/Task/Handoff 工作流和可导出 Trace 尚未配置或验证。下文出现的“真实 AgentTeams”均为赛事目标，不能作为当前已部署能力或运行证据的表述。
 
 ---
 

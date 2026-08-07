@@ -20,6 +20,8 @@ from agent_runtime.orchestrator import Orchestrator
 from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
 
 from . import paths
+from .project_discovery import LocalProjectDiscoveryAgent
+from .project_monitor import ProjectMonitor
 from .server import CodeCCTVServer
 from .service_discovery import LocalServiceDiscoveryAgent
 from .store import StateStore
@@ -132,10 +134,15 @@ def main() -> None:
         target=_run_retrospective, args=(store, case_id), daemon=True,
     ).start()
 
+    project_discovery_agent = LocalProjectDiscoveryAgent()
+    project_monitor = ProjectMonitor(store)
+
     server = CodeCCTVServer(
         (args.host, args.port), token, store, orchestrator,
         ui_dir=str(UI_DIR), discovery_agent=discovery_agent, instance_id=instance_id,
         approval_secret=approval_secret, runtime_mode=teams.mode,
+        project_discovery_agent=project_discovery_agent,
+        project_monitor=project_monitor,
     )
     address, port = server.server_address
     descriptor_registered = False
@@ -178,6 +185,10 @@ def main() -> None:
     finally:
         if descriptor_registered:
             discovery_agent.unregister(instance_id)
+        try:
+            project_monitor.stop()
+        except Exception:
+            pass
         server.server_close()
         store.close()
 

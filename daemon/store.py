@@ -175,6 +175,7 @@ class StateStore:
                 priority TEXT NOT NULL DEFAULT 'medium',
                 risk_level TEXT NOT NULL DEFAULT 'low',
                 repository_ref TEXT NOT NULL DEFAULT '',
+                repo_abs_path TEXT NOT NULL DEFAULT '',
                 base_commit TEXT,
                 patch_ref TEXT,
                 sandbox_ref TEXT,
@@ -187,6 +188,42 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
             CREATE INDEX IF NOT EXISTS idx_cases_signature ON cases(incident_signature);
+
+            -- User-selected projects the ProjectMonitor watches. Distinct from the
+            -- ingest-session `projects` table (workspace+conversation_id summary).
+            CREATE TABLE IF NOT EXISTS monitored_projects (
+                workspace TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                git_remote TEXT NOT NULL DEFAULT '',
+                branch TEXT NOT NULL DEFAULT '',
+                base_commit TEXT,
+                watcher_config TEXT NOT NULL DEFAULT '{}',
+                selected_at TEXT NOT NULL,
+                last_seen TEXT,
+                last_scan_state TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                last_error TEXT,
+                canonical_ref TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_monitored_projects_status
+                ON monitored_projects(status);
+
+            -- Automated drive runs (browse + test + static-scan + LLM summary).
+            -- Workspace-scoped (unlike agent_runs which requires a case_id).
+            CREATE TABLE IF NOT EXISTS drive_runs (
+                run_id TEXT PRIMARY KEY,
+                workspace TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                duration_s REAL,
+                browse_json TEXT,
+                llm_json TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_drive_runs_workspace
+                ON drive_runs(workspace, started_at DESC);
 
             -- case_sources: case_id is NULL for pending (not-yet-associated) observations
             CREATE TABLE IF NOT EXISTS case_sources (
@@ -317,6 +354,7 @@ class StateStore:
         tool_run_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(tool_runs)").fetchall()}
         needs_patch_ref = "patch_ref" not in case_columns if case_columns else False
         needs_sandbox_ref = "sandbox_ref" not in case_columns if case_columns else False
+        needs_repo_abs_path = "repo_abs_path" not in case_columns if case_columns else False
         needs_chain_sequence = "chain_sequence" not in tool_run_cols if tool_run_cols else False
         knowledge_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(knowledge_records)").fetchall()}
         needs_review_note = "review_note" not in knowledge_cols if knowledge_cols else False
@@ -361,6 +399,8 @@ class StateStore:
             self.connection.execute("ALTER TABLE cases ADD COLUMN patch_ref TEXT")
         if needs_sandbox_ref:
             self.connection.execute("ALTER TABLE cases ADD COLUMN sandbox_ref TEXT")
+        if needs_repo_abs_path:
+            self.connection.execute("ALTER TABLE cases ADD COLUMN repo_abs_path TEXT NOT NULL DEFAULT ''")
         if needs_chain_sequence:
             self.connection.execute("ALTER TABLE tool_runs ADD COLUMN chain_sequence INTEGER NOT NULL DEFAULT 0")
             self.connection.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_sequence ON tool_runs(case_id, chain_sequence)")
@@ -460,7 +500,8 @@ class StateStore:
             self.connection.execute("DELETE FROM events")
             self.connection.execute("DELETE FROM projects")
             for tbl in ("case_sources", "agent_runs", "tool_runs", "artifacts",
-                         "approval_grants", "approvals", "knowledge_records", "cases"):
+                         "approval_grants", "approvals", "knowledge_records", "cases",
+                         "drive_runs"):
                 self.connection.execute(f"DELETE FROM {tbl}")
             self.connection.commit()
             return self.state_locked()
@@ -580,6 +621,14 @@ class StateStore:
         if not repository_ref:
             repository_ref = clean_text(signals_raw.get("repository_ref"), 1000) or "unknown"
 
+        # Canonicalize repository identity: one real repo must not fragment into
+        # many Cases under different spellings (see daemon/repo_identity.py).
+        from .repo_identity import canonical_repo_identity, resolve_base_commit
+
+        identity = canonical_repo_identity(repository_ref)
+        canonical_ref = identity["canonical_ref"] or repository_ref
+        repo_abs_path = identity["abs_path"]
+
         now = utc_now()
 
         # ── Step 1: delivery idempotency ─────────────────────────────────
@@ -604,12 +653,15 @@ class StateStore:
         signals_complete = bool(exception_type and message_pattern and key_frames)
         if signals_complete:
             incident_sig = compute_incident_signature(
-                repository_ref, exception_type, message_pattern, key_frames)
+                canonical_ref, exception_type, message_pattern, key_frames)
 
         signals_json = json.dumps({
             "exception_type": exception_type, "message_pattern": message_pattern,
             "key_frames": key_frames, "keywords": keywords,
-            "repository_ref": repository_ref,
+            "repository_ref": canonical_ref,
+            # Backward-compat: the demo repair path reads this to select the
+            # controlled Case A sandbox.  Not a real-project security gate —
+            # that lands with the policy milestone.
             "repair_mode": clean_text(signals_raw.get("repair_mode"), 80),
         }, ensure_ascii=False)
 
@@ -660,11 +712,16 @@ class StateStore:
                 # Complete signals → create Case immediately
                 matched_case_id = f"case-{uuid.uuid4().hex[:12]}"
                 trace_id = f"trace-{uuid.uuid4().hex[:16]}"
+                # Resolve the reviewed base commit once, at intake, so approval
+                # target_ref validation has a real git SHA (not test-only SQL).
+                base_commit = resolve_base_commit(repo_abs_path) if identity["is_git"] else None
                 self.connection.execute(
                     """INSERT INTO cases (case_id, incident_signature, status, priority,
-                       risk_level, repository_ref, trace_id, title, created_at, updated_at)
-                       VALUES (?, ?, 'RECEIVED', 'medium', 'low', ?, ?, ?, ?, ?)""",
-                    (matched_case_id, incident_sig, repository_ref, trace_id,
+                       risk_level, repository_ref, repo_abs_path, base_commit,
+                       trace_id, title, created_at, updated_at)
+                       VALUES (?, ?, 'RECEIVED', 'medium', 'low', ?, ?, ?, ?, ?, ?, ?)""",
+                    (matched_case_id, incident_sig, canonical_ref, repo_abs_path, base_commit,
+                     trace_id,
                      clean_text(payload.get("title"), 200) or f"Case from {source_type}",
                      now, now),
                 )
@@ -1154,6 +1211,317 @@ class StateStore:
                     "SELECT * FROM artifacts WHERE case_id = ? ORDER BY created_at", (case_id,)).fetchall()],
                 "knowledge_records": self.list_knowledge_records(case_id=case_id),
                 "retrospective": self.get_retrospective(case_id),
+            }
+
+    # ── Monitored projects (user-selected, watched by ProjectMonitor) ─────
+
+    def register_monitored_project(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Register (or update) a project to be monitored.
+
+        *workspace* is the absolute project path; *kind* is ``git`` (has a
+        ``.git`` marker) or ``process`` (a running-process working directory).
+        Repository identity is canonicalized and the current git HEAD stored as
+        *base_commit* when available.
+        """
+        from .repo_identity import canonical_repo_identity, resolve_base_commit
+
+        workspace = clean_text(payload.get("workspace"), 2000)
+        if not workspace:
+            raise ValueError("workspace is required")
+        abs_path = str(Path(workspace).expanduser().resolve())
+        if not Path(abs_path).is_dir():
+            raise ValueError(f"workspace is not a directory: {abs_path}")
+
+        identity = canonical_repo_identity(abs_path)
+        kind = clean_text(payload.get("kind"), 20) or ("git" if identity["is_git"] else "process")
+        name = clean_text(payload.get("name"), 200) or Path(abs_path).name
+        git_remote = identity["git_remote"] or clean_text(payload.get("git_remote"), 500)
+        branch = clean_text(payload.get("branch"), 200)
+        base_commit = resolve_base_commit(abs_path) if identity["is_git"] else clean_text(
+            payload.get("base_commit"), 200) or None
+        watcher_config = payload.get("watcher_config")
+        if not isinstance(watcher_config, dict):
+            watcher_config = {}
+        now = utc_now()
+
+        with self.lock:
+            existing = self.connection.execute(
+                "SELECT * FROM monitored_projects WHERE workspace = ?", (abs_path,)
+            ).fetchone()
+            if existing:
+                self.connection.execute(
+                    """UPDATE monitored_projects SET name = ?, kind = ?, git_remote = ?,
+                       branch = ?, base_commit = ?, watcher_config = ?, last_seen = ?,
+                       status = ?, last_error = NULL, canonical_ref = ? WHERE workspace = ?""",
+                    (name, kind, git_remote, branch, base_commit,
+                     json.dumps(watcher_config, ensure_ascii=False), now,
+                     clean_text(payload.get("status"), 20) or existing["status"],
+                     identity["canonical_ref"], abs_path),
+                )
+            else:
+                self.connection.execute(
+                    """INSERT INTO monitored_projects (workspace, name, kind, git_remote,
+                       branch, base_commit, watcher_config, selected_at, last_seen, status,
+                       canonical_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (abs_path, name, kind, git_remote, branch, base_commit,
+                     json.dumps(watcher_config, ensure_ascii=False), now, now,
+                     clean_text(payload.get("status"), 20) or "pending",
+                     identity["canonical_ref"]),
+                )
+            self.connection.commit()
+            return self.get_monitored_project(abs_path) or {}
+
+    def unregister_monitored_project(self, workspace: str) -> bool:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            cursor = self.connection.execute(
+                "DELETE FROM monitored_projects WHERE workspace = ?", (abs_path,))
+            self.connection.commit()
+            return cursor.rowcount > 0
+
+    def list_monitored_projects(self) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT * FROM monitored_projects ORDER BY selected_at DESC").fetchall()
+            return [dict(r) for r in rows]
+
+    def get_monitored_project(self, workspace: str) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM monitored_projects WHERE workspace = ?", (abs_path,)).fetchone()
+            return dict(row) if row else None
+
+    def update_monitored_project_status(
+        self, workspace: str, status: str, last_error: str | None = None,
+    ) -> None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            self.connection.execute(
+                "UPDATE monitored_projects SET status = ?, last_error = ?, last_seen = ? "
+                "WHERE workspace = ?",
+                (status, last_error, utc_now(), abs_path))
+            self.connection.commit()
+
+    def set_monitored_project_base_commit(self, workspace: str, commit: str | None) -> None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            self.connection.execute(
+                "UPDATE monitored_projects SET base_commit = ? WHERE workspace = ?",
+                (commit, abs_path))
+            self.connection.commit()
+
+    def set_monitored_project_scan_state(self, workspace: str, state_json: str) -> None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            self.connection.execute(
+                "UPDATE monitored_projects SET last_scan_state = ? WHERE workspace = ?",
+                (state_json, abs_path))
+            self.connection.commit()
+
+    # ── Automated drive runs ─────────────────────────────────────────────
+
+    def begin_drive_run(self, workspace: str) -> str:
+        run_id = f"drive-{uuid.uuid4().hex[:12]}"
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            self.connection.execute(
+                "INSERT INTO drive_runs (run_id, workspace, status, started_at) "
+                "VALUES (?, ?, 'running', ?)",
+                (run_id, abs_path, utc_now()))
+            self.connection.commit()
+        return run_id
+
+    def finish_drive_run(
+        self, run_id: str, status: str, duration_s: float,
+        browse: dict[str, Any] | None, llm: dict[str, Any] | None,
+        error: str | None,
+    ) -> None:
+        with self.lock:
+            self.connection.execute(
+                "UPDATE drive_runs SET status = ?, finished_at = ?, duration_s = ?, "
+                "browse_json = ?, llm_json = ?, error = ? WHERE run_id = ?",
+                (status, utc_now(), duration_s,
+                 json.dumps(browse, ensure_ascii=False) if browse else None,
+                 json.dumps(llm, ensure_ascii=False) if llm else None,
+                 error, run_id))
+            self.connection.commit()
+
+    def _drive_run_dict(self, row: Any) -> dict[str, Any]:
+        data = dict(row)
+        for key, field in (("browse_json", "browse"), ("llm_json", "llm")):
+            raw = data.get(key)
+            data[field] = json.loads(raw) if raw else None
+            data.pop(key, None)
+        return data
+
+    def get_latest_drive_run(self, workspace: str) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM drive_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT 1",
+                (abs_path,)).fetchone()
+            return self._drive_run_dict(row) if row else None
+
+    def list_drive_runs(self, workspace: str, limit: int = 10) -> list[dict[str, Any]]:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT * FROM drive_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT ?",
+                (abs_path, limit)).fetchall()
+            return [self._drive_run_dict(r) for r in rows]
+
+    def project_summary(self, workspace: str | None = None, days: int = 14) -> dict[str, Any]:
+        """Deterministic, evidence-derived aggregates for the project dashboard.
+
+        When *workspace* is given, all rollups are scoped to Cases whose
+        ``repo_abs_path`` equals it (and the activity timeline's event series
+        scoped to ``events.workspace``).  When ``None``, aggregates across all
+        projects (legacy/global behaviour).
+
+        Never invokes an LLM and never reads model prose.  Safe to call from a
+        request handler: it takes the store lock internally and returns plain
+        JSON-friendly structures, so the caller can run an optional LLM step
+        *outside* the lock.
+        """
+        with self.lock:
+            def rollup(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
+                return [dict(r) for r in self.connection.execute(sql, params).fetchall()]
+
+            # For a scoped summary, every per-case rollup joins through `cases`
+            # filtered by repo_abs_path; the events timeline uses events.workspace.
+            case_filter = ""
+            event_filter = ""
+            params: tuple[str, ...] = ()
+            if workspace:
+                case_filter = " WHERE c.repo_abs_path = ?"
+                event_filter = " WHERE workspace = ?"
+                params = (workspace,)
+
+            def scoped(sql: str, join_case: bool = False) -> str:
+                # Insert the WHERE clause before GROUP BY (SQL requires WHERE
+                # before GROUP BY).  `sql` uses table alias `c` for cases.
+                where = case_filter if join_case else event_filter
+                if "GROUP BY" in sql:
+                    head, _, tail = sql.partition("GROUP BY")
+                    return head + where + " GROUP BY" + tail
+                return sql + where
+
+            if workspace:
+                case_counts_by_status = rollup(
+                    scoped("SELECT c.status AS status, COUNT(*) AS count FROM cases c"
+                           " GROUP BY c.status ORDER BY count DESC", True), params)
+                case_counts_by_priority = rollup(
+                    scoped("SELECT c.priority AS priority, COUNT(*) AS count FROM cases c"
+                           " GROUP BY c.priority ORDER BY count DESC", True), params)
+                case_counts_by_risk = rollup(
+                    scoped("SELECT c.risk_level AS risk_level, COUNT(*) AS count FROM cases c"
+                           " GROUP BY c.risk_level ORDER BY count DESC", True), params)
+                agent_run_counts = rollup(
+                    scoped("SELECT r.agent_id AS agent_id, r.status AS status, COUNT(*) AS count "
+                           "FROM agent_runs r JOIN cases c ON c.case_id = r.case_id"
+                           " GROUP BY r.agent_id, r.status ORDER BY r.agent_id, r.status", True),
+                    params)
+                tool_counts = rollup(
+                    scoped("SELECT r.tool_name AS tool_name, COUNT(*) AS count, "
+                           "SUM(r.exit_code = 0) AS exit_zero "
+                           "FROM tool_runs r JOIN cases c ON c.case_id = r.case_id"
+                           " GROUP BY r.tool_name ORDER BY count DESC", True), params)
+                approval_counts = rollup(
+                    scoped("SELECT r.decision AS decision, COUNT(*) AS count "
+                           "FROM approvals r JOIN cases c ON c.case_id = r.case_id"
+                           " GROUP BY r.decision ORDER BY count DESC", True), params)
+                knowledge_counts = rollup(
+                    scoped("SELECT r.status AS status, COUNT(*) AS count "
+                           "FROM knowledge_records r JOIN cases c ON c.case_id = r.case_id"
+                           " GROUP BY r.status ORDER BY count DESC", True), params)
+                source_counts = rollup(
+                    scoped("SELECT r.association_state AS association_state, COUNT(*) AS count "
+                           "FROM case_sources r JOIN cases c ON c.case_id = r.case_id"
+                           " GROUP BY r.association_state ORDER BY count DESC", True), params)
+                case_day_counts = {r["day"]: r["count"] for r in rollup(
+                    scoped("SELECT substr(c.updated_at, 1, 10) AS day, COUNT(*) AS count "
+                           "FROM cases c GROUP BY day", True), params)}
+                artifacts_count = self.connection.execute(
+                    "SELECT COUNT(*) FROM artifacts a JOIN cases c ON c.case_id = a.case_id "
+                    + case_filter, params).fetchone()[0]
+            else:
+                case_counts_by_status = rollup(
+                    "SELECT status AS status, COUNT(*) AS count FROM cases "
+                    "GROUP BY status ORDER BY count DESC")
+                case_counts_by_priority = rollup(
+                    "SELECT priority AS priority, COUNT(*) AS count FROM cases "
+                    "GROUP BY priority ORDER BY count DESC")
+                case_counts_by_risk = rollup(
+                    "SELECT risk_level AS risk_level, COUNT(*) AS count FROM cases "
+                    "GROUP BY risk_level ORDER BY count DESC")
+                agent_run_counts = rollup(
+                    "SELECT agent_id AS agent_id, status AS status, COUNT(*) AS count "
+                    "FROM agent_runs GROUP BY agent_id, status ORDER BY agent_id, status")
+                tool_counts = rollup(
+                    "SELECT tool_name AS tool_name, COUNT(*) AS count, "
+                    "SUM(exit_code = 0) AS exit_zero FROM tool_runs "
+                    "GROUP BY tool_name ORDER BY count DESC")
+                approval_counts = rollup(
+                    "SELECT decision AS decision, COUNT(*) AS count FROM approvals "
+                    "GROUP BY decision ORDER BY count DESC")
+                knowledge_counts = rollup(
+                    "SELECT status AS status, COUNT(*) AS count FROM knowledge_records "
+                    "GROUP BY status ORDER BY count DESC")
+                source_counts = rollup(
+                    "SELECT association_state AS association_state, COUNT(*) AS count "
+                    "FROM case_sources GROUP BY association_state ORDER BY count DESC")
+                case_day_counts = {r["day"]: r["count"] for r in rollup(
+                    "SELECT substr(updated_at, 1, 10) AS day, COUNT(*) AS count "
+                    "FROM cases GROUP BY day")}
+                artifacts_count = self.connection.execute(
+                    "SELECT COUNT(*) FROM artifacts").fetchone()[0]
+
+            # Activity timeline.  Case-update series comes from cases (already
+            # scoped above); event series uses events.workspace when scoped.
+            if workspace:
+                event_day_counts = {r["day"]: r["count"] for r in rollup(
+                    "SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS count "
+                    "FROM events WHERE workspace = ? GROUP BY day", params)}
+            else:
+                event_day_counts = {r["day"]: r["count"] for r in rollup(
+                    "SELECT substr(timestamp, 1, 10) AS day, COUNT(*) AS count "
+                    "FROM events GROUP BY day")}
+            today = datetime.now(timezone.utc).date()
+            activity_timeline: list[dict[str, Any]] = []
+            for offset in range(days - 1, -1, -1):
+                day = (today - timedelta(days=offset)).isoformat()
+                activity_timeline.append({
+                    "day": day,
+                    "cases_updated": int(case_day_counts.get(day, 0)),
+                    "events": int(event_day_counts.get(day, 0)),
+                })
+
+            totals = {
+                "cases": sum(r["count"] for r in case_counts_by_status),
+                "active_cases": sum(
+                    r["count"] for r in case_counts_by_status
+                    if r["status"] not in ("CLOSED", "ESCALATED")),
+                "agent_runs": sum(r["count"] for r in agent_run_counts),
+                "tool_runs": sum(r["count"] for r in tool_counts),
+                "approvals": sum(r["count"] for r in approval_counts),
+                "knowledge_records": sum(r["count"] for r in knowledge_counts),
+                "sources": sum(r["count"] for r in source_counts),
+                "artifacts": artifacts_count,
+            }
+
+            return {
+                "generated_at": utc_now(),
+                "totals": totals,
+                "case_counts_by_status": case_counts_by_status,
+                "case_counts_by_priority": case_counts_by_priority,
+                "case_counts_by_risk": case_counts_by_risk,
+                "agent_run_counts": agent_run_counts,
+                "tool_counts": tool_counts,
+                "approval_counts": approval_counts,
+                "knowledge_counts": knowledge_counts,
+                "source_counts": source_counts,
+                "activity_timeline": activity_timeline,
             }
 
     def get_latest_completed_agent_output(

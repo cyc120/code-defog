@@ -19,6 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text
+from .llm_summary import get_llm_summary
 
 
 MAX_BODY_BYTES = 1_000_000
@@ -35,6 +36,10 @@ class CodeCCTVServer(ThreadingHTTPServer):
         orchestrator: Any | None = None, ui_dir: str | None = None,
         discovery_agent: Any | None = None, instance_id: str | None = None,
         approval_secret: str | None = None, runtime_mode: str = "mock",
+        llm_summary_fn: Any | None = None,
+        project_discovery_agent: Any | None = None,
+        project_monitor: Any | None = None,
+        drive_runner: Any | None = None,
     ) -> None:
         super().__init__(address, CodeCCTVHandler)
         self.token = token
@@ -48,6 +53,16 @@ class CodeCCTVServer(ThreadingHTTPServer):
         # its own approval Grants.
         self.approval_secret = approval_secret or secrets.token_urlsafe(32)
         self.runtime_mode = runtime_mode
+        # Inject a fake summarizer in tests; default to the TTL-cached wrapper.
+        # The cache lives server-side so SSE-triggered stat refreshes never
+        # re-run the LLM until TTL expiry or an explicit ?refresh=1.
+        self.summary_cache: dict[str, Any] = {}
+        self.llm_summary_fn = llm_summary_fn or get_llm_summary
+        # Local project discovery + monitoring (enterprise milestone 1).
+        self.project_discovery_agent = project_discovery_agent
+        self.project_monitor = project_monitor
+        # Automated drive runner (browse + test + static-scan + LLM summary).
+        self.drive_runner = drive_runner
         self.started_at = time.monotonic()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscriber_lock = Lock()
@@ -271,6 +286,21 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         if route == "/api/management/info":
             self.send_json(self.server.management_info())
             return
+        if route == "/api/project/summary":
+            self.project_summary()
+            return
+        if route == "/api/projects/discover":
+            self.projects_discover()
+            return
+        if route.startswith("/api/projects/") and route.endswith("/drive"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/drive")])
+            self.get_project_drive(workspace)
+            return
+        if route == "/api/projects":
+            self.list_monitored_projects()
+            return
         if route == "/api/stream":
             self.stream_state()
             return
@@ -372,6 +402,60 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.handle_issue_approval_grant(case_id)
             return
 
+        # ── Project monitoring: register a project to watch ───────────────
+        if route == "/api/projects":
+            if not self.require_service_auth():
+                return
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            try:
+                project = self.server.store.register_monitored_project(payload)
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            if self.server.project_monitor is not None:
+                try:
+                    self.server.project_monitor.start_project(project["workspace"])
+                except Exception as exc:
+                    project["error"] = f"watcher failed to start: {exc}"
+            self.send_json({"ok": True, "project": project}, HTTPStatus.CREATED)
+            return
+
+        # ── Project drive: start a full automated diagnosis + LLM summary ──
+        if route.startswith("/api/projects/") and route.endswith("/drive"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/drive")])
+            self.start_project_drive(workspace)
+            return
+
+        self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:
+        route = urlparse(self.path).path
+        if route.startswith("/api/projects/"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):])
+            if not workspace:
+                self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+                return
+            if self.server.project_monitor is not None:
+                try:
+                    self.server.project_monitor.stop_project(workspace)
+                except Exception:
+                    pass
+            removed = self.server.store.unregister_monitored_project(workspace)
+            if not removed:
+                self.send_json({"error": "project not found"}, HTTPStatus.NOT_FOUND)
+                return
+            self.send_json({"ok": True})
+            return
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -438,6 +522,93 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             limit = 50
         cases = self.server.store.list_cases(status=status, repository_ref=repo, limit=limit)
         self.send_json({"ok": True, "cases": cases, "count": len(cases)})
+
+    def project_summary(self) -> None:
+        """GET /api/project/summary — deterministic aggregates + optional LLM
+        narrative for the overview dashboard.
+
+        ``?refresh=1`` bypasses the LLM TTL cache so the human can force a
+        re-generation.  ``?workspace=<abs_path>`` scopes the aggregates to one
+        project (and keys the LLM cache per project).  The deterministic
+        ``stats`` are always fresh (cheap SQLite GROUP BY, computed under the
+        store lock and returned); the LLM step runs outside the lock.
+        """
+        from urllib.parse import parse_qs
+
+        params = parse_qs(urlparse(self.path).query)
+        refresh = (params.get("refresh") or ["0"])[0] == "1"
+        workspace = (params.get("workspace") or [None])[0] or None
+        stats = self.server.store.project_summary(workspace=workspace)
+        llm = self.server.llm_summary_fn(
+            stats, refresh=refresh, cache=self.server.summary_cache, key=workspace or "default")
+        self.send_json({
+            "ok": True,
+            "generated_at": stats["generated_at"],
+            "stats": stats,
+            "llm": llm,
+        })
+
+    def projects_discover(self) -> None:
+        """GET /api/projects/discover — local git repos + running-process cwds."""
+        agent = self.server.project_discovery_agent
+        if agent is None:
+            self.send_json({"ok": True, "git": [], "processes": [], "generated_at": None,
+                            "note": "project discovery not configured"})
+            return
+        payload = agent.discover()
+        self.send_json({"ok": True, **payload})
+
+    def list_monitored_projects(self) -> None:
+        """GET /api/projects — user-selected monitored projects."""
+        projects = self.server.store.list_monitored_projects()
+        self.send_json({"ok": True, "projects": projects, "count": len(projects)})
+
+    def start_project_drive(self, workspace: str) -> None:
+        """POST /api/projects/{workspace}/drive — spawn a full automated drive.
+
+        Returns 202 with the running run; 409 if one is already running.
+        """
+        from pathlib import Path
+
+        if not workspace or not Path(workspace).is_dir():
+            self.send_json({"error": f"workspace is not a directory: {workspace}"},
+                           HTTPStatus.BAD_REQUEST)
+            return
+        latest = self.server.store.get_latest_drive_run(workspace)
+        if latest and latest.get("status") == "running":
+            self.send_json({"error": "a drive is already running for this project"},
+                           HTTPStatus.CONFLICT)
+            return
+
+        import threading
+
+        run_id = self.server.store.begin_drive_run(workspace)
+        publish = self.server.publish
+
+        def _drive_work() -> None:
+            from .drive import run_drive
+
+            runner = self.server.drive_runner or run_drive
+            runner(self.server.store, workspace, run_id=run_id, publish=publish)
+
+        thread = threading.Thread(target=_drive_work, daemon=True)
+        thread.start()
+        self.send_json({
+            "ok": True,
+            "run": {"run_id": run_id, "workspace": workspace, "status": "running",
+                    "started_at": None},
+        }, HTTPStatus.ACCEPTED)
+
+    def get_project_drive(self, workspace: str) -> None:
+        """GET /api/projects/{workspace}/drive — latest drive run for a project."""
+        if not workspace:
+            self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+            return
+        run = self.server.store.get_latest_drive_run(workspace)
+        if run is None:
+            self.send_json({"error": "no drive run yet"}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_json({"ok": True, "run": run})
 
     def get_case(self, case_id: str) -> None:
         case = self.server.store.get_case(case_id)

@@ -15,6 +15,10 @@ dashscope==1.26.5
 PyYAML==6.0.2
 pydantic==2.13.4
 pydantic-core==2.46.4
+# CA bundle for HTTPS calls to DeepSeek (project summary LLM). Present as a
+# transitive dep of agentscope; pinned explicitly because daemon/llm_summary.py
+# imports certifi.where() directly.
+certifi==2026.7.22
 
 # Testing
 pytest==9.0.3

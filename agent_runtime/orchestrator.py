@@ -22,6 +22,7 @@ from .state_machine import (
     AGENT_ACTIVE_STATES,
 )
 from .case_context import CaseContext
+from .harness import DevLoopHarness
 
 
 class Orchestrator:
@@ -29,7 +30,18 @@ class Orchestrator:
 
     def __init__(self, store: Any, teams_adapter: Any) -> None:
         self.store = store
-        self.teams = teams_adapter
+        # Existing callers may still provide an execution adapter directly.
+        # The adapter is wrapped here so every business-Agent invocation goes
+        # through the same explicit local task graph.
+        if teams_adapter is None:
+            self.harness = None
+            self.teams = None
+        elif hasattr(teams_adapter, "dispatch"):
+            self.harness = teams_adapter
+            self.teams = getattr(teams_adapter, "executor", None)
+        else:
+            self.harness = DevLoopHarness(teams_adapter)
+            self.teams = teams_adapter
 
     def _build_agent_context(self, case_id: str, case: dict[str, Any]) -> dict[str, Any]:
         """Hydrate the canonical CaseContext with persisted handoffs.
@@ -139,9 +151,9 @@ class Orchestrator:
                 return None
 
         # If this state requires Agent work, dispatch and handle result
-        if target_state in AGENT_ACTIVE_STATES and self.teams:
+        if target_state in AGENT_ACTIVE_STATES and self.harness:
             ctx_dict = self._build_agent_context(case_id, result)
-            agent_result = self.teams.dispatch_task(case_id, target_state, ctx_dict)
+            agent_result = self.harness.dispatch(case_id, target_state, ctx_dict)
 
             # Only consume results from a successfully completed Agent run.
             # A 'failed' run (failure_reason set, structured output invalid)

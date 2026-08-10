@@ -5,7 +5,7 @@
 > **状态：** 已审核的赛题目标架构；实现状态与规划分开记录。
 > **赛道对应：** GOAI Agent Infra - 方向三「软件研发全流程协同」
 
-> **当前实现说明（企业级里程碑后）：** 本项目保留本文的赛题目标与验收口径。管理界面为本地 Web 控制台（`web/index.html`，项目优先导航：左侧边栏监控项目列表 + 总览/Case 审计/监控项目三视图，视图按当前项目隔离）。新增企业级项目能力：自动发现本机 git 仓库与运行进程工作目录（`daemon/project_discovery.py`）、持续监控文件变化与 git 提交（`daemon/project_monitor.py`）、仓库身份规范化（`daemon/repo_identity.py`）与「启动自动化驱动」一键全量诊断（浏览 + 测试探测 + 静态扫描 + DeepSeek 总结，即使无 Case/错误也输出，`daemon/drive.py`、`daemon/llm_summary.py`）。现有 `agent_runtime/teams_adapter.py` 中的公开实现是 `AgentScopeExecutionAdapter`，仅用于本地 Mock/AgentScope 实验，**不代表真实 AgentTeams 接入**；官方控制面、身份凭证、Team/Task/Handoff 工作流和可导出 Trace 尚未配置或验证。下文出现的“真实 AgentTeams”均为赛事目标，不能作为当前已部署能力或运行证据的表述。
+> **当前实现说明（企业级里程碑后）：** 本项目保留本文的赛题目标与验收口径。管理界面为本地 Web 控制台（`web/index.html`，项目优先导航：左侧边栏监控项目列表 + 总览/Case 审计/监控项目三视图，视图按当前项目隔离）。新增企业级项目能力：自动发现本机 git 仓库与运行进程工作目录（`daemon/project_discovery.py`）、持续监控文件变化与 git 提交（`daemon/project_monitor.py`）、仓库身份规范化（`daemon/repo_identity.py`）与「启动自动化驱动」一键全量诊断（浏览 + 测试探测 + 静态扫描 + DeepSeek 总结，即使无 Case/错误也输出，`daemon/drive.py`、`daemon/llm_summary.py`）。`agent_runtime/harness.py` 的 `DevLoopHarness` 统一维护本地 Agent 任务图和派发审计，再由 `AgentScopeExecutionAdapter` 执行任务；这一组合仅用于本地 Mock/AgentScope 实验，**不代表真实 AgentTeams 接入**。官方控制面、身份凭证、Team/Task/Handoff 工作流和可导出 Trace 尚未配置或验证。下文出现的“真实 AgentTeams”均为赛事目标，不能作为当前已部署能力或运行证据的表述。
 
 ---
 
@@ -34,7 +34,7 @@ Code CCTV 已经具备本项目最难替代的基础能力：本地结构化事�
 MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结构，而非将所有能力都建模为 Agent：
 
 - **4 个核心 Agent**（Triage → Diagnosis → Repair → Verification）完成业务闭环，每个都有清晰的身份定义、工具白名单和输入输出 Schema。
-- **编排与安全门禁**由 `agent_runtime/` 层的状态机和目标 AgentTeams Bridge 负责，不作为独立 Agent。Orchestrator 的职责（创建 Case、拆解任务、请求审批、推进状态机）属于编排基础设施，不应被建模为一个"与其他 Agent 对等的 Agent"。
+- **编排与安全门禁**由 `agent_runtime/` 层的状态机、`DevLoopHarness` 和目标 AgentTeams Bridge 负责，不作为独立 Agent。Harness 负责显式任务图、交接和派发标记；Orchestrator 负责创建 Case、请求审批与推进状态机。两者都属于编排基础设施，不应被建模为一个"与其他 Agent 对等的 Agent"。
 - **复盘知识沉淀**（Retrospective）降级为 Case 关闭后的异步批处理模块，不参与实时协同链。这样既减少实时 Agent 间的交接复杂度，也避免复盘 Agent 在等待 Case 关闭时占用协同上下文。
 
 ### 1.3 本轮设计边界
@@ -183,7 +183,7 @@ flowchart LR
 | --- | --- | --- |
 | Case 创建与任务拆解 | `agent_runtime/orchestrator.py` | 接收规范化事件，创建 Case，按状态机推进。 |
 | 状态机维护与失败转移 | `agent_runtime/state_machine.py` | 管理 Case 状态迁移、超时和升级。 |
-| 本地任务分发与目标 AgentTeams Bridge | `agent_runtime/teams_adapter.py` 中的 `AgentScopeExecutionAdapter`（当前）及后续 Bridge | 当前实现提供 Mock/AgentScope 实验；`agentteams` 模式在 Bridge 未配置时失败关闭，真实任务分派、Handoff 与 Trace 需单独接入。 |
+| 本地任务分发与目标 AgentTeams Bridge | `agent_runtime/harness.py` 的 `DevLoopHarness` + `agent_runtime/teams_adapter.py` 的 `AgentScopeExecutionAdapter`（当前）及后续 Bridge | Harness 统一本地任务图和派发标记；执行器提供 Mock/AgentScope 实验。`agentteams` 模式在 Bridge 未配置时失败关闭，真实任务分派、Handoff 与 Trace 需单独接入。 |
 | 审批门禁与回滚 | `policy/` + `agent_runtime/orchestrator.py` | 高风险动作请求审批，拒绝时触发回滚。**Agent 不持有审批凭证。** |
 
 ### 5.2 核心业务 Agent（4 个）
@@ -222,7 +222,7 @@ patch_ref, test_reports[], release_report, approval_refs[], trace_id
 
 ## 6. AgentTeams 编排与状态机
 
-> **实施状态：** 本节定义的是竞赛所需的目标 AgentTeams 架构。当前仓库尚未配置真实 AgentTeams；`agent_runtime/teams_adapter.py` 中的 `AgentScopeExecutionAdapter` 仅能执行本地 Mock 和 AgentScope 实验。`--runtime-mode agentteams` 在前置检查未满足或 Workflow Bridge 缺失时失败关闭。不要把本地 `team_id`、`devloop_task_id`、`devloop_trace_id` 或 AgentScope 事件当作官方 AgentTeams 证据。
+> **实施状态：** 本节定义的是竞赛所需的目标 AgentTeams 架构。当前仓库以 `DevLoopHarness` 统一本地任务图，再以 `AgentScopeExecutionAdapter` 执行 Mock 和 AgentScope 实验；真实 AgentTeams 尚未配置。`--runtime-mode agentteams` 在前置检查未满足或 Workflow Bridge 缺失时失败关闭。不要把本地 Harness 标记、`team_id`、`devloop_task_id`、`devloop_trace_id` 或 AgentScope 事件当作官方 AgentTeams 证据。
 
 ### 6.1 编排映射、目标 Bridge 与本地降级方案
 
@@ -231,7 +231,7 @@ patch_ref, test_reports[], release_report, approval_refs[], trace_id
 | 角色编排 | Team/Agent 定义 | 由 `identities.yaml` 固化角色、工具白名单和输入输出 Schema。 |
 | 任务拆解 | Task/Task Graph | 每个 Case 创建可追踪的子任务，禁止隐式串行对话。 |
 | 上下文传递 | Shared Context/Artifact | `CaseContext` 与证据引用由 Store 持久化，运行时仅获取必要切片。 |
-| 协同执行 | Handoff/Workflow | Orchestrator 根据状态和门禁，将任务交给下一身份 Agent。 |
+| 协同执行 | Handoff/Workflow | Orchestrator 根据状态和门禁进入业务状态；Harness 依据显式任务图将任务交给下一身份 Agent。 |
 | 状态追踪 | Run/Trace | 关联 Case、Agent Run、工具调用、审批和结果。 |
 | 失败处置 | Retry/Escalation | 诊断置信度不足、测试失败或策略拒绝时转人工或回退状态。 |
 
@@ -524,6 +524,7 @@ code-cctv-general/
 │   └── store.py                     # Case 存储与迁移
 ├── web/                            # 唯一的本地 Web 管理界面
 ├── agent_runtime/                  # 状态机、本地 Mock/AgentScope 实验、后续 Bridge
+│   ├── harness.py                  # DevLoopHarness：本地任务图与派发审计
 │   ├── teams_adapter.py            # AgentScopeExecutionAdapter；非真实 AgentTeams
 │   ├── orchestrator.py
 │   ├── case_context.py

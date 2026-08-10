@@ -13,6 +13,7 @@
 - **企业级项目监控**：自动检索本机 git 仓库与运行中进程工作目录，选择要监控的项目，持续跟踪文件变化与 git 提交。
 - **项目优先导航**：左侧边栏展示监控项目列表，视图（总览 / Case 审计 / 监控项目）按当前选中项目隔离。
 - **自动化驱动**：对选中项目一键启动全量诊断（浏览文件树 / git / 测试探测 / 静态扫描），由 DeepSeek 生成中文总结，**即使无 Case 或错误也输出项目结论**，前端展示运行状态与计时。
+- **Harness 统筹**：`DevLoopHarness` 是所有业务 Agent 的唯一派发入口，集中维护分诊、诊断、修复、验证四个显式任务及其交接顺序，并将 Harness 任务标记写入每次 Agent 运行记录。
 - 默认运行的是进程内 Mock 工作流；`--runtime-mode agentscope` 是 AgentScope + DeepSeek 的本地实验路径，`production` 仅保留为其旧别名，不是 AgentTeams 的真实接入。
 - **真实 AgentTeams 尚未配置、部署或验证。** 当前没有可作为 AgentTeams Team/Task/Handoff/Trace 的竞赛运行证据；本地生成的 UUID 和 AgentScope 事件不能这样表述。
 
@@ -21,7 +22,7 @@
 ### 前置条件
 
 - Python 3.10+
-- 可选：`DEEPSEEK_API_KEY`，仅用于 AgentScope 的本地实验运行模式
+- 可选：`DEEPSEEK_API_KEY`，用于项目 LLM 总结、只读项目助手以及 AgentScope 的本地实验运行模式；未配置时这些能力会明确显示不可用，确定性统计和审计功能仍可使用
 - 人工审批时使用独立的 `CODE_CCTV_APPROVAL_KEY`
 
 ### 安装与验证
@@ -52,7 +53,7 @@ python3 -m daemon.serve
 python3 -c "from daemon.paths import config_path; print(config_path())"
 ```
 
-读取其中的 `port` 后，在同一台机器的浏览器中打开 `http://127.0.0.1:<port>/ui`。同源 Web 页面会读取服务令牌以连接本机服务；人工审批密钥不会出现在 `/ui/config`、`service.json` 或服务发现记录中。
+读取其中的 `port` 后，在同一台机器的浏览器中打开 `http://127.0.0.1:<port>/ui`。同源 Web 页面会读取服务令牌以连接本机服务；人工审批密钥不会出现在 `/ui/config`、`service.json` 或服务发现记录中。选择一个已监控项目后，可从顶栏的项目助手入口询问项目进度、风险与下一步。
 
 ### 本机服务发现
 
@@ -71,6 +72,8 @@ python3 -m daemon.dashboard --open
 - **项目选择窗口**：自动检索本机 git 仓库与运行中进程工作目录，勾选要监控的项目；支持手动添加路径。
 - **总览视图**：当前项目的聚合统计（状态分布 / Agent 分工 / 活动趋势 / 工具 / 审批），加上 LLM 信息金字塔总结与「启动自动化驱动」按钮。
 - **Case 审计**：Case 队列、详情与来源、Agent 运行、工具、审批、制品、知识与复盘证据页签。
+- **Harness 调度**：从只读 `/api/harness` 清单展示当前任务图、各 Agent 边界和实际运行记录；审批状态不会被派发给 Agent。
+- **项目助手**：顶栏打开当前项目的只读问答抽屉，可询问进度、风险和下一步；对话只保留在浏览器内存，切换项目或刷新页面即清空。
 - **监控项目**：已监控项目列表、运行状态与停止监控。
 - SSE 自动刷新、主题切换、人工审批密钥输入。
 
@@ -82,11 +85,14 @@ python3 -m daemon.dashboard --open
 flowchart LR
     I["Issue / 日志 / 用户反馈 / CI"] --> C["Case Intake API"]
     C --> S["Case Store: SQLite"]
-    S --> O["本地编排器"]
-    O --> A1["分诊"]
-    O --> A2["诊断"]
-    O --> A3["修复"]
-    O --> A4["验证"]
+    S --> O["Case Orchestrator / 状态机"]
+    O --> T["DevLoop Harness / 显式任务图"]
+    T --> A1["分诊"]
+    A1 --> A2["诊断"]
+    A2 --> G1["计划审批"]
+    G1 --> A3["修复"]
+    A3 --> A4["验证"]
+    A4 --> G2["放行审批"]
     S --> W["Web 控制台 / SSE"]
     W --> H["人工审批者"]
     S --> E["证据索引与复盘"]
@@ -133,10 +139,14 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 | --- | --- | --- | --- |
 | `GET` | `/api/projects/discover` | `service_token` | 自动检索本机 git 仓库与运行进程工作目录 |
 | `GET` | `/api/projects` | `service_token` | 已监控项目列表 |
+| `GET` | `/api/harness` | `service_token` | 本地 Harness 任务图与 Agent 边界（只读） |
 | `POST` | `/api/projects` | `service_token` | 注册一个项目开始监控 |
 | `DELETE` | `/api/projects/{workspace}` | `service_token` | 停止监控并移除 |
 | `POST` | `/api/projects/{workspace}/drive` | `service_token` | 启动自动化驱动（202；已在运行则 409） |
 | `GET` | `/api/projects/{workspace}/drive` | `service_token` | 最近一次驱动运行结果 |
+| `POST` | `/api/projects/{workspace}/assistant` | `service_token` | 基于该已监控项目的聚合统计与最新浏览报告进行只读问答 |
+
+项目助手不具备审批、调度、命令执行、代码修改或发布权限。它只接收经过裁剪的项目监控记录、Case 聚合统计和最新项目浏览报告；不会发送 git remote、令牌、源码、完整测试输出或原始聊天内容。未配置 `DEEPSEEK_API_KEY` 时，接口会明确返回不可用状态，不会伪造回答。
 
 ## Case API 与审批
 
@@ -166,7 +176,7 @@ Web 审批流程为：人工输入审批密钥，服务端验证服务令牌和�
 
 ## AgentTeams 接入状态
 
-赛题要求以真实 AgentTeams 协同为基点，但这一接入尚未完成。现有 `agent_runtime/teams_adapter.py` 是历史模块路径，公开实现已更名为 `AgentScopeExecutionAdapter`；它提供本地 Mock 和 AgentScope 驱动的实验路径，并不等同于 AgentTeams 控制面或 TeamHarness/Matrix 工作流。
+赛题要求以真实 AgentTeams 协同为基点，但这一接入尚未完成。当前 `agent_runtime/harness.py` 的 `DevLoopHarness` 已统一本地任务图与所有业务 Agent 派发，`agent_runtime/teams_adapter.py` 的公开实现为 `AgentScopeExecutionAdapter`；两者组成的是本地 Mock/AgentScope 实验路径，并不等同于外部 AgentTeams 控制面、TeamHarness 或 Matrix 工作流。
 
 在真实接入完成前：
 
@@ -197,9 +207,9 @@ code-cctv-general/
 │   ├── project_monitor.py   # 每项目监控线程（文件变化 + git 提交）
 │   ├── drive.py             # 自动化驱动（浏览 + 测试 + 静态扫描）
 │   ├── repo_identity.py     # 仓库身份规范化与 base_commit 解析
-│   └── llm_summary.py       # DeepSeek LLM 总结与缓存（含驱动 prompt）
+│   └── llm_summary.py       # DeepSeek 项目总结、驱动与只读助手 prompt
 ├── web/                     # 唯一 Web 管理界面（项目优先导航）
-├── agent_runtime/           # 状态机、本地编排和 AgentScope 实验适配
+├── agent_runtime/           # 状态机、DevLoop Harness 和 AgentScope 实验适配
 ├── agents/                  # 分诊、诊断、修复、验证角色
 ├── connectors/              # 外部输入规范化
 ├── tools/                   # 受控工具接口

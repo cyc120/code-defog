@@ -88,8 +88,8 @@
     font-size: 14px;
     line-height: 1.45;
   }
-  button, select, input { font: inherit; }
-  button:focus-visible, select:focus-visible, input:focus-visible {
+  button, select, input, textarea { font: inherit; }
+  button:focus-visible, select:focus-visible, input:focus-visible, textarea:focus-visible {
     outline: 2px solid var(--blue);
     outline-offset: 2px;
   }
@@ -564,6 +564,50 @@
   /* The overview/projects views now live inside .app-main (topbar above), so
      they don't need the old full-page top padding. */
   .app-main .overview-view { padding-top: 22px; }
+
+  /* ── 只读项目助手 ─────────────────────────────────────────────── */
+  .assistant-scrim { position: fixed; z-index: 60; inset: 0; background: rgba(11, 14, 11, .38); }
+  .assistant-drawer { position: fixed; z-index: 61; top: 0; right: 0; bottom: 0; display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto; width: min(450px, 100vw); border-left: 1px solid var(--line);
+    background: var(--surface); box-shadow: -18px 0 42px rgba(0, 0, 0, .16); }
+  .assistant-scrim[hidden], .assistant-drawer[hidden] { display: none; }
+  .assistant-head { display: flex; align-items: flex-start; gap: 12px; padding: 17px 18px 14px;
+    border-bottom: 1px solid var(--line); }
+  .assistant-head-copy { min-width: 0; margin-right: auto; }
+  .assistant-head h2 { margin: 3px 0 0; font-size: 16px; font-weight: 500; line-height: 1.25; }
+  .assistant-project { margin-top: 5px; overflow: hidden; color: var(--ink-muted); font-family: ui-monospace,
+    SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  .assistant-scope { display: inline-flex; align-items: center; min-height: 20px; margin-top: 7px; padding: 2px 6px;
+    border: 1px solid var(--line); border-radius: 4px; color: var(--ink-faint); font-size: 9px; font-weight: 500; }
+  .assistant-thread { display: flex; min-height: 0; flex-direction: column; gap: 14px; overflow-y: auto; padding: 18px; }
+  .assistant-empty { margin: auto 0; padding: 16px; border: 1px dashed var(--line-strong); border-radius: 6px;
+    color: var(--ink-faint); font-size: 12px; text-align: center; }
+  .assistant-message { display: grid; gap: 5px; min-width: 0; }
+  .assistant-message-label { color: var(--ink-faint); font-size: 10px; font-weight: 500; }
+  .assistant-message.user .assistant-message-label { padding-left: 38px; text-align: right; }
+  .assistant-bubble { width: fit-content; max-width: calc(100% - 22px); padding: 10px 11px; border: 1px solid var(--line);
+    border-radius: 6px; background: var(--surface-muted); color: var(--ink); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+  .assistant-message.user .assistant-bubble { justify-self: end; border-color: transparent; background: var(--blue-soft); }
+  .assistant-message.notice .assistant-bubble { width: 100%; max-width: 100%; border-color: var(--yellow); background: var(--yellow-soft); color: var(--ink-muted); }
+  .assistant-message-meta { display: flex; flex-wrap: wrap; gap: 5px; color: var(--ink-faint); font-size: 9.5px; }
+  .assistant-source { padding: 2px 5px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); }
+  .assistant-follow-ups { display: grid; gap: 5px; margin-top: 2px; }
+  .assistant-follow-up { padding: 6px 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface);
+    color: var(--ink-muted); cursor: pointer; font-size: 11px; text-align: left; }
+  .assistant-follow-up:hover { border-color: var(--blue); color: var(--ink); background: var(--blue-soft); }
+  .assistant-pending { display: flex; align-items: center; gap: 7px; color: var(--ink-faint); font-size: 11px; }
+  .assistant-pending::before { width: 7px; height: 7px; border-radius: 50%; background: var(--blue); content: ""; }
+  .assistant-footer { padding: 13px 18px 16px; border-top: 1px solid var(--line); background: var(--surface); }
+  .assistant-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 9px; }
+  .assistant-suggestion { padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-muted);
+    color: var(--ink-muted); cursor: pointer; font-size: 10px; }
+  .assistant-suggestion:hover { border-color: var(--blue); color: var(--ink); background: var(--blue-soft); }
+  .assistant-composer { display: grid; grid-template-columns: minmax(0, 1fr) 36px; gap: 8px; align-items: end; }
+  .assistant-input { display: block; width: 100%; min-height: 62px; max-height: 122px; resize: vertical; padding: 8px 9px;
+    border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--ink); font-size: 12px; line-height: 1.45; }
+  .assistant-input:disabled { cursor: not-allowed; background: var(--surface-muted); }
+  .assistant-send { width: 36px; height: 36px; }
+  body.assistant-open { overflow: hidden; }
   @media (max-width: 900px) {
     #app { grid-template-columns: 1fr; }
     #sidebar { position: static; height: auto; flex-direction: row; flex-wrap: wrap;
@@ -574,6 +618,11 @@
     .sidebar-nav-item { flex: 1; justify-content: center; }
     .sidebar-project-list { max-height: none; grid-auto-flow: column;
       grid-auto-columns: minmax(160px, 1fr); overflow-x: auto; }
+    .assistant-drawer { width: min(450px, 100vw); }
+  }
+  @media (max-width: 480px) {
+    .assistant-head, .assistant-thread, .assistant-footer { padding-left: 14px; padding-right: 14px; }
+    .assistant-bubble { max-width: calc(100% - 8px); }
   }
 </style>
 </head>
@@ -630,6 +679,7 @@
       <div class="app-topbar">
         <span class="topbar-project" id="topbar-project">未选择项目</span>
         <span class="runtime-status" id="runtime-status" data-online="false" data-mode="mock"><span class="runtime-dot" aria-hidden="true"></span><span id="runtime-label">正在连接</span></span>
+        <button class="icon-button" id="assistant-open-btn" type="button" aria-label="打开项目助手" data-tooltip="项目助手" aria-controls="assistant-drawer" aria-expanded="false" disabled><i data-lucide="bot-message-square" aria-hidden="true">AI</i></button>
         <button class="icon-button" id="connect-btn" type="button" aria-label="切换本机服务" data-tooltip="切换本机服务"><i data-lucide="plug-zap" aria-hidden="true">↔</i></button>
         <button class="icon-button" id="refresh-btn" type="button" aria-label="刷新数据" data-tooltip="刷新数据"><i data-lucide="refresh-cw" aria-hidden="true">↻</i></button>
         <div class="theme-toggle" role="group" aria-label="主题">
@@ -711,7 +761,7 @@
       </section>
 
       <section class="section" aria-labelledby="agent-title">
-        <div class="section-header"><div><h2 class="section-title" id="agent-title">Agent 编排</h2><p class="section-desc">职责与实际运行记录分开显示；没有工具记录时不会暗示 Agent 执行过代码操作。</p></div><div class="section-note" id="agent-record-count">—</div></div>
+        <div class="section-header"><div><h2 class="section-title" id="agent-title">Harness 调度</h2><p class="section-desc">Harness 显式派发 Agent 任务；状态迁移与人工审批仍由服务端门禁控制。</p></div><div class="section-note" id="agent-record-count">加载调度清单…</div></div>
         <div class="agent-grid" id="agent-grid"></div>
       </section>
 
@@ -860,6 +910,31 @@
     </section>
   </div>
 
+  <div class="assistant-scrim" id="assistant-scrim" hidden></div>
+  <aside class="assistant-drawer" id="assistant-drawer" role="dialog" aria-modal="true" aria-labelledby="assistant-title" hidden>
+    <header class="assistant-head">
+      <div class="assistant-head-copy">
+        <div class="eyebrow">项目助手</div>
+        <h2 id="assistant-title">项目状态问答</h2>
+        <div class="assistant-project" id="assistant-project-name">未选择项目</div>
+        <span class="assistant-scope">只读上下文</span>
+      </div>
+      <button class="icon-button" id="assistant-close-btn" type="button" aria-label="关闭项目助手" data-tooltip="关闭项目助手"><i data-lucide="x" aria-hidden="true">×</i></button>
+    </header>
+    <div class="assistant-thread" id="assistant-thread" aria-live="polite"></div>
+    <footer class="assistant-footer">
+      <div class="assistant-suggestions" id="assistant-suggestions" aria-label="建议问题">
+        <button class="assistant-suggestion" type="button" data-question="当前项目进度如何？">当前项目进度如何？</button>
+        <button class="assistant-suggestion" type="button" data-question="目前有哪些风险或待确认项？">风险与待确认项</button>
+        <button class="assistant-suggestion" type="button" data-question="建议下一步先做什么？">建议下一步</button>
+      </div>
+      <form class="assistant-composer" id="assistant-form">
+        <textarea class="assistant-input" id="assistant-input" maxlength="1000" placeholder="询问当前项目…" aria-label="向项目助手提问" disabled></textarea>
+        <button class="icon-button assistant-send" id="assistant-send-btn" type="submit" aria-label="发送问题" data-tooltip="发送问题" disabled><i data-lucide="send" aria-hidden="true">发送</i></button>
+      </form>
+    </footer>
+  </aside>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <dialog id="approval-dialog" aria-labelledby="dialog-title"><form method="dialog" class="dialog-body"><div class="eyebrow">人工审批</div><h2 id="dialog-title">确认决策</h2><p id="dialog-copy">确认后会签发并立即消费一次性审批授权。</p><div class="dialog-facts"><div class="dialog-fact"><span>动作</span><strong id="dialog-action">—</strong></div><div class="dialog-fact"><span>目标引用</span><strong class="mono" id="dialog-target">—</strong></div><div class="dialog-fact"><span>审批人</span><strong id="dialog-approver">—</strong></div></div><label class="dialog-secret" for="dialog-approval-key"><span>人工审批密钥</span><input id="dialog-approval-key" type="password" autocomplete="off" spellcheck="false"></label><div class="dialog-actions"><button class="button" id="dialog-cancel" type="button">返回</button><button class="button primary" id="dialog-confirm" type="button">确认并继续</button></div></form></dialog>
 
@@ -892,10 +967,10 @@
   const MAIN_STATES = ["RECEIVED", "TRIAGED", "DIAGNOSED", "PLAN_APPROVAL", "REPAIRING", "VERIFYING", "RELEASE_APPROVAL", "RELEASED", "CLOSED"];
   const TABS = [["sources", "来源"], ["agent_runs", "运行"], ["tool_runs", "工具"], ["approvals", "决策"], ["artifacts", "制品"], ["knowledge", "知识"], ["retrospective", "复盘"]];
   const AGENTS = [
-    { id: "triage", title: "分诊证据", job: "归并输入、分类和建立 Case 证据索引。", boundary: "当前默认路径为 Mock 分诊，不修改代码。" },
-    { id: "diagnosis", title: "诊断影响", job: "形成根因与影响范围的结构化建议。", boundary: "当前没有代码检索或 Git 工具。" },
-    { id: "repair", title: "修复执行", job: "受控 Demo 仅允许在隔离沙箱应用预审补丁。", boundary: "不写主分支，不处理任意仓库。" },
-    { id: "verification", title: "验证发布", job: "由确定性质量门禁判断放行或拦截。", boundary: "不执行真实生产发布。" },
+    { id: "triage", title: "分诊证据", state: "TRIAGED", handoff: "DIAGNOSED", boundary: "归并和分类输入，不修改代码或执行审批。" },
+    { id: "diagnosis", title: "诊断影响", state: "DIAGNOSED", handoff: "PLAN_APPROVAL", boundary: "形成结构化诊断建议，不写入工作树或发布。" },
+    { id: "repair", title: "修复执行", state: "REPAIRING", handoff: "VERIFYING", boundary: "仅允许受控隔离沙箱，不写主分支或执行审批。" },
+    { id: "verification", title: "验证发布", state: "VERIFYING", handoff: "RELEASE_APPROVAL", boundary: "质量门禁只给出建议，不执行真实发布或审批。" },
   ];
   const TOOL_LABELS = {
     sandbox_copy: ["隔离沙箱拷贝", "复制受控工作树，源仓库保持不变。"],
@@ -924,6 +999,9 @@
   const PROJECT_KEY = "cc-current-project";
   let driveTimer = null;           // setInterval handle for the drive mm:ss clock
   let driveStartedAt = 0;          // Date.now() when the current drive started
+  let harnessInfo = null;          // read-only dispatch manifest from /api/harness
+  let assistantMessages = [];      // browser-memory only; raw questions are never persisted
+  let assistantBusy = false;
 
   const root = document.documentElement;
   const urlTheme = new URLSearchParams(location.search).get("theme");
@@ -957,7 +1035,10 @@
     btn.addEventListener("click", () => { location.hash = "#/" + btn.dataset.view; }));
   window.addEventListener("hashchange", () => { applyHash(); refreshActiveView(); });
 
-  function runtimeLabel() { return config.runtime_mode === "production" ? "生产 LLM 建议" : "Mock 演练流程"; }
+  function runtimeLabel() {
+    if (config.runtime_mode === "agentscope" || config.runtime_mode === "production") return "AgentScope 本地实验";
+    return "Mock + Harness 演练";
+  }
   function setOnline(online) {
     $("runtime-status").dataset.online = String(online);
     $("runtime-status").dataset.mode = config.runtime_mode === "production" ? "production" : "mock";
@@ -989,6 +1070,125 @@
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     return payload;
   }
+
+  // ── 项目助手：单项目、只读、浏览器内存会话 ────────────────────────
+  function updateAssistantProject() {
+    const name = selectedProject ? (selectedProject.name || selectedProject.workspace) : "未选择项目";
+    $("assistant-project-name").textContent = name;
+    const unavailable = !selectedProject;
+    $("assistant-open-btn").disabled = unavailable;
+    $("assistant-input").disabled = unavailable || assistantBusy;
+    $("assistant-send-btn").disabled = unavailable || assistantBusy;
+    document.querySelectorAll(".assistant-suggestion, .assistant-follow-up").forEach((button) => {
+      button.disabled = unavailable || assistantBusy;
+    });
+  }
+  function renderAssistantThread() {
+    const target = $("assistant-thread");
+    target.replaceChildren();
+    if (!assistantMessages.length) {
+      target.append(create("div", "assistant-empty", selectedProject ? "暂无对话" : "未选择项目"));
+    }
+    assistantMessages.forEach((message) => {
+      const item = create("article", `assistant-message ${message.kind}`);
+      const label = create("div", "assistant-message-label", message.kind === "user" ? "你" : message.kind === "notice" ? "服务状态" : "项目助手");
+      const bubble = create("div", "assistant-bubble", message.text);
+      item.append(label, bubble);
+      if (message.kind === "assistant" && Array.isArray(message.sources) && message.sources.length) {
+        const meta = create("div", "assistant-message-meta");
+        message.sources.forEach((source) => meta.append(create("span", "assistant-source", source)));
+        item.append(meta);
+      }
+      if (message.kind === "assistant" && Array.isArray(message.followUps) && message.followUps.length) {
+        const followUps = create("div", "assistant-follow-ups");
+        message.followUps.forEach((question) => {
+          const button = create("button", "assistant-follow-up", question);
+          button.type = "button";
+          button.addEventListener("click", () => askAssistant(question));
+          followUps.append(button);
+        });
+        item.append(followUps);
+      }
+      target.append(item);
+    });
+    if (assistantBusy) target.append(create("div", "assistant-pending", "正在整理当前项目记录…"));
+    updateAssistantProject();
+    target.scrollTop = target.scrollHeight;
+  }
+  function resetAssistantConversation() {
+    assistantMessages = [];
+    assistantBusy = false;
+    renderAssistantThread();
+  }
+  function openAssistantDrawer() {
+    if (!selectedProject) { toast("请先选择要监控的项目"); return; }
+    $("assistant-scrim").hidden = false;
+    $("assistant-drawer").hidden = false;
+    document.body.classList.add("assistant-open");
+    $("assistant-open-btn").setAttribute("aria-expanded", "true");
+    renderAssistantThread();
+    $("assistant-input").focus();
+  }
+  function closeAssistantDrawer() {
+    $("assistant-scrim").hidden = true;
+    $("assistant-drawer").hidden = true;
+    document.body.classList.remove("assistant-open");
+    $("assistant-open-btn").setAttribute("aria-expanded", "false");
+    $("assistant-open-btn").focus();
+  }
+  async function askAssistant(rawQuestion) {
+    const question = String(rawQuestion || "").trim();
+    if (!question || assistantBusy || !selectedProject) return;
+    const workspace = selectedProject.workspace;
+    assistantMessages.push({ kind: "user", text: question });
+    assistantBusy = true;
+    $("assistant-input").value = "";
+    renderAssistantThread();
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/assistant`, {
+        method: "POST", body: { question },
+      });
+      if (!selectedProject || selectedProject.workspace !== workspace) return;
+      const reply = payload.assistant || {};
+      if (reply.status === "ok" && typeof reply.answer === "string" && reply.answer.trim()) {
+        assistantMessages.push({
+          kind: "assistant",
+          text: reply.answer.trim(),
+          sources: Array.isArray(reply.sources) ? reply.sources : [],
+          followUps: Array.isArray(reply.follow_ups) ? reply.follow_ups : [],
+        });
+      } else {
+        assistantMessages.push({ kind: "notice", text: reply.reason || "项目助手暂时不可用。" });
+      }
+    } catch (error) {
+      if (selectedProject && selectedProject.workspace === workspace) {
+        assistantMessages.push({ kind: "notice", text: error.message || "项目助手请求失败。" });
+      }
+    } finally {
+      if (selectedProject && selectedProject.workspace === workspace) assistantBusy = false;
+      renderAssistantThread();
+      if (!$("assistant-drawer").hidden && !assistantBusy) $("assistant-input").focus();
+    }
+  }
+  $("assistant-open-btn").addEventListener("click", openAssistantDrawer);
+  $("assistant-close-btn").addEventListener("click", closeAssistantDrawer);
+  $("assistant-scrim").addEventListener("click", closeAssistantDrawer);
+  $("assistant-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    askAssistant($("assistant-input").value);
+  });
+  $("assistant-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      askAssistant(event.currentTarget.value);
+    }
+  });
+  document.querySelectorAll(".assistant-suggestion").forEach((button) => {
+    button.addEventListener("click", () => askAssistant(button.dataset.question));
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("assistant-drawer").hidden) closeAssistantDrawer();
+  });
   function cachedServices() {
     try {
       const items = JSON.parse(localStorage.getItem(SERVICE_CACHE_KEY) || "[]");
@@ -1279,14 +1479,25 @@
   function renderAgents(runs) {
     const target = $("agent-grid");
     target.innerHTML = "";
-    $("agent-record-count").textContent = `${runs.length} 条运行记录`;
-    AGENTS.forEach((definition) => {
+    const definitions = Array.isArray(harnessInfo?.tasks) && harnessInfo.tasks.length
+      ? harnessInfo.tasks.map((task) => ({
+        id: task.agent_id,
+        title: task.title || task.agent_id,
+        state: task.state || "—",
+        handoff: task.handoff_to || "—",
+        boundary: task.boundary || "未提供边界说明。",
+        order: task.order,
+      }))
+      : AGENTS;
+    const harnessName = harnessInfo?.id ? `${harnessInfo.id} · ` : "";
+    $("agent-record-count").textContent = `${harnessName}${runs.length} 条运行记录`;
+    definitions.forEach((definition) => {
       const run = agentRun(definition.id, runs);
       const card = create("article", "agent-card");
       card.dataset.agent = definition.id;
-      card.append(create("div", "agent-label", definition.id.toUpperCase()));
+      card.append(create("div", "agent-label", `STEP ${definition.order ?? "—"} · ${definition.state}`));
       card.append(create("h3", "agent-role", definition.title));
-      card.append(create("p", "agent-job", definition.job));
+      card.append(create("p", "agent-job", `派发给 ${definition.id}，完成后交接至 ${definition.handoff}。`));
       card.append(create("p", "agent-boundary", definition.boundary));
       const status = create("div", "agent-status");
       status.append(create("span", "agent-label", run?.trace_id ? `trace ${String(run.trace_id).slice(0, 12)}` : "无运行记录"));
@@ -1294,6 +1505,19 @@
       card.append(status);
       target.append(card);
     });
+  }
+  async function loadHarness(epoch = dataEpoch) {
+    try {
+      const payload = await api("/api/harness");
+      if (epoch !== dataEpoch) return false;
+      harnessInfo = payload.harness || null;
+      if (evidence) renderAgents(evidence.agent_runs || []);
+      return true;
+    } catch (error) {
+      harnessInfo = null;
+      if (evidence) renderAgents(evidence.agent_runs || []);
+      return false;
+    }
   }
   function toolTitle(name) { return TOOL_LABELS[name] || [name || "未命名工具", "此工具名称未在当前界面映射。"] ; }
   function renderTools(runs) {
@@ -1739,7 +1963,7 @@
     stopSubscription();
     try {
       const epoch = ++dataEpoch;
-      await loadProjects(epoch);
+      await Promise.all([loadProjects(epoch), loadHarness(epoch)]);
       if (connection !== connectionEpoch) return;
       if (!monitoredProjects.length) {
         applyHash();                        // default view (audit)
@@ -1791,6 +2015,7 @@
     target.innerHTML = "";
     $("topbar-project").textContent = selectedProject
       ? (selectedProject.name || selectedProject.workspace) : "未选择项目";
+    updateAssistantProject();
     if (!monitoredProjects.length) {
       target.append(create("div", "sidebar-empty", "尚未监控项目"));
       return;
@@ -1810,7 +2035,9 @@
   async function selectProject(workspace, opts = {}) {
     const project = monitoredProjects.find((p) => p.workspace === workspace);
     if (!project) return;
+    const changed = !selectedProject || selectedProject.workspace !== project.workspace;
     selectedProject = project;
+    if (changed) resetAssistantConversation();
     localStorage.setItem(PROJECT_KEY, workspace);
     const epoch = ++dataEpoch;                 // invalidate in-flight loads from the old project
     renderSidebarProjects();
@@ -1855,7 +2082,13 @@
           await loadProjects();
           if (selectedProject && selectedProject.workspace === p.workspace) {
             if (monitoredProjects.length) await selectProject(monitoredProjects[0].workspace);
-            else { selectedProject = null; renderSidebarProjects(); openProjectPicker(true); }
+            else {
+              selectedProject = null;
+              resetAssistantConversation();
+              closeAssistantDrawer();
+              renderSidebarProjects();
+              openProjectPicker(true);
+            }
           }
         } catch (error) { toast(error.message); }
       });

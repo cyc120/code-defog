@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_runtime.agentteams_preflight import inspect_agentteams_preflight
+from agent_runtime.harness import DevLoopHarness
 from agent_runtime.orchestrator import Orchestrator
 from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
 
@@ -118,7 +119,8 @@ def main() -> None:
     teams = AgentScopeExecutionAdapter(store)
     if args.runtime_mode in ("agentscope", "production"):
         teams.set_mode(args.runtime_mode)
-    orchestrator = Orchestrator(store, teams)
+    harness = DevLoopHarness(teams)
+    orchestrator = Orchestrator(store, harness)
     discovery_agent = LocalServiceDiscoveryAgent(paths.service_registry_dir(), paths.config_path())
     approval_secret = args.approval_key or secrets.token_urlsafe(32)
     if not args.approval_key:
@@ -143,6 +145,7 @@ def main() -> None:
         approval_secret=approval_secret, runtime_mode=teams.mode,
         project_discovery_agent=project_discovery_agent,
         project_monitor=project_monitor,
+        harness=harness,
     )
     address, port = server.server_address
     descriptor_registered = False

@@ -19,7 +19,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text
-from .llm_summary import get_llm_summary
+from .llm_summary import get_llm_summary, generate_project_assistant_reply
 
 
 MAX_BODY_BYTES = 1_000_000
@@ -40,6 +40,8 @@ class CodeCCTVServer(ThreadingHTTPServer):
         project_discovery_agent: Any | None = None,
         project_monitor: Any | None = None,
         drive_runner: Any | None = None,
+        harness: Any | None = None,
+        llm_chat_fn: Any | None = None,
     ) -> None:
         super().__init__(address, CodeCCTVHandler)
         self.token = token
@@ -63,6 +65,10 @@ class CodeCCTVServer(ThreadingHTTPServer):
         self.project_monitor = project_monitor
         # Automated drive runner (browse + test + static-scan + LLM summary).
         self.drive_runner = drive_runner
+        self.harness = harness
+        # A separate injection point keeps project-assistant HTTP tests fully
+        # offline and independent from the dashboard summary generator.
+        self.llm_chat_fn = llm_chat_fn or generate_project_assistant_reply
         self.started_at = time.monotonic()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscriber_lock = Lock()
@@ -286,6 +292,9 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         if route == "/api/management/info":
             self.send_json(self.server.management_info())
             return
+        if route == "/api/harness":
+            self.get_harness()
+            return
         if route == "/api/project/summary":
             self.project_summary()
             return
@@ -432,6 +441,19 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.start_project_drive(workspace)
             return
 
+        # ── Read-only project assistant ───────────────────────────────────
+        if route.startswith("/api/projects/") and route.endswith("/assistant"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/assistant")])
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            self.project_assistant(workspace, payload)
+            return
+
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_DELETE(self) -> None:
@@ -522,6 +544,50 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             limit = 50
         cases = self.server.store.list_cases(status=status, repository_ref=repo, limit=limit)
         self.send_json({"ok": True, "cases": cases, "count": len(cases)})
+
+    def get_harness(self) -> None:
+        """GET /api/harness — read-only local Agent dispatch manifest."""
+        harness = self.server.harness
+        if harness is None:
+            self.send_json({"error": "harness not configured"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        try:
+            manifest = harness.describe()
+        except Exception:
+            self.send_json({"error": "harness manifest unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        self.send_json({"ok": True, "harness": manifest})
+
+    def project_assistant(self, workspace: str, payload: dict[str, Any]) -> None:
+        """POST /api/projects/{workspace}/assistant — grounded read-only chat."""
+        if not workspace:
+            self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+            return
+        project = self.server.store.get_monitored_project(workspace)
+        if project is None:
+            self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+            return
+        question = payload.get("question")
+        if not isinstance(question, str) or not question.strip():
+            self.send_json({"error": "question required"}, HTTPStatus.BAD_REQUEST)
+            return
+        if len(question) > 1000:
+            self.send_json({"error": "question must be at most 1000 characters"},
+                           HTTPStatus.BAD_REQUEST)
+            return
+        stats = self.server.store.project_summary(workspace=project["workspace"])
+        latest_drive = self.server.store.get_latest_drive_run(project["workspace"])
+        try:
+            assistant = self.server.llm_chat_fn(question.strip(), project, stats, latest_drive)
+        except Exception:
+            self.send_json({"error": "project assistant unavailable"},
+                           HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        if not isinstance(assistant, dict):
+            self.send_json({"error": "project assistant returned invalid response"},
+                           HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        self.send_json({"ok": assistant.get("status") == "ok", "assistant": assistant})
 
     def project_summary(self) -> None:
         """GET /api/project/summary — deterministic aggregates + optional LLM

@@ -40,6 +40,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Protocol
 
+from .harness import AGENT_TASKS
+
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -57,6 +59,25 @@ def _resolve_api_key() -> str:
 
     load_dotenv()
     return os.environ.get("DEEPSEEK_API_KEY", "")
+
+
+def _harness_metadata(context: dict[str, Any]) -> dict[str, str]:
+    """Copy Harness-issued dispatch fields into durable run output.
+
+    Direct adapter calls remain supported for low-level tests and local
+    experiments, so absent fields are intentionally omitted.
+    """
+    keys = (
+        "harness_id",
+        "harness_task_id",
+        "harness_task_state",
+        "harness_agent_id",
+    )
+    return {
+        key: value
+        for key in keys
+        if isinstance((value := context.get(key)), str) and value
+    }
 
 # ── Failure detection patterns ────────────────────────────────────────────
 _ITERATION_EXHAUSTED_PATTERNS = [
@@ -261,12 +282,9 @@ class AgentScopeExecutionAdapter:
 
     # ── Dispatch ─────────────────────────────────────────────────────────
 
-    agent_state_map = {
-        "TRIAGED":    "triage",
-        "DIAGNOSED":  "diagnosis",
-        "REPAIRING":  "repair",
-        "VERIFYING":  "verification",
-    }
+    # The Harness owns the canonical task graph.  The adapter only resolves
+    # the Agent identity needed to execute the already-approved task.
+    agent_state_map = {task.state: task.agent_id for task in AGENT_TASKS}
 
     def dispatch_task(
         self, case_id: str, state: str, context: dict[str, Any],
@@ -309,17 +327,21 @@ class AgentScopeExecutionAdapter:
             # Mock and AgentScope modes expose the same completion contract so
             # the orchestrator never has to infer success from the execution mode.
             result.setdefault("status", "completed")
+            if result["status"] not in ("completed", "failed"):
+                raise RuntimeError(f"Agent module {module_path} returned invalid status")
+            result = {**result, **_harness_metadata(context)}
             self._store.connection.execute(
-                "UPDATE agent_runs SET status = 'completed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                (json.dumps(result, ensure_ascii=False), time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-            )
-        except Exception as exc:
-            self._store.connection.execute(
-                "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                (json.dumps({"error": str(exc)}, ensure_ascii=False),
+                "UPDATE agent_runs SET status = ?, output_ref = ?, finished_at = ? WHERE run_id = ?",
+                (result["status"], json.dumps(result, ensure_ascii=False),
                  time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
             )
-            result = {"error": str(exc)}
+        except Exception as exc:
+            result = {"status": "failed", "failure_reason": str(exc), **_harness_metadata(context)}
+            self._store.connection.execute(
+                "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
+                (json.dumps(result, ensure_ascii=False),
+                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
+            )
         self._store.connection.commit()
         return result
 
@@ -446,6 +468,7 @@ class AgentScopeExecutionAdapter:
                 "runtime_event_types": [e["type"] for e in runtime_events],
                 "runtime_events_artifact_id": artifact_id,
                 "runtime_events_sha256": events_sha256,
+                **_harness_metadata(context),
             }
 
             if failure:
@@ -525,10 +548,11 @@ class AgentScopeExecutionAdapter:
                 "team_id": self._team["team_id"] if self._team else "",
                 "status": "failed",
                 "failure_reason": f"exception: {exc}",
+                **_harness_metadata(context),
             }
             self._store.connection.execute(
                 "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                (json.dumps({"error": str(exc)}, ensure_ascii=False),
+                (json.dumps(result, ensure_ascii=False),
                  time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
             )
         self._store.connection.commit()

@@ -3,7 +3,7 @@
 > Code CCTV DevLoop · GOAI Agent Infra 方向三 · 竞赛材料
 > 依据框架 §5 扩展，来源：`agent_runtime/identities.yaml`（代码权威定义）+ 当前本地执行契约。
 
-> **实施状态：** 当前公开运行时是本地 `AgentScopeExecutionAdapter`（Mock/AgentScope 实验）；真实 AgentTeams Worker、Team/Task/Handoff 与官方 Trace 尚未配置或验证。本文的 AgentTeams 协同要求是赛事目标，不是已部署事实。
+> **实施状态：** 当前公开运行时由本地 `DevLoopHarness` 统筹任务图，再经 `AgentScopeExecutionAdapter` 执行 Mock/AgentScope 实验；真实 AgentTeams Worker、Team/Task/Handoff 与官方 Trace 尚未配置或验证。本文的 AgentTeams 协同要求是赛事目标，不是已部署事实。
 
 ## 1. 角色边界总览
 
@@ -20,7 +20,8 @@
 |------|---------|------|
 | Case 创建与任务拆解 | `agent_runtime/orchestrator.py` | 接收规范化事件，创建 Case，按状态机推进 |
 | 状态机维护与失败转移 | `agent_runtime/state_machine.py` | 12 状态转移表、超时和升级 |
-| 本地任务分发与目标 AgentTeams Bridge | `agent_runtime/teams_adapter.py` 中的 `AgentScopeExecutionAdapter` | 当前执行 Mock/AgentScope 实验；真实 AgentTeams 任务、Handoff 和 Trace 待单独接入 |
+| Harness 任务图与派发 | `agent_runtime/harness.py` 中的 `DevLoopHarness` | 统一维护 4 个业务 Agent 的显式状态映射、交接顺序与派发标记；不推进状态、不持有审批凭证 |
+| 本地执行适配与目标 AgentTeams Bridge | `agent_runtime/teams_adapter.py` 中的 `AgentScopeExecutionAdapter` | 仅执行 Harness 已派发的 Mock/AgentScope 任务；真实 AgentTeams 任务、Handoff 和 Trace 待单独接入 |
 | 审批门禁与回滚 | `policy/` + orchestrator | 高风险动作请求审批，**Agent 不持有审批凭证** |
 | 复盘知识沉淀 | `retrospective/`（异步批处理） | Case 终态后生成复盘报告 + 知识条目 |
 

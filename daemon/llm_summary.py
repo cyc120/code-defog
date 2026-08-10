@@ -315,6 +315,186 @@ DRIVE_SYSTEM_PROMPT = (
 )
 
 
+# ── 项目助手（只读问答） ────────────────────────────────────────────────
+
+ASSISTANT_SYSTEM_PROMPT = (
+    "你是\"Code CCTV DevLoop\"的项目助手。"
+    "你只能依据给定的【项目上下文】回答用户关于项目状态、进度、风险和下一步的问题。"
+    "模型叙述不是执行证据：必须区分确定性统计、最新自动化驱动和待确认信息。"
+    "不得编造代码、测试、审批、发布或 Agent 执行结果；不得声称拥有修改、审批、执行工具或发布能力。"
+    "输出必须是一个合法 JSON 对象，不能输出 JSON 之外的文字。"
+)
+
+ASSISTANT_MAX_QUESTION_CHARS = 1000
+_ASSISTANT_SOURCE_LABELS = frozenset({
+    "项目监控记录",
+    "Case 聚合统计",
+    "最新项目浏览报告",
+})
+
+
+def _bounded_single_line(value: Any, limit: int) -> str:
+    return _single_line(value, "")[:limit]
+
+
+def _assistant_drive_context(latest_drive: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a small, non-sensitive subset of the latest drive record."""
+    if not isinstance(latest_drive, dict):
+        return None
+    browse = latest_drive.get("browse")
+    browse = browse if isinstance(browse, dict) else {}
+    git = browse.get("git")
+    git = git if isinstance(git, dict) else {}
+    test = browse.get("test")
+    test = test if isinstance(test, dict) else {}
+    scan = browse.get("static_scan")
+    scan = scan if isinstance(scan, dict) else {}
+    gaps = scan.get("error_handling_gaps")
+    gap_refs: list[dict[str, Any]] = []
+    if isinstance(gaps, list):
+        for gap in gaps[:8]:
+            if not isinstance(gap, dict):
+                continue
+            gap_refs.append({
+                "file": _bounded_single_line(gap.get("file"), 240),
+                "line": gap.get("line") if isinstance(gap.get("line"), int) else None,
+                "kind": _bounded_single_line(gap.get("kind"), 80),
+            })
+    return {
+        "status": _bounded_single_line(latest_drive.get("status"), 40),
+        "started_at": _bounded_single_line(latest_drive.get("started_at"), 80),
+        "finished_at": _bounded_single_line(latest_drive.get("finished_at"), 80),
+        "duration_s": latest_drive.get("duration_s"),
+        "browse": {
+            "file_count": browse.get("file_count"),
+            "total_size": browse.get("total_size"),
+            "language_stats": browse.get("language_stats") if isinstance(browse.get("language_stats"), dict) else {},
+            "markers": [
+                _bounded_single_line(marker, 80)
+                for marker in browse.get("markers", [])[:12]
+                if _bounded_single_line(marker, 80)
+            ] if isinstance(browse.get("markers"), list) else [],
+            "symbol_total": browse.get("symbol_total"),
+            "git": {
+                "is_git": bool(git.get("is_git")),
+                "branch": _bounded_single_line(git.get("branch"), 120),
+                "head": _bounded_single_line(git.get("head"), 120),
+                "dirty_count": git.get("dirty_count"),
+            },
+            "test": {
+                "detected": bool(test.get("detected")),
+                "ran": bool(test.get("ran")),
+                "passed": test.get("passed") if isinstance(test.get("passed"), bool) else None,
+                "kind": _bounded_single_line(test.get("kind"), 80),
+            },
+            "static_scan": {
+                "todo_count": scan.get("todo_count"),
+                "fixme_count": scan.get("fixme_count"),
+                "error_handling_gap_count": len(gaps) if isinstance(gaps, list) else 0,
+                "error_handling_gap_refs": gap_refs,
+            },
+        },
+    }
+
+
+def build_project_assistant_prompt(
+    question: str,
+    project: dict[str, Any],
+    stats: dict[str, Any],
+    latest_drive: dict[str, Any] | None,
+) -> str:
+    """Build a bounded, structured prompt for the read-only project assistant."""
+    project_context = {
+        "name": _bounded_single_line(project.get("name"), 200),
+        "workspace": _bounded_single_line(project.get("workspace"), 1000),
+        "kind": _bounded_single_line(project.get("kind"), 40),
+        "status": _bounded_single_line(project.get("status"), 40),
+        "base_commit": _bounded_single_line(project.get("base_commit"), 120),
+        "last_seen": _bounded_single_line(project.get("last_seen"), 80),
+    }
+    context = {
+        "project": project_context,
+        "case_aggregates": stats,
+        "latest_drive": _assistant_drive_context(latest_drive),
+    }
+    return (
+        "请回答用户问题。要求：\n"
+        "- 使用中文，直接回答，不超过 900 个汉字；\n"
+        "- 只能使用项目上下文；缺少证据时明确说\"待确认\"；\n"
+        "- `sources` 只能从：项目监控记录、Case 聚合统计、最新项目浏览报告 中选择；\n"
+        "- `follow_ups` 给 0-3 个可继续追问的短问题；\n"
+        "- 不要给出审批、修改代码、执行命令或发布的承诺。\n\n"
+        f"【用户问题】\n{question}\n\n"
+        "【项目上下文】\n"
+        f"{json.dumps(context, ensure_ascii=False)[:12000]}\n\n"
+        "只输出如下 JSON：\n"
+        '{"answer":"回答","follow_ups":["可继续追问的问题"],'
+        '"sources":["Case 聚合统计"]}'
+    )
+
+
+def _normalize_assistant_reply(
+    raw: dict[str, Any], latest_drive: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    answer = _bounded_single_line(raw.get("answer"), 4000)
+    if not answer:
+        return None
+    sources = [
+        source for source in _string_list(raw.get("sources"), 4)
+        if source in _ASSISTANT_SOURCE_LABELS
+    ]
+    if not sources:
+        sources = ["项目监控记录", "Case 聚合统计"]
+        if latest_drive is not None:
+            sources.append("最新项目浏览报告")
+    return {
+        "answer": answer,
+        "follow_ups": _string_list(raw.get("follow_ups"), 3),
+        "sources": sources[:3],
+    }
+
+
+def generate_project_assistant_reply(
+    question: str,
+    project: dict[str, Any],
+    stats: dict[str, Any],
+    latest_drive: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Generate one grounded, read-only project assistant response.
+
+    No conversation content is persisted.  Without an API key this returns a
+    clear unavailable status before making any network request.
+    """
+    if not isinstance(question, str) or not question.strip():
+        return {"status": "error", "reason": "问题不能为空。"}
+    if len(question) > ASSISTANT_MAX_QUESTION_CHARS:
+        return {"status": "error", "reason": "问题不能超过 1000 个字符。"}
+    api_key = _resolve_api_key()
+    if not api_key:
+        return {
+            "status": "unavailable",
+            "reason": "DEEPSEEK_API_KEY 未配置；项目助手不可用。",
+        }
+    prompt = build_project_assistant_prompt(question.strip(), project, stats, latest_drive)
+    try:
+        content = _post_chat(api_key, prompt, system_prompt=ASSISTANT_SYSTEM_PROMPT)
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+            socket.timeout, json.JSONDecodeError) as exc:
+        return {"status": "error", "reason": f"项目助手调用失败：{exc}"}
+    raw = _extract_json(content)
+    if raw is None:
+        return {"status": "error", "reason": "项目助手返回内容无法解析为 JSON。"}
+    reply = _normalize_assistant_reply(raw, latest_drive)
+    if reply is None:
+        return {"status": "error", "reason": "项目助手返回内容缺少回答。"}
+    return {
+        "status": "ok",
+        "generated_at": utc_now(),
+        "model": DEEPSEEK_MODEL,
+        **reply,
+    }
+
+
 def build_drive_prompt(browse: dict[str, Any], stats: dict[str, Any]) -> str:
     """Chinese info-pyramid prompt grounded on the browsed project (no
     zero-case short-circuit — the drive summarizes the project itself)."""

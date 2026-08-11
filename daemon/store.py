@@ -225,6 +225,44 @@ class StateStore:
             CREATE INDEX IF NOT EXISTS idx_drive_runs_workspace
                 ON drive_runs(workspace, started_at DESC);
 
+            -- Project-level reviews are deliberately separate from Cases.
+            -- A review may create or merge a Case, but it is not a Case state.
+            CREATE TABLE IF NOT EXISTS review_runs (
+                run_id TEXT PRIMARY KEY,
+                workspace TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                scope_json TEXT NOT NULL DEFAULT '{}',
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                duration_s REAL,
+                browse_json TEXT,
+                llm_json TEXT,
+                linked_case_ids_json TEXT NOT NULL DEFAULT '[]',
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_runs_workspace
+                ON review_runs(workspace, started_at DESC);
+
+            CREATE TABLE IF NOT EXISTS review_task_runs (
+                task_run_id TEXT PRIMARY KEY,
+                review_run_id TEXT NOT NULL,
+                task_key TEXT NOT NULL,
+                title TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                agent_id TEXT,
+                task_order INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                input_json TEXT,
+                output_json TEXT,
+                failure_reason TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                FOREIGN KEY (review_run_id) REFERENCES review_runs(run_id),
+                UNIQUE(review_run_id, task_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_task_runs_run
+                ON review_task_runs(review_run_id, task_order);
+
             -- case_sources: case_id is NULL for pending (not-yet-associated) observations
             CREATE TABLE IF NOT EXISTS case_sources (
                 observation_id TEXT PRIMARY KEY,
@@ -499,7 +537,7 @@ class StateStore:
         with self.lock:
             self.connection.execute("DELETE FROM events")
             self.connection.execute("DELETE FROM projects")
-            for tbl in ("case_sources", "agent_runs", "tool_runs", "artifacts",
+            for tbl in ("review_task_runs", "review_runs", "case_sources", "agent_runs", "tool_runs", "artifacts",
                          "approval_grants", "approvals", "knowledge_records", "cases",
                          "drive_runs"):
                 self.connection.execute(f"DELETE FROM {tbl}")
@@ -1356,8 +1394,20 @@ class StateStore:
         return data
 
     def get_latest_drive_run(self, workspace: str) -> dict[str, Any] | None:
+        """Compatibility view: return the latest first-class Review Run first.
+
+        The public HTTP endpoint retains its historical ``/drive`` name while
+        callers migrate to ``review_runs``.  Legacy rows remain readable so a
+        daemon upgraded in place does not lose its prior dashboard report.
+        """
         abs_path = str(Path(workspace).expanduser().resolve())
         with self.lock:
+            review = self.connection.execute(
+                "SELECT * FROM review_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT 1",
+                (abs_path,),
+            ).fetchone()
+            if review is not None:
+                return self._review_run_dict(review)
             row = self.connection.execute(
                 "SELECT * FROM drive_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT 1",
                 (abs_path,)).fetchone()
@@ -1366,10 +1416,190 @@ class StateStore:
     def list_drive_runs(self, workspace: str, limit: int = 10) -> list[dict[str, Any]]:
         abs_path = str(Path(workspace).expanduser().resolve())
         with self.lock:
+            review_rows = self.connection.execute(
+                "SELECT * FROM review_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT ?",
+                (abs_path, limit),
+            ).fetchall()
+            if review_rows:
+                return [self._review_run_dict(row) for row in review_rows]
             rows = self.connection.execute(
                 "SELECT * FROM drive_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT ?",
                 (abs_path, limit)).fetchall()
             return [self._drive_run_dict(r) for r in rows]
+
+    # ── Project review runs (first-class, separate from Case lifecycle) ───
+
+    def begin_review_run(
+        self,
+        workspace: str,
+        scope: dict[str, Any] | None = None,
+        task_specs: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """Create one project-level read-only review and its visible tasks.
+
+        ``review_runs`` deliberately does not share a state machine with
+        ``cases``.  A review can link a Case after actionable evidence exists,
+        but it must never be used to bypass Case approval boundaries.
+        """
+        run_id = f"review-{uuid.uuid4().hex[:12]}"
+        abs_path = str(Path(workspace).expanduser().resolve())
+        safe_scope = scope if isinstance(scope, dict) else {}
+        specs = task_specs if isinstance(task_specs, list) else []
+        now = utc_now()
+        with self.lock:
+            self.connection.execute(
+                "INSERT INTO review_runs (run_id, workspace, status, scope_json, started_at) "
+                "VALUES (?, ?, 'running', ?, ?)",
+                (run_id, abs_path, json.dumps(safe_scope, ensure_ascii=False), now),
+            )
+            for order, spec in enumerate(specs, start=1):
+                if not isinstance(spec, dict):
+                    continue
+                task_key = clean_text(spec.get("task_key"), 80)
+                title = clean_text(spec.get("title"), 120)
+                stage = clean_text(spec.get("stage"), 80)
+                if not task_key or not title or not stage:
+                    continue
+                self.connection.execute(
+                    """INSERT INTO review_task_runs
+                       (task_run_id, review_run_id, task_key, title, stage, agent_id,
+                        task_order, status)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                    (
+                        f"review-task-{uuid.uuid4().hex[:12]}", run_id, task_key,
+                        title, stage, clean_text(spec.get("agent_id"), 80) or None,
+                        int(spec.get("order") or order),
+                    ),
+                )
+            self.connection.commit()
+        return run_id
+
+    def update_review_task(
+        self,
+        review_run_id: str,
+        task_key: str,
+        status: str,
+        *,
+        input_data: dict[str, Any] | None = None,
+        output_data: dict[str, Any] | None = None,
+        failure_reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist a task transition and return its public audit record."""
+        if status not in {"pending", "running", "complete", "error", "skipped"}:
+            raise ValueError(f"invalid review task status: {status}")
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM review_task_runs WHERE review_run_id = ? AND task_key = ?",
+                (review_run_id, task_key),
+            ).fetchone()
+            if row is None:
+                return None
+            now = utc_now()
+            started_at = row["started_at"]
+            finished_at = row["finished_at"]
+            if status == "running" and not started_at:
+                started_at = now
+            if status in {"complete", "error", "skipped"}:
+                finished_at = now
+            self.connection.execute(
+                """UPDATE review_task_runs
+                   SET status = ?, input_json = ?, output_json = ?, failure_reason = ?,
+                       started_at = ?, finished_at = ?
+                   WHERE review_run_id = ? AND task_key = ?""",
+                (
+                    status,
+                    json.dumps(input_data, ensure_ascii=False) if input_data is not None else row["input_json"],
+                    json.dumps(output_data, ensure_ascii=False) if output_data is not None else row["output_json"],
+                    clean_text(failure_reason, 1200) if failure_reason is not None else row["failure_reason"],
+                    started_at, finished_at, review_run_id, task_key,
+                ),
+            )
+            self.connection.commit()
+            updated = self.connection.execute(
+                "SELECT * FROM review_task_runs WHERE review_run_id = ? AND task_key = ?",
+                (review_run_id, task_key),
+            ).fetchone()
+            return self._review_task_dict(updated) if updated else None
+
+    def finish_review_run(
+        self,
+        run_id: str,
+        status: str,
+        duration_s: float,
+        browse: dict[str, Any] | None,
+        llm: dict[str, Any] | None,
+        linked_case_ids: list[str] | None,
+        error: str | None,
+    ) -> None:
+        if status not in {"complete", "error"}:
+            raise ValueError(f"invalid review run status: {status}")
+        with self.lock:
+            self.connection.execute(
+                """UPDATE review_runs
+                   SET status = ?, finished_at = ?, duration_s = ?, browse_json = ?,
+                       llm_json = ?, linked_case_ids_json = ?, error = ?
+                   WHERE run_id = ?""",
+                (
+                    status, utc_now(), duration_s,
+                    json.dumps(browse, ensure_ascii=False) if browse is not None else None,
+                    json.dumps(llm, ensure_ascii=False) if llm is not None else None,
+                    json.dumps(sorted(set(linked_case_ids or [])), ensure_ascii=False),
+                    clean_text(error, 1200) or None, run_id,
+                ),
+            )
+            self.connection.commit()
+
+    @staticmethod
+    def _json_field(value: str | None, fallback: Any) -> Any:
+        try:
+            return json.loads(value) if value else fallback
+        except (TypeError, json.JSONDecodeError):
+            return fallback
+
+    def _review_task_dict(self, row: Any) -> dict[str, Any]:
+        data = dict(row)
+        data["input"] = self._json_field(data.pop("input_json", None), None)
+        data["output"] = self._json_field(data.pop("output_json", None), None)
+        return data
+
+    def _review_run_dict(self, row: Any) -> dict[str, Any]:
+        data = dict(row)
+        data["scope"] = self._json_field(data.pop("scope_json", None), {})
+        data["browse"] = self._json_field(data.pop("browse_json", None), None)
+        data["llm"] = self._json_field(data.pop("llm_json", None), None)
+        data["linked_case_ids"] = self._json_field(data.pop("linked_case_ids_json", None), [])
+        tasks = self.connection.execute(
+            "SELECT * FROM review_task_runs WHERE review_run_id = ? ORDER BY task_order, started_at",
+            (data["run_id"],),
+        ).fetchall()
+        data["tasks"] = [self._review_task_dict(task) for task in tasks]
+        return data
+
+    def get_review_run(self, run_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM review_runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            return self._review_run_dict(row) if row else None
+
+    def get_latest_review_run(self, workspace: str) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM review_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT 1",
+                (abs_path,),
+            ).fetchone()
+            return self._review_run_dict(row) if row else None
+
+    def list_review_runs(self, workspace: str, limit: int = 12) -> list[dict[str, Any]]:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        safe_limit = max(1, min(int(limit), 100))
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT * FROM review_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT ?",
+                (abs_path, safe_limit),
+            ).fetchall()
+            return [self._review_run_dict(row) for row in rows]
 
     def project_summary(self, workspace: str | None = None, days: int = 14) -> dict[str, Any]:
         """Deterministic, evidence-derived aggregates for the project dashboard.
@@ -1384,6 +1614,11 @@ class StateStore:
         JSON-friendly structures, so the caller can run an optional LLM step
         *outside* the lock.
         """
+        # Cases store the resolved repository path.  Normalize query input at
+        # this boundary too: macOS may present the same directory as /var and
+        # /private/var, and a path spelling must not hide its own Case totals.
+        if workspace:
+            workspace = str(Path(workspace).expanduser().resolve())
         with self.lock:
             def rollup(sql: str, params: tuple = ()) -> list[dict[str, Any]]:
                 return [dict(r) for r in self.connection.execute(sql, params).fetchall()]

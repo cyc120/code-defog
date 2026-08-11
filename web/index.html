@@ -439,6 +439,57 @@
 
   /* ── 项目进度 · 分控仪表盘（#view-overview）────────────────────── */
   .overview-view { width: min(1440px, 100%); margin: 0 auto; padding: 26px 30px 52px; }
+  .review-workbench { display: grid; gap: 16px; margin-top: 18px; }
+  .review-command { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 20px; padding: 18px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--surface); }
+  .review-command-copy { min-width: 0; }
+  .review-command-copy h2 { margin: 0; font-size: 18px; font-weight: 500; }
+  .review-command-copy p { margin: 6px 0 0; color: var(--ink-muted); font-size: 12px; line-height: 1.55; }
+  .review-project-facts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .review-project-fact { max-width: 100%; padding: 4px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink-muted); background: var(--surface-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
+  .review-controls { display: grid; align-content: start; gap: 13px; min-width: 0; }
+  .review-control-label { display: block; margin-bottom: 6px; color: var(--ink-faint); font-size: 10px; font-weight: 500; }
+  .review-segmented { display: inline-flex; width: max-content; max-width: 100%; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .review-segmented label { display: grid; min-width: 76px; min-height: 30px; place-items: center; border-right: 1px solid var(--line); color: var(--ink-muted); cursor: pointer; font-size: 11px; }
+  .review-segmented label:last-child { border-right: 0; }
+  .review-segmented input { position: absolute; opacity: 0; pointer-events: none; }
+  .review-segmented input:checked + span { width: 100%; height: 100%; display: grid; place-items: center; background: var(--blue-soft); color: var(--ink); font-weight: 500; }
+  .review-components { display: flex; flex-wrap: wrap; gap: 6px 12px; }
+  .review-components label { display: inline-flex; align-items: center; gap: 5px; color: var(--ink-muted); font-size: 11px; cursor: pointer; }
+  .review-components input { width: 14px; height: 14px; accent-color: var(--green); }
+  .review-start { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 36px; }
+  .review-status { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 10px; min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); }
+  .review-status[hidden] { display: none; }
+  .review-execution { min-width: 0; padding: 16px 0 0; border-top: 1px solid var(--line); }
+  .review-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .review-panel-head h2 { margin: 0; font-size: 14px; font-weight: 500; }
+  .review-run-meta { color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
+  .review-task-graph { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); width: 100%; min-width: 0; max-width: 100%; gap: 0; margin-top: 13px; overflow-x: auto; padding-bottom: 4px; }
+  .review-task { position: relative; display: grid; min-width: 120px; min-height: 88px; align-content: start; gap: 6px; padding: 10px 11px; border: 1px solid var(--line); background: var(--surface); }
+  .review-task + .review-task { border-left: 0; }
+  .review-task:first-child { border-radius: 6px 0 0 6px; }
+  .review-task:last-child { border-radius: 0 6px 6px 0; }
+  .review-task.running { border-color: var(--blue); background: var(--blue-soft); }
+  .review-task.complete { background: var(--green-soft); }
+  .review-task.error { border-color: var(--red); background: var(--red-soft); }
+  .review-task.skipped { background: var(--surface-muted); }
+  .review-task-stage { color: var(--ink-faint); font-size: 9px; font-weight: 500; text-transform: uppercase; }
+  .review-task-title { color: var(--ink); font-size: 11px; font-weight: 500; line-height: 1.35; overflow-wrap: anywhere; }
+  .review-task-state { color: var(--ink-muted); font-size: 10px; }
+  .review-task-time { color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
+  .review-result-grid { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(250px, .7fr); gap: 16px; margin-top: 16px; }
+  .review-result-section { min-width: 0; padding-top: 14px; border-top: 1px solid var(--line); }
+  .review-result-section h3 { margin: 0 0 8px; font-size: 12px; font-weight: 500; }
+  .review-findings, .review-case-list, .review-history { display: grid; gap: 6px; }
+  .review-finding, .review-case, .review-history-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); color: var(--ink-muted); font-size: 11px; line-height: 1.45; }
+  .review-finding:first-child, .review-case:first-child, .review-history-row:first-child { border-top: 0; }
+  .review-finding-label { flex: 0 0 70px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
+  .review-case-link { color: var(--blue); background: transparent; border: 0; padding: 0; font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+  .review-history { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
+  .review-history-row { min-width: 0; display: grid; gap: 3px; }
+  .review-history-id { color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
+  .review-history-meta { color: var(--ink-faint); font-size: 10px; }
+  .review-empty { color: var(--ink-faint); font-size: 11px; }
+  .review-runtime { color: var(--ink-faint); font-size: 10px; }
   .overview-hero { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-top: 22px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
   .overview-hero .metric { min-height: 118px; }
   .overview-hero .metric-value { font-size: 36px; }
@@ -492,12 +543,21 @@
   .mini-table { width: 100%; min-width: 420px; }
 
   @media (max-width: 1100px) {
+    .review-command { grid-template-columns: minmax(0, 1fr); }
+    .review-task-graph { grid-template-columns: repeat(6, 140px); }
+    .review-history { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .overview-hero { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .overview-hero .metric:nth-child(4), .overview-hero .metric:nth-child(5) { border-top: 1px solid var(--line); }
     .overview-grid { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
   }
   @media (max-width: 680px) {
     .overview-view { padding: 16px 12px 30px; }
+    .review-command { padding: 14px; }
+    .review-command-copy h2 { font-size: 16px; }
+    .review-status { grid-template-columns: auto 1fr; }
+    .review-status .drive-note { grid-column: 1 / -1; }
+    .review-result-grid, .review-history { grid-template-columns: minmax(0, 1fr); }
+    .review-task-graph { grid-template-columns: repeat(6, 128px); }
     .overview-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .overview-hero .metric { min-height: 96px; }
     .pyramid-row { grid-template-columns: 1fr; gap: 2px; }
@@ -602,11 +662,11 @@
   .assistant-suggestion { padding: 5px 7px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface-muted);
     color: var(--ink-muted); cursor: pointer; font-size: 10px; }
   .assistant-suggestion:hover { border-color: var(--blue); color: var(--ink); background: var(--blue-soft); }
-  .assistant-composer { display: grid; grid-template-columns: minmax(0, 1fr) 36px; gap: 8px; align-items: end; }
+  .assistant-composer { display: grid; grid-template-columns: minmax(0, 1fr) repeat(2, 36px); gap: 8px; align-items: end; }
   .assistant-input { display: block; width: 100%; min-height: 62px; max-height: 122px; resize: vertical; padding: 8px 9px;
     border: 1px solid var(--line-strong); border-radius: 5px; background: var(--surface); color: var(--ink); font-size: 12px; line-height: 1.45; }
   .assistant-input:disabled { cursor: not-allowed; background: var(--surface-muted); }
-  .assistant-send { width: 36px; height: 36px; }
+  .assistant-send, .assistant-cancel { width: 36px; height: 36px; }
   body.assistant-open { overflow: hidden; }
   @media (max-width: 900px) {
     #app { grid-template-columns: 1fr; }
@@ -669,7 +729,7 @@
       </section>
 
       <nav class="sidebar-nav" aria-label="视图切换">
-        <button class="sidebar-nav-item" type="button" data-view="overview" id="view-overview-btn" aria-pressed="false">总览</button>
+        <button class="sidebar-nav-item" type="button" data-view="overview" id="view-overview-btn" aria-pressed="false">项目审查</button>
         <button class="sidebar-nav-item" type="button" data-view="audit" id="view-audit-btn" aria-pressed="true">Case 审计</button>
         <button class="sidebar-nav-item" type="button" data-view="projects" id="view-projects-btn" aria-pressed="false">监控项目</button>
       </nav>
@@ -786,8 +846,64 @@
 
     <section id="view-overview" class="overview-view" hidden aria-labelledby="overview-title">
       <div class="audit-toolbar">
-        <h1 class="section-title" id="overview-title">项目进度 · 分控仪表盘</h1>
-        <span class="section-note">当前项目聚合与 Agent 分工</span>
+        <h1 class="section-title" id="overview-title">全项目审查</h1>
+        <span class="section-note" id="review-runtime-label">本地 Harness / Mock</span>
+      </div>
+
+      <div class="review-workbench" aria-label="全项目审查工作台">
+        <section class="review-command" aria-labelledby="review-command-title">
+          <div class="review-command-copy">
+            <h2 id="review-command-title">自助化驱动</h2>
+            <p>对当前项目执行只读结构审查、测试探测、静态风险扫描和结果汇总。</p>
+            <div class="review-project-facts" id="review-project-facts"><span class="review-project-fact">未选择项目</span></div>
+          </div>
+          <div class="review-controls">
+            <div>
+              <span class="review-control-label">审查范围</span>
+              <div class="review-segmented" role="radiogroup" aria-label="审查范围">
+                <label><input type="radio" name="review-mode" value="full" checked><span>完整</span></label>
+                <label><input type="radio" name="review-mode" value="fast"><span>快速</span></label>
+              </div>
+            </div>
+            <div>
+              <span class="review-control-label">检查项</span>
+              <div class="review-components">
+                <label><input type="checkbox" name="review-component" value="structure" checked disabled>结构</label>
+                <label><input type="checkbox" name="review-component" value="tests" checked>测试</label>
+                <label><input type="checkbox" name="review-component" value="static" checked>静态风险</label>
+                <label><input type="checkbox" name="review-component" value="git" checked>Git</label>
+              </div>
+            </div>
+            <button class="button primary review-start" id="drive-btn" type="button"><i data-lucide="play" aria-hidden="true">开始</i>开始全项目审查</button>
+          </div>
+        </section>
+
+        <section class="review-execution" aria-labelledby="review-execution-title">
+          <div class="review-panel-head">
+            <h2 id="review-execution-title">自动化驱动</h2>
+            <span class="review-run-meta" id="review-run-meta">尚未启动审查</span>
+          </div>
+          <div class="review-status" id="ov-drive-status" hidden>
+            <span class="llm-badge warn" id="ov-drive-state">运行中</span>
+            <span class="drive-timer" id="ov-drive-timer">00:00</span>
+            <span class="drive-note" id="ov-drive-note">正在准备审查…</span>
+          </div>
+          <div class="review-task-graph" id="review-task-graph"><div class="review-empty">启动审查后显示阶段和任务记录。</div></div>
+          <div class="review-result-grid">
+            <section class="review-result-section" aria-labelledby="review-findings-title">
+              <h3 id="review-findings-title">审查发现</h3>
+              <div class="review-findings" id="review-findings"><div class="review-empty">尚无审查结果。</div></div>
+            </section>
+            <section class="review-result-section" aria-labelledby="review-cases-title">
+              <h3 id="review-cases-title">新建或更新的 Case</h3>
+              <div class="review-case-list" id="review-case-list"><div class="review-empty">仅测试超时或非零退出会进入 Case。</div></div>
+            </section>
+          </div>
+          <section class="review-result-section" aria-labelledby="review-history-title">
+            <div class="review-panel-head"><h3 id="review-history-title">最近审查</h3><span class="review-runtime" id="review-runtime-detail"></span></div>
+            <div class="review-history" id="review-history"><div class="review-empty">尚无历史记录。</div></div>
+          </section>
+        </section>
       </div>
 
       <div class="overview-hero" id="overview-hero" aria-label="项目概览">
@@ -840,13 +956,7 @@
           <div class="overview-llm-actions">
             <span class="llm-badge warn" id="ov-llm-badge">LLM 待生成</span>
             <button class="button" id="overview-refresh-btn" type="button">刷新总结</button>
-            <button class="button primary" id="drive-btn" type="button">启动自动化驱动</button>
           </div>
-        </div>
-        <div class="drive-status" id="ov-drive-status" hidden>
-          <span class="llm-badge warn" id="ov-drive-state">运行中</span>
-          <span class="drive-timer" id="ov-drive-timer">00:00</span>
-          <span class="drive-note" id="ov-drive-note">正在浏览项目、检测测试、静态扫描并生成总结…</span>
         </div>
         <div id="ov-llm-body"><div class="empty-data">正在生成项目总结…</div></div>
       </div>
@@ -930,6 +1040,7 @@
       </div>
       <form class="assistant-composer" id="assistant-form">
         <textarea class="assistant-input" id="assistant-input" maxlength="1000" placeholder="询问当前项目…" aria-label="向项目助手提问" disabled></textarea>
+        <button class="icon-button assistant-cancel" id="assistant-cancel-btn" type="button" aria-label="停止生成" data-tooltip="停止生成" hidden><i data-lucide="square" aria-hidden="true">停止</i></button>
         <button class="icon-button assistant-send" id="assistant-send-btn" type="submit" aria-label="发送问题" data-tooltip="发送问题" disabled><i data-lucide="send" aria-hidden="true">发送</i></button>
       </form>
     </footer>
@@ -999,9 +1110,13 @@
   const PROJECT_KEY = "cc-current-project";
   let driveTimer = null;           // setInterval handle for the drive mm:ss clock
   let driveStartedAt = 0;          // Date.now() when the current drive started
+  let reviewRun = null;            // latest first-class Review Run for the selected project
+  let reviewRuns = [];             // short persisted history, newest first
   let harnessInfo = null;          // read-only dispatch manifest from /api/harness
   let assistantMessages = [];      // browser-memory only; raw questions are never persisted
   let assistantBusy = false;
+  let assistantAbortController = null;
+  let assistantRequestId = 0;
 
   const root = document.documentElement;
   const urlTheme = new URLSearchParams(location.search).get("theme");
@@ -1060,8 +1175,9 @@
     if (options.body) headers["Content-Type"] = "application/json";
     let response;
     try {
-      response = await fetch(baseUrl() + path, { method: options.method || "GET", headers, body: options.body ? JSON.stringify(options.body) : undefined });
+      response = await fetch(baseUrl() + path, { method: options.method || "GET", headers, body: options.body ? JSON.stringify(options.body) : undefined, signal: options.signal });
     } catch (error) {
+      if (error && error.name === "AbortError") throw error;
       setOnline(false);
       throw new Error("无法连接本地服务");
     }
@@ -1079,6 +1195,8 @@
     $("assistant-open-btn").disabled = unavailable;
     $("assistant-input").disabled = unavailable || assistantBusy;
     $("assistant-send-btn").disabled = unavailable || assistantBusy;
+    $("assistant-cancel-btn").hidden = !assistantBusy;
+    $("assistant-cancel-btn").disabled = !assistantBusy;
     document.querySelectorAll(".assistant-suggestion, .assistant-follow-up").forEach((button) => {
       button.disabled = unavailable || assistantBusy;
     });
@@ -1116,6 +1234,9 @@
     target.scrollTop = target.scrollHeight;
   }
   function resetAssistantConversation() {
+    assistantRequestId += 1;
+    if (assistantAbortController) assistantAbortController.abort();
+    assistantAbortController = null;
     assistantMessages = [];
     assistantBusy = false;
     renderAssistantThread();
@@ -1136,19 +1257,32 @@
     $("assistant-open-btn").setAttribute("aria-expanded", "false");
     $("assistant-open-btn").focus();
   }
+  function assistantHistory() {
+    return assistantMessages
+      .filter((message) => message.kind === "user" || message.kind === "assistant")
+      .slice(-6)
+      .map((message) => ({ role: message.kind === "user" ? "user" : "assistant", content: message.text }));
+  }
+  function cancelAssistantRequest() {
+    if (assistantAbortController) assistantAbortController.abort();
+  }
   async function askAssistant(rawQuestion) {
     const question = String(rawQuestion || "").trim();
     if (!question || assistantBusy || !selectedProject) return;
     const workspace = selectedProject.workspace;
+    const history = assistantHistory();
+    const requestId = ++assistantRequestId;
+    const controller = new AbortController();
+    assistantAbortController = controller;
     assistantMessages.push({ kind: "user", text: question });
     assistantBusy = true;
     $("assistant-input").value = "";
     renderAssistantThread();
     try {
       const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/assistant`, {
-        method: "POST", body: { question },
+        method: "POST", body: { question, history }, signal: controller.signal,
       });
-      if (!selectedProject || selectedProject.workspace !== workspace) return;
+      if (requestId !== assistantRequestId || !selectedProject || selectedProject.workspace !== workspace) return;
       const reply = payload.assistant || {};
       if (reply.status === "ok" && typeof reply.answer === "string" && reply.answer.trim()) {
         assistantMessages.push({
@@ -1161,10 +1295,15 @@
         assistantMessages.push({ kind: "notice", text: reply.reason || "项目助手暂时不可用。" });
       }
     } catch (error) {
-      if (selectedProject && selectedProject.workspace === workspace) {
+      if (requestId !== assistantRequestId) return;
+      if (controller.signal.aborted) {
+        assistantMessages.push({ kind: "notice", text: "已停止本次整理。" });
+      } else if (selectedProject && selectedProject.workspace === workspace) {
         assistantMessages.push({ kind: "notice", text: error.message || "项目助手请求失败。" });
       }
     } finally {
+      if (requestId !== assistantRequestId) return;
+      assistantAbortController = null;
       if (selectedProject && selectedProject.workspace === workspace) assistantBusy = false;
       renderAssistantThread();
       if (!$("assistant-drawer").hidden && !assistantBusy) $("assistant-input").focus();
@@ -1173,6 +1312,7 @@
   $("assistant-open-btn").addEventListener("click", openAssistantDrawer);
   $("assistant-close-btn").addEventListener("click", closeAssistantDrawer);
   $("assistant-scrim").addEventListener("click", closeAssistantDrawer);
+  $("assistant-cancel-btn").addEventListener("click", cancelAssistantRequest);
   $("assistant-form").addEventListener("submit", (event) => {
     event.preventDefault();
     askAssistant($("assistant-input").value);
@@ -1187,7 +1327,9 @@
     button.addEventListener("click", () => askAssistant(button.dataset.question));
   });
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !$("assistant-drawer").hidden) closeAssistantDrawer();
+    if (event.key === "Escape" && !$("assistant-drawer").hidden) {
+      if (assistantBusy) cancelAssistantRequest(); else closeAssistantDrawer();
+    }
   });
   function cachedServices() {
     try {
@@ -1511,10 +1653,12 @@
       const payload = await api("/api/harness");
       if (epoch !== dataEpoch) return false;
       harnessInfo = payload.harness || null;
+      renderReviewRuntime();
       if (evidence) renderAgents(evidence.agent_runs || []);
       return true;
     } catch (error) {
       harnessInfo = null;
+      renderReviewRuntime();
       if (evidence) renderAgents(evidence.agent_runs || []);
       return false;
     }
@@ -1748,6 +1892,7 @@
     if (currentView === "overview") {
       await loadProjectSummary(false, epoch);
       await loadDriveLatest(epoch);
+      await loadReviewHistory(epoch);
     } else if (currentView === "projects") {
       await loadProjects(epoch);
     } else {
@@ -1828,14 +1973,49 @@
       retry *= 2;
     }
   }
-  // ── 自动化驱动：启动按钮 + 运行计时 + 结果渲染 ────────────────────
+  // ── 全项目 Review Run：启动、任务图、结果与历史 ──────────────────
   function fmtDuration(seconds) {
     const s = Math.max(0, Math.floor(seconds));
     return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   }
+  function reviewRuntimeLabel() {
+    const mode = config.runtime_mode === "agentscope" || config.runtime_mode === "production"
+      ? "AgentScope 本地实验" : "Mock";
+    const harness = harnessInfo?.id || "本地 Harness";
+    return `${harness} / ${mode}`;
+  }
+  function renderReviewRuntime() {
+    const label = reviewRuntimeLabel();
+    const target = $("review-runtime-label");
+    const detail = $("review-runtime-detail");
+    if (target) target.textContent = label;
+    if (detail) detail.textContent = "项目审查 Agent 为本地确定性只读执行，不是 AgentTeams 运行凭据。";
+  }
+  function selectedReviewScope() {
+    const mode = document.querySelector('input[name="review-mode"]:checked')?.value || "full";
+    const components = {};
+    document.querySelectorAll('input[name="review-component"]').forEach((input) => {
+      components[input.value] = input.checked;
+    });
+    components.structure = true;
+    return { mode, components };
+  }
+  function renderReviewProjectFacts() {
+    const target = $("review-project-facts");
+    if (!target) return;
+    target.replaceChildren();
+    if (!selectedProject) {
+      target.append(create("span", "review-project-fact", "未选择项目"));
+      return;
+    }
+    target.append(create("span", "review-project-fact", selectedProject.name || selectedProject.workspace));
+    target.append(create("span", "review-project-fact", selectedProject.workspace));
+    if (selectedProject.base_commit) target.append(create("span", "review-project-fact", selectedProject.base_commit));
+  }
   function startDriveTimer() {
     stopDriveTimer();
-    driveStartedAt = Date.now();
+    driveStartedAt = reviewRun?.started_at ? Date.parse(reviewRun.started_at) : Date.now();
+    if (!Number.isFinite(driveStartedAt)) driveStartedAt = Date.now();
     $("ov-drive-timer").textContent = "00:00";
     driveTimer = setInterval(() => {
       $("ov-drive-timer").textContent = fmtDuration((Date.now() - driveStartedAt) / 1000);
@@ -1850,15 +2030,128 @@
     $("ov-drive-state").textContent = stateText;
     $("ov-drive-state").className = `llm-badge ${stateClass}`;
   }
+  function reviewStatusLabel(status) {
+    return ({ pending: "等待", running: "执行中", complete: "已完成", error: "失败", skipped: "跳过" })[status] || status || "等待";
+  }
+  function taskTime(task) {
+    if (task.finished_at) return relativeTime(task.finished_at);
+    if (task.started_at) return "进行中";
+    return "等待开始";
+  }
+  function renderReviewTasks(run) {
+    const target = $("review-task-graph");
+    target.replaceChildren();
+    const tasks = Array.isArray(run?.tasks) ? run.tasks : [];
+    if (!tasks.length) {
+      target.append(create("div", "review-empty", "该历史驱动未记录阶段任务。"));
+      return;
+    }
+    tasks.forEach((task) => {
+      const card = create("article", `review-task ${task.status || "pending"}`);
+      card.title = task.failure_reason || task.title || "";
+      card.append(create("div", "review-task-stage", task.stage || "review"));
+      card.append(create("div", "review-task-title", task.title || task.task_key));
+      card.append(create("div", "review-task-state", reviewStatusLabel(task.status)));
+      card.append(create("div", "review-task-time", taskTime(task)));
+      target.append(card);
+    });
+  }
+  function appendReviewFinding(target, label, detail) {
+    const row = create("div", "review-finding");
+    row.append(create("span", "review-finding-label", label));
+    row.append(create("span", "", detail));
+    target.append(row);
+  }
+  function renderReviewFindings(run) {
+    const target = $("review-findings");
+    target.replaceChildren();
+    const browse = run?.browse || {};
+    const test = browse.test || {};
+    const scan = browse.static_scan || {};
+    const reviewTask = (run?.tasks || []).find((task) => task.task_key === "project_review");
+    const agentOutput = reviewTask?.output || {};
+    const observations = Array.isArray(agentOutput.observations) ? agentOutput.observations : [];
+    observations.slice(0, 3).forEach((observation) => appendReviewFinding(target, "结构", observation));
+    if (test.detected) {
+      const result = test.ran ? (test.timed_out ? "测试超时" : test.execution_error ? "测试无法启动" : test.passed ? "测试通过" : "测试失败") : test.runner_unavailable ? "测试运行器不可用，未执行项目测试" : "已识别测试命令，未执行";
+      appendReviewFinding(target, "测试", result);
+    }
+    const gaps = Array.isArray(scan.error_handling_gaps) ? scan.error_handling_gaps : [];
+    if (scan.scanned_files != null) appendReviewFinding(target, "静态", `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。`);
+    const git = browse.git || {};
+    if (git.branch) appendReviewFinding(target, "Git", `${git.branch} · ${git.dirty_count ?? 0} 个未提交变更`);
+    if (!target.childElementCount) target.append(create("div", "review-empty", "审查完成后将在这里汇总确定性发现。"));
+  }
+  async function openReviewCase(caseId) {
+    if (!caseId) return;
+    location.hash = "#/audit";
+    try {
+      await loadCases();
+      selectedId = caseId;
+      $("case-select").value = caseId;
+      await loadEvidence(caseId);
+    } catch (error) { toast(error.message); }
+  }
+  function renderReviewCases(run) {
+    const target = $("review-case-list");
+    target.replaceChildren();
+    const browse = run?.browse || {};
+    const promotion = browse.case_promotion || {};
+    const caseIds = Array.from(new Set([...(run?.linked_case_ids || []), ...(promotion.case_id ? [promotion.case_id] : [])]));
+    if (!caseIds.length) {
+      target.append(create("div", "review-empty", "本次未触发 Case；静态提示保留为审查发现。"));
+      return;
+    }
+    caseIds.forEach((caseId) => {
+      const row = create("div", "review-case");
+      const link = create("button", "review-case-link", `${shortId(caseId)}${promotion.case_status ? ` · ${statusMeta(promotion.case_status).label}` : ""}`);
+      link.type = "button";
+      link.addEventListener("click", () => openReviewCase(caseId));
+      row.append(link);
+      row.append(create("span", "", promotion.outcome === "timeout" ? "测试超时" : "测试非零退出"));
+      target.append(row);
+    });
+  }
+  function renderReviewHistory(runs = reviewRuns) {
+    const target = $("review-history");
+    target.replaceChildren();
+    if (!runs.length) {
+      target.append(create("div", "review-empty", "尚无历史记录。"));
+      return;
+    }
+    runs.slice(0, 6).forEach((run) => {
+      const row = create("button", "review-history-row");
+      row.type = "button";
+      row.title = "查看此审查记录";
+      row.addEventListener("click", () => onDriveStatus({ run }));
+      row.append(create("span", "review-history-id", shortId(run.run_id)));
+      row.append(create("span", "review-history-meta", `${run.status === "complete" ? "完成" : run.status === "error" ? "失败" : "运行中"} · ${relativeTime(run.started_at)}`));
+      row.append(create("span", "review-history-meta", run.duration_s != null ? fmtDuration(run.duration_s) : "—"));
+      target.append(row);
+    });
+  }
+  function renderReviewRun(run) {
+    if (!run) return;
+    reviewRun = run;
+    $("review-run-meta").textContent = `${shortId(run.run_id)} · ${run.status === "complete" ? "已完成" : run.status === "error" ? "失败" : "运行中"}`;
+    renderReviewTasks(run);
+    renderReviewFindings(run);
+    renderReviewCases(run);
+    renderReviewRuntime();
+    if (run.browse || run.llm) renderDriveRun(run);
+  }
   async function startDrive() {
     if (!selectedProject) { toast("请先选择要监控的项目"); return; }
     const btn = $("drive-btn");
     btn.disabled = true;
     try {
-      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/drive`, { method: "POST" });
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/drive`, {
+        method: "POST", body: { scope: selectedReviewScope() },
+      });
+      if (payload.run) renderReviewRun(payload.run);
       setDriveStatus(true, "运行中", "warn");
       startDriveTimer();
-      $("ov-drive-note").textContent = `正在诊断 ${selectedProject.name || selectedProject.workspace}…`;
+      $("ov-drive-note").textContent = `正在审查 ${selectedProject.name || selectedProject.workspace}…`;
     } catch (error) {
       btn.disabled = false;
       setDriveStatus(true, "失败", "bad");
@@ -1870,18 +2163,19 @@
   function onDriveStatus(event) {
     const run = (event && event.run) || {};
     const status = run.status;
+    if (run.run_id) renderReviewRun(run);
     if (status === "running") {
       $("drive-btn").disabled = true;
       setDriveStatus(true, "运行中", "warn");
       if (!driveTimer) startDriveTimer();
-      $("ov-drive-note").textContent = "正在浏览项目、检测测试、静态扫描并生成总结…";
+      $("ov-drive-note").textContent = "正在由 Harness 协调结构审查、测试探测、静态扫描和结果汇总…";
     } else if (status === "complete") {
       $("drive-btn").disabled = false;
       stopDriveTimer();
       if (run.duration_s != null) $("ov-drive-timer").textContent = fmtDuration(run.duration_s);
       setDriveStatus(true, "已完成", "ok");
-      $("ov-drive-note").textContent = `诊断完成，用时 ${run.duration_s != null ? fmtDuration(run.duration_s) : "?"}。`;
-      renderDriveRun(run);
+      $("ov-drive-note").textContent = `审查完成，用时 ${run.duration_s != null ? fmtDuration(run.duration_s) : "?"}。`;
+      loadReviewHistory();
     } else if (status === "error") {
       $("drive-btn").disabled = false;
       stopDriveTimer();
@@ -1890,10 +2184,45 @@
     }
   }
   function handleEvent(event) {
-    if (event.type === "drive_status") { onDriveStatus(event); return; }
+    if (event.type === "review_status" || event.type === "drive_status") { onDriveStatus(event); return; }
+    if (event.type === "review_task_status") {
+      if (reviewRun && event.review_run_id === reviewRun.run_id && event.task) {
+        const tasks = Array.isArray(reviewRun.tasks) ? reviewRun.tasks.slice() : [];
+        const index = tasks.findIndex((task) => task.task_key === event.task.task_key);
+        if (index >= 0) tasks[index] = event.task;
+        else tasks.push(event.task);
+        renderReviewRun({ ...reviewRun, tasks });
+      }
+      return;
+    }
     if (!CASE_EVENTS.includes(event.type) && event.type !== "knowledge_reviewed") return;
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(() => refreshAll(), 300);
+  }
+
+  function driveReportItem(label, detail, tone = "") {
+    const item = create("div", "drive-report-item");
+    item.append(create("span", `badge${tone ? ` ${tone}` : ""}`, label));
+    item.append(document.createTextNode(String(detail || "")));
+    return item;
+  }
+  function driveTestItem(test) {
+    const item = driveReportItem("test", test.detail || test.command || "");
+    if (test.ran || test.execution_error) {
+      item.append(document.createTextNode(" "));
+      const label = test.timed_out ? "超时" : test.execution_error ? (test.runner_unavailable ? "运行器不可用" : "无法启动") : test.passed ? "通过" : "失败";
+      item.append(create("span", test.passed ? "good" : "bad", label));
+    }
+    return item;
+  }
+  function driveCasePromotionItem(promotion) {
+    if (!promotion || !promotion.triggered) return null;
+    if (promotion.status === "linked" && promotion.case_id) {
+      return driveReportItem("Case", `${promotion.outcome === "timeout" ? "自检超时" : "自检失败"}已纳入 ${shortId(promotion.case_id)} · ${statusMeta(promotion.case_status).label}`, "warn");
+    }
+    if (promotion.status === "duplicate") return driveReportItem("Case", "该次自检已由现有来源记录处理。", "warn");
+    if (promotion.status === "pending") return driveReportItem("Case", "自检来源正在等待关联。", "warn");
+    return driveReportItem("Case", promotion.error || "自检异常未能升级为 Case。", "warn");
   }
 
   // 渲染项目浏览报告（确定性）+ 复用 LLM 信息金字塔
@@ -1908,7 +2237,7 @@
     const badge = $("ov-drive-report-badge");
     const body = $("ov-drive-report-body");
     report.hidden = false;
-    body.innerHTML = "";
+    body.replaceChildren();
     if (!browse) { body.append(create("div", "empty-data", "无浏览数据。")); return; }
     const git = browse.git || {};
     const test = browse.test || {};
@@ -1922,7 +2251,7 @@
       ["语言", Object.keys(browse.language_stats || {}).slice(0, 3).join("/") || "—"],
       ["Git 分支", git.branch || "—"],
       ["TODO/FIXME", String((scan.todo_count ?? 0) + (scan.fixme_count ?? 0))],
-      ["测试", test.detected ? (test.ran ? (test.passed ? "通过" : "失败") : "已检测") : "未检测"],
+      ["测试", test.detected ? (test.ran ? (test.timed_out ? "超时" : test.execution_error ? "无法启动" : test.passed ? "通过" : "失败") : test.runner_unavailable ? "运行器不可用" : test.execution_error ? "无法启动" : "已检测") : "未检测"],
     ];
     kpis.forEach(([label, value]) => {
       const kpi = create("div", "drive-report-kpi");
@@ -1932,19 +2261,21 @@
     });
     body.append(grid);
     const list = create("div", "drive-report-list");
-    if (git.remote) list.append(create("div", "drive-report-item", `<span class="badge">remote</span>${git.remote}`));
-    if (git.head) list.append(create("div", "drive-report-item", `<span class="badge">HEAD</span>${git.head} · ${git.dirty_count ?? 0} 个未提交变更`));
+    if (git.remote) list.append(driveReportItem("remote", git.remote));
+    if (git.head) list.append(driveReportItem("HEAD", `${git.head} · ${git.dirty_count ?? 0} 个未提交变更`));
     if (git.recent_commits && git.recent_commits.length) {
-      git.recent_commits.slice(0, 4).forEach((c) => list.append(create("div", "drive-report-item", `<span class="badge">git</span>${c}`)));
+      git.recent_commits.slice(0, 4).forEach((commit) => list.append(driveReportItem("git", commit)));
     }
     if (test.detected) {
-      list.append(create("div", "drive-report-item", `<span class="badge">test</span>${test.detail || test.command || ""} ${test.ran ? (test.passed ? '<span class="good">通过</span>' : '<span class="bad">失败</span>') : ""}`));
-      if (test.output_summary) list.append(create("div", "drive-report-item", `<span class="badge">out</span>${test.output_summary.slice(0, 300)}`));
+      list.append(driveTestItem(test));
+      if (test.output_summary) list.append(driveReportItem("out", test.output_summary.slice(0, 300)));
     }
+    const promotionItem = driveCasePromotionItem(browse.case_promotion);
+    if (promotionItem) list.append(promotionItem);
     if ((scan.error_handling_gaps || []).length) {
-      list.append(create("div", "drive-report-item", `<span class="badge warn">风险</span>${scan.error_handling_gaps.length} 处错误处理缺口（bare except / 空 catch）`));
-      scan.error_handling_gaps.slice(0, 5).forEach((g) =>
-        list.append(create("div", "drive-report-item", `<span class="badge">gap</span>${g.file}:${g.line} ${g.snippet}`)));
+      list.append(driveReportItem("风险", `${scan.error_handling_gaps.length} 处错误处理缺口（bare except / 空 catch）`, "warn"));
+      scan.error_handling_gaps.slice(0, 5).forEach((gap) =>
+        list.append(driveReportItem("gap", `${gap.file}:${gap.line} ${gap.snippet}`)));
     }
     body.append(list);
   }
@@ -1957,6 +2288,17 @@
       const run = payload.run;
       if (run) onDriveStatus({ type: "drive_status", run });
     } catch (error) { /* no run yet — ignore */ }
+  }
+  async function loadReviewHistory(epoch = dataEpoch) {
+    if (!selectedProject) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`);
+      if (epoch !== dataEpoch) return;
+      reviewRuns = payload.runs || [];
+      renderReviewHistory(reviewRuns);
+    } catch (error) {
+      if (epoch === dataEpoch) renderReviewHistory([]);
+    }
   }
   async function boot() {
     const connection = ++connectionEpoch;
@@ -2015,6 +2357,7 @@
     target.innerHTML = "";
     $("topbar-project").textContent = selectedProject
       ? (selectedProject.name || selectedProject.workspace) : "未选择项目";
+    renderReviewProjectFacts();
     updateAssistantProject();
     if (!monitoredProjects.length) {
       target.append(create("div", "sidebar-empty", "尚未监控项目"));
@@ -2051,6 +2394,8 @@
 
   function resetDriveUI() {
     stopDriveTimer();
+    reviewRun = null;
+    reviewRuns = [];
     const btn = $("drive-btn");
     if (btn) btn.disabled = false;
     setDriveStatus(false);
@@ -2058,6 +2403,17 @@
     if (report) report.hidden = true;
     const body = $("ov-drive-report-body");
     if (body) body.replaceChildren(create("div", "empty-data", "尚未运行自动化驱动。"));
+    const graph = $("review-task-graph");
+    if (graph) graph.replaceChildren(create("div", "review-empty", "启动审查后显示阶段和任务记录。"));
+    const findings = $("review-findings");
+    if (findings) findings.replaceChildren(create("div", "review-empty", "尚无审查结果。"));
+    const casesTarget = $("review-case-list");
+    if (casesTarget) casesTarget.replaceChildren(create("div", "review-empty", "仅测试超时或非零退出会进入 Case。"));
+    const history = $("review-history");
+    if (history) history.replaceChildren(create("div", "review-empty", "尚无历史记录。"));
+    const meta = $("review-run-meta");
+    if (meta) meta.textContent = "尚未启动审查";
+    renderReviewRuntime();
   }
 
   function renderMonitoredProjects(projects) {
@@ -2132,6 +2488,7 @@
     box.dataset.kind = candidate.kind || "git";
     box.dataset.name = candidate.name || "";
     box.addEventListener("click", (event) => event.stopPropagation());
+    option.addEventListener("click", () => { box.checked = !box.checked; });
     const copy = create("span", "");
     copy.append(create("span", "proj-option-name", candidate.name || candidate.path || candidate.cwd));
     const meta = candidate.git_remote || candidate.branch || candidate.last_commit || candidate.pid

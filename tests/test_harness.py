@@ -11,7 +11,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from agent_runtime.harness import AGENT_TASKS, DevLoopHarness
+from agent_runtime.harness import AGENT_TASKS, PROJECT_REVIEW_TASKS, DevLoopHarness
 from agent_runtime.orchestrator import Orchestrator
 from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
 from daemon.server import CodeCCTVServer
@@ -32,6 +32,10 @@ class RecordingExecutor:
             "harness_id": "untrusted-executor-value",
         }
 
+    def dispatch_review_task(self, review_run_id: str, task_key: str, context: dict) -> dict:
+        self.calls.append((review_run_id, task_key, context))
+        return {"status": "completed", "harness_id": "untrusted-executor-value"}
+
 
 class HarnessTests(unittest.TestCase):
     def test_manifest_exposes_the_four_explicit_business_tasks(self) -> None:
@@ -49,6 +53,11 @@ class HarnessTests(unittest.TestCase):
              ("REPAIRING", "repair"), ("VERIFYING", "verification")],
         )
         self.assertIn("不持有", str(manifest["approval_boundary"]))
+        self.assertEqual(manifest["review_agent_count"], 1)
+        self.assertEqual(
+            [(task.task_key, task.agent_id) for task in PROJECT_REVIEW_TASKS],
+            [("project_review", "project_review")],
+        )
 
     def test_dispatch_issues_authoritative_metadata_to_the_executor(self) -> None:
         executor = RecordingExecutor()
@@ -77,6 +86,24 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("no business-Agent task", approval["failure_reason"])
         self.assertEqual(mismatch["status"], "failed")
         self.assertIn("does not match", mismatch["failure_reason"])
+
+    def test_project_review_has_a_separate_read_only_dispatch_path(self) -> None:
+        executor = RecordingExecutor()
+        harness = DevLoopHarness(executor)
+
+        result = harness.dispatch_review(
+            "review-a", "project_review", {"review_run_id": "review-a", "read_only": True},
+        )
+        unknown = harness.dispatch_review("review-a", "repair", {"review_run_id": "review-a"})
+
+        self.assertEqual(len(executor.calls), 1)
+        review_run_id, task_key, dispatched = executor.calls[0]
+        self.assertEqual((review_run_id, task_key), ("review-a", "project_review"))
+        self.assertEqual(dispatched["harness_agent_id"], "project_review")
+        self.assertEqual(dispatched["harness_task_kind"], "project_review")
+        self.assertTrue(result["harness_task_id"].startswith("hrtask-"))
+        self.assertEqual(unknown["status"], "failed")
+        self.assertIn("no project-review task", unknown["failure_reason"])
 
     def test_orchestrator_persists_harness_metadata_in_mock_agent_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

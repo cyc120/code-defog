@@ -40,7 +40,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Protocol
 
-from .harness import AGENT_TASKS
+from .harness import AGENT_TASKS, PROJECT_REVIEW_TASK_BY_KEY
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +71,8 @@ def _harness_metadata(context: dict[str, Any]) -> dict[str, str]:
         "harness_id",
         "harness_task_id",
         "harness_task_state",
+        "harness_task_kind",
+        "harness_task_key",
         "harness_agent_id",
     )
     return {
@@ -299,6 +301,51 @@ class AgentScopeExecutionAdapter:
             return self._dispatch_mock(case_id, state, module_path, context)
         else:
             return self._dispatch_agentscope(case_id, state, agent_key, context)
+
+    def dispatch_review_task(
+        self, review_run_id: str, task_key: str, context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Run the project-review Agent without creating a Case agent run.
+
+        Project reviews have their own durable ``review_task_runs`` ledger.
+        The current review Agent is deterministic and local in both runtime
+        modes, because it only summarizes bounded browse metadata already
+        collected by the read-only driver.  It is never represented as an
+        external AgentTeams task or a runtime-native AgentScope trace.
+        """
+        task = PROJECT_REVIEW_TASK_BY_KEY.get(task_key)
+        if task is None:
+            return {"status": "failed", "failure_reason": f"unknown review task: {task_key}"}
+        if not isinstance(context, dict):
+            return {"status": "failed", "failure_reason": "review context must be an object"}
+        if context.get("review_run_id") and context["review_run_id"] != review_run_id:
+            return {"status": "failed", "failure_reason": "review run id mismatch"}
+        try:
+            module = importlib.import_module("agents.project_review")
+            result = module.run({**context, "_state_store": self._store})
+            if not isinstance(result, dict):
+                raise RuntimeError("Project Review Agent returned a non-object result")
+            result.setdefault("status", "completed")
+            if result["status"] not in ("completed", "failed"):
+                raise RuntimeError("Project Review Agent returned invalid status")
+            return {
+                **result,
+                "review_run_id": review_run_id,
+                "agent": task.agent_id,
+                "execution_mode": self._mode,
+                "runtime_kind": "local_deterministic_review_agent",
+                **_harness_metadata(context),
+            }
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "failure_reason": str(exc),
+                "review_run_id": review_run_id,
+                "agent": task.agent_id,
+                "execution_mode": self._mode,
+                "runtime_kind": "local_deterministic_review_agent",
+                **_harness_metadata(context),
+            }
 
     # ── Mock dispatch ────────────────────────────────────────────────────
 

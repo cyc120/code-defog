@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import getpass
+import hashlib
 import hmac
 import json
 import os
@@ -19,12 +20,18 @@ from typing import Any
 from urllib.parse import urlparse
 
 from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text
-from .llm_summary import get_llm_summary, generate_project_assistant_reply
+from .llm_summary import (
+    get_llm_summary,
+    generate_project_assistant_reply,
+    normalize_project_assistant_history,
+)
 
 
 MAX_BODY_BYTES = 1_000_000
 TOKEN_TYPE_SERVICE = "service"
 TOKEN_TYPE_APPROVAL = "approval"
+ASSISTANT_CACHE_TTL_S = 30.0
+ASSISTANT_CACHE_MAX_ENTRIES = 128
 
 
 class CodeCCTVServer(ThreadingHTTPServer):
@@ -69,6 +76,11 @@ class CodeCCTVServer(ThreadingHTTPServer):
         # A separate injection point keeps project-assistant HTTP tests fully
         # offline and independent from the dashboard summary generator.
         self.llm_chat_fn = llm_chat_fn or generate_project_assistant_reply
+        # Short-lived answers make retries and accidental double submits fast
+        # without storing any conversation on disk. The key includes the
+        # bounded context snapshot, so project changes naturally invalidate it.
+        self.assistant_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self.assistant_cache_lock = Lock()
         self.started_at = time.monotonic()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscriber_lock = Lock()
@@ -112,6 +124,66 @@ class CodeCCTVServer(ThreadingHTTPServer):
                     subscriber.put_nowait(message)
                 except queue.Empty:
                     pass
+
+    def assistant_cache_key(
+        self,
+        question: str,
+        history: list[dict[str, str]],
+        project: dict[str, Any],
+        stats: dict[str, Any],
+        latest_drive: dict[str, Any] | None,
+    ) -> str:
+        """Fingerprint the non-sensitive context that can change an answer."""
+        stable_stats = {key: value for key, value in stats.items() if key != "generated_at"}
+        drive_state = latest_drive if isinstance(latest_drive, dict) else {}
+        snapshot = {
+            "question": question,
+            "history": history,
+            "project": {
+                key: project.get(key)
+                for key in ("workspace", "name", "kind", "status", "base_commit", "last_seen")
+            },
+            "stats": stable_stats,
+            "drive": {
+                key: drive_state.get(key)
+                for key in ("run_id", "status", "started_at", "finished_at", "duration_s")
+            },
+        }
+        encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    def get_cached_assistant_reply(self, key: str) -> dict[str, Any] | None:
+        now = time.monotonic()
+        with self.assistant_cache_lock:
+            entry = self.assistant_cache.get(key)
+            if entry is None:
+                return None
+            expires_at, reply = entry
+            if expires_at <= now:
+                self.assistant_cache.pop(key, None)
+                return None
+            return dict(reply)
+
+    def cache_assistant_reply(self, key: str, reply: dict[str, Any]) -> None:
+        if reply.get("status") not in ("ok", "unavailable"):
+            return
+        with self.assistant_cache_lock:
+            if len(self.assistant_cache) >= ASSISTANT_CACHE_MAX_ENTRIES:
+                expired = [
+                    cache_key
+                    for cache_key, (expires_at, _reply) in self.assistant_cache.items()
+                    if expires_at <= time.monotonic()
+                ]
+                for cache_key in expired:
+                    self.assistant_cache.pop(cache_key, None)
+                if len(self.assistant_cache) >= ASSISTANT_CACHE_MAX_ENTRIES:
+                    oldest = next(iter(self.assistant_cache), None)
+                    if oldest is not None:
+                        self.assistant_cache.pop(oldest, None)
+            self.assistant_cache[key] = (
+                time.monotonic() + ASSISTANT_CACHE_TTL_S,
+                dict(reply),
+            )
 
 
 class CodeCCTVHandler(BaseHTTPRequestHandler):
@@ -301,6 +373,12 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         if route == "/api/projects/discover":
             self.projects_discover()
             return
+        if route.startswith("/api/projects/") and route.endswith("/reviews"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/reviews")])
+            self.get_project_reviews(workspace)
+            return
         if route.startswith("/api/projects/") and route.endswith("/drive"):
             from urllib.parse import unquote
 
@@ -431,14 +509,17 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "project": project}, HTTPStatus.CREATED)
             return
 
-        # ── Project drive: start a full automated diagnosis + LLM summary ──
+        # ── Project Review Run (legacy /drive name): start read-only review ─
         if route.startswith("/api/projects/") and route.endswith("/drive"):
             if not self.require_service_auth():
                 return
             from urllib.parse import unquote
 
             workspace = unquote(route[len("/api/projects/"):-len("/drive")])
-            self.start_project_drive(workspace)
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            self.start_project_drive(workspace, payload)
             return
 
         # ── Read-only project assistant ───────────────────────────────────
@@ -575,10 +656,21 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "question must be at most 1000 characters"},
                            HTTPStatus.BAD_REQUEST)
             return
+        history = normalize_project_assistant_history(payload.get("history"))
         stats = self.server.store.project_summary(workspace=project["workspace"])
         latest_drive = self.server.store.get_latest_drive_run(project["workspace"])
+        cache_key = self.server.assistant_cache_key(
+            question.strip(), history, project, stats, latest_drive,
+        )
+        assistant = self.server.get_cached_assistant_reply(cache_key)
+        cache_hit = assistant is not None
         try:
-            assistant = self.server.llm_chat_fn(question.strip(), project, stats, latest_drive)
+            if assistant is None:
+                assistant = self.server.llm_chat_fn(
+                    question.strip(), project, stats, latest_drive, history,
+                )
+                if isinstance(assistant, dict):
+                    self.server.cache_assistant_reply(cache_key, assistant)
         except Exception:
             self.send_json({"error": "project assistant unavailable"},
                            HTTPStatus.SERVICE_UNAVAILABLE)
@@ -587,7 +679,11 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "project assistant returned invalid response"},
                            HTTPStatus.SERVICE_UNAVAILABLE)
             return
-        self.send_json({"ok": assistant.get("status") == "ok", "assistant": assistant})
+        self.send_json({
+            "ok": assistant.get("status") == "ok",
+            "assistant": assistant,
+            "cached": cache_hit,
+        })
 
     def project_summary(self) -> None:
         """GET /api/project/summary — deterministic aggregates + optional LLM
@@ -629,12 +725,13 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         projects = self.server.store.list_monitored_projects()
         self.send_json({"ok": True, "projects": projects, "count": len(projects)})
 
-    def start_project_drive(self, workspace: str) -> None:
-        """POST /api/projects/{workspace}/drive — spawn a full automated drive.
+    def start_project_drive(self, workspace: str, payload: dict[str, Any] | None = None) -> None:
+        """POST /api/projects/{workspace}/drive — spawn a project Review Run.
 
         Returns 202 with the running run; 409 if one is already running.
         """
         from pathlib import Path
+        from .drive import normalize_review_scope, review_task_specs
 
         if not workspace or not Path(workspace).is_dir():
             self.send_json({"error": f"workspace is not a directory: {workspace}"},
@@ -648,25 +745,39 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
 
         import threading
 
-        run_id = self.server.store.begin_drive_run(workspace)
+        review_scope = normalize_review_scope((payload or {}).get("scope"))
+        run_id = self.server.store.begin_review_run(workspace, review_scope, review_task_specs())
         publish = self.server.publish
 
         def _drive_work() -> None:
             from .drive import run_drive
 
-            runner = self.server.drive_runner or run_drive
-            runner(self.server.store, workspace, run_id=run_id, publish=publish)
+            if self.server.drive_runner is None:
+                case_intake = (
+                    self.server.orchestrator.on_source_received
+                    if self.server.orchestrator is not None
+                    else self.server.store.create_or_find_case
+                )
+                run_drive(
+                    self.server.store, workspace, run_id=run_id, publish=publish,
+                    case_intake=case_intake, harness=self.server.harness, scope=review_scope,
+                )
+            else:
+                # Keep the small injection contract used by offline HTTP tests
+                # and custom runners; only the built-in driver owns promotion.
+                self.server.drive_runner(
+                    self.server.store, workspace, run_id=run_id, publish=publish,
+                )
 
         thread = threading.Thread(target=_drive_work, daemon=True)
         thread.start()
         self.send_json({
             "ok": True,
-            "run": {"run_id": run_id, "workspace": workspace, "status": "running",
-                    "started_at": None},
+            "run": self.server.store.get_review_run(run_id),
         }, HTTPStatus.ACCEPTED)
 
     def get_project_drive(self, workspace: str) -> None:
-        """GET /api/projects/{workspace}/drive — latest drive run for a project."""
+        """GET /api/projects/{workspace}/drive — latest Review Run (compat)."""
         if not workspace:
             self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
             return
@@ -675,6 +786,14 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "no drive run yet"}, HTTPStatus.NOT_FOUND)
             return
         self.send_json({"ok": True, "run": run})
+
+    def get_project_reviews(self, workspace: str) -> None:
+        """GET /api/projects/{workspace}/reviews — recent project Review Runs."""
+        if not workspace:
+            self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+            return
+        runs = self.server.store.list_review_runs(workspace)
+        self.send_json({"ok": True, "runs": runs, "count": len(runs)})
 
     def get_case(self, case_id: str) -> None:
         case = self.server.store.get_case(case_id)

@@ -13,12 +13,16 @@ import tempfile
 import threading
 import unittest
 import urllib.error
+from unittest import mock
 from pathlib import Path
 from urllib.request import Request, urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from daemon.drive import browse_project, detect_test_command, run_test_probe, scan_static
+from agent_runtime.harness import DevLoopHarness
+from agent_runtime.orchestrator import Orchestrator
+from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
+from daemon.drive import browse_project, detect_test_command, run_drive, run_test_probe, scan_static
 from daemon.llm_summary import build_drive_prompt, generate_drive_summary
 from daemon.server import CodeCCTVServer
 from daemon.store import StateStore
@@ -53,6 +57,13 @@ class BrowseProjectTests(unittest.TestCase):
             self.assertTrue(b["git"]["head"])
             self.assertIn("README.md", b["markers"])
 
+    def test_browse_can_skip_git_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = _make_repo(Path(directory))
+            b = browse_project(str(repo), include_git=False)
+            self.assertTrue(b["git"]["skipped"])
+            self.assertFalse(b["git"]["is_git"])
+
     def test_browse_non_git_dir(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             b = browse_project(directory)
@@ -75,6 +86,27 @@ class BrowseProjectTests(unittest.TestCase):
             cmd = detect_test_command(d)
             self.assertTrue(cmd["detected"])
             self.assertEqual(cmd["kind"], "npm")
+
+    def test_detect_test_command_from_tests_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            (d / "tests").mkdir()
+            (d / "tests" / "test_sample.py").write_text("def test_ok(): pass\n", encoding="utf-8")
+            cmd = detect_test_command(d)
+            self.assertTrue(cmd["detected"])
+            self.assertEqual(cmd["kind"], "pytest")
+            self.assertEqual(cmd["detail"], "tests 目录")
+            self.assertTrue(cmd["command"].startswith(sys.executable))
+
+    def test_detect_test_command_unittest_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            d = Path(directory)
+            (d / "tests").mkdir()
+            (d / "tests" / "test_sample.py").write_text(
+                "import unittest\n\nclass Sample(unittest.TestCase): pass\n", encoding="utf-8")
+            cmd = detect_test_command(d)
+            self.assertEqual(cmd["kind"], "unittest")
+            self.assertIn("-m unittest discover -s tests", cmd["command"])
 
     def test_detect_none(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -111,6 +143,16 @@ class TestProbeTests(unittest.TestCase):
     def test_probe_not_detected(self) -> None:
         r = run_test_probe("/tmp", {"detected": False}, timeout=1)
         self.assertFalse(r["ran"])
+
+    @mock.patch("daemon.drive.importlib.util.find_spec", return_value=None)
+    def test_probe_missing_pytest_is_an_environment_observation(self, _find_spec) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            r = run_test_probe(directory, {
+                "detected": True, "kind": "pytest", "command": "python -m pytest -q",
+            }, timeout=1)
+            self.assertFalse(r["ran"])
+            self.assertTrue(r["execution_error"])
+            self.assertTrue(r["runner_unavailable"])
 
 
 class StaticScanTests(unittest.TestCase):
@@ -177,6 +219,166 @@ class DriveRunStoreTests(unittest.TestCase):
             self.assertEqual(r["llm"]["summary"]["overall_status"], "x")
             store.close()
 
+    @staticmethod
+    def _browse_with_test(workspace: str) -> dict:
+        return {
+            "workspace": workspace,
+            "file_count": 1,
+            "language_stats": {"py": 1},
+            "symbol_total": 1,
+            "git": {"is_git": True, "branch": "main", "remote": "", "head": "abc", "dirty_count": 0, "recent_commits": []},
+            "test": {"detected": True, "kind": "pytest", "command": "python -m pytest -q", "detail": "pytest 配置"},
+            "static_scan": {"todo_count": 0, "fixme_count": 0, "error_handling_gaps": [], "scanned_files": 0},
+        }
+
+    @staticmethod
+    def _static_scan(_: str) -> dict:
+        return {"todo_count": 1, "fixme_count": 0, "error_handling_gaps": [{"file": "x.py", "line": 1}], "scanned_files": 1}
+
+    def test_failed_test_is_promoted_and_dispatched_through_harness(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = _make_repo(Path(directory))
+            store = StateStore(Path(directory) / "state.sqlite3")
+            orchestrator = Orchestrator(store, DevLoopHarness(AgentScopeExecutionAdapter(store)))
+            result = run_drive(
+                store, str(repo),
+                browse_fn=self._browse_with_test,
+                test_fn=lambda *_: {"detected": True, "ran": True, "timed_out": False, "passed": False, "exit_code": 2, "output_summary": "1 failed"},
+                scan_fn=self._static_scan,
+                llm_fn=lambda *_: {"status": "unavailable"},
+                case_intake=orchestrator.on_source_received,
+            )
+
+            promotion = result["browse"]["case_promotion"]
+            self.assertEqual(promotion["status"], "linked")
+            case = store.get_case(promotion["case_id"])
+            self.assertIsNotNone(case)
+            self.assertEqual(case["status"], "PLAN_APPROVAL")
+            evidence = store.get_case_evidence(promotion["case_id"])
+            self.assertEqual(evidence["sources"][0]["source_type"], "self_test")
+            signals = json.loads(evidence["sources"][0]["extracted_signals_json"])
+            self.assertEqual(signals["exception_type"], "SelfTestFailure")
+            self.assertNotIn("1 failed", json.dumps(signals, ensure_ascii=False))
+            runs = [json.loads(run["output_ref"]) for run in evidence["agent_runs"]]
+            self.assertEqual([run["harness_agent_id"] for run in runs], ["triage", "diagnosis"])
+
+            repeated = run_drive(
+                store, str(repo),
+                browse_fn=self._browse_with_test,
+                test_fn=lambda *_: {"detected": True, "ran": True, "timed_out": False, "passed": False, "exit_code": 2, "output_summary": "1 failed"},
+                scan_fn=self._static_scan,
+                llm_fn=lambda *_: {"status": "unavailable"},
+                case_intake=orchestrator.on_source_received,
+            )
+            self.assertEqual(repeated["browse"]["case_promotion"]["case_id"], promotion["case_id"])
+            self.assertEqual(store.project_summary(workspace=str(repo))["totals"]["cases"], 1)
+            self.assertEqual(len(store.get_case_evidence(promotion["case_id"])["sources"]), 2)
+            store.close()
+
+    def test_timeout_is_promoted_but_pass_and_launch_errors_are_observations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = _make_repo(Path(directory))
+            store = StateStore(Path(directory) / "state.sqlite3")
+            orchestrator = Orchestrator(store, DevLoopHarness(AgentScopeExecutionAdapter(store)))
+            common = {
+                "browse_fn": self._browse_with_test,
+                "scan_fn": self._static_scan,
+                "llm_fn": lambda *_: {"status": "unavailable"},
+                "case_intake": orchestrator.on_source_received,
+            }
+            timeout = run_drive(
+                store, str(repo),
+                test_fn=lambda *_: {"detected": True, "ran": True, "timed_out": True, "passed": False, "exit_code": None},
+                **common,
+            )
+            self.assertEqual(timeout["browse"]["case_promotion"]["outcome"], "timeout")
+            self.assertEqual(store.project_summary(workspace=str(repo))["totals"]["cases"], 1)
+
+            for probe in (
+                {"detected": True, "ran": True, "timed_out": False, "passed": True, "exit_code": 0},
+                {"detected": True, "ran": True, "timed_out": False, "passed": False, "execution_error": True, "exit_code": None},
+            ):
+                result = run_drive(store, str(repo), test_fn=lambda *_args, value=probe: value, **common)
+                self.assertFalse(result["browse"]["case_promotion"]["triggered"])
+            self.assertEqual(store.project_summary(workspace=str(repo))["totals"]["cases"], 1)
+            store.close()
+
+    def test_review_run_persists_harness_owned_project_agent_and_parallel_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = _make_repo(Path(directory))
+            store = StateStore(Path(directory) / "state.sqlite3")
+            harness = DevLoopHarness(AgentScopeExecutionAdapter(store))
+            result = run_drive(
+                store, str(repo),
+                browse_fn=self._browse_with_test,
+                test_fn=lambda *_: {"detected": True, "ran": True, "timed_out": False,
+                                    "passed": True, "exit_code": 0},
+                scan_fn=self._static_scan,
+                llm_fn=lambda *_: {"status": "unavailable"},
+                harness=harness,
+                scope={"mode": "full", "components": {"tests": True, "static": True}},
+            )
+
+            review = store.get_review_run(result["run_id"])
+            self.assertIsNotNone(review)
+            self.assertEqual(review["status"], "complete")
+            self.assertEqual([task["task_key"] for task in review["tasks"]], [
+                "prepare", "project_review", "test_probe", "static_scan", "summary", "case_handling",
+            ])
+            tasks = {task["task_key"]: task for task in review["tasks"]}
+            self.assertTrue(all(task["status"] == "complete" for task in tasks.values()))
+            agent_output = tasks["project_review"]["output"]
+            self.assertEqual(agent_output["harness_id"], harness.harness_id)
+            self.assertEqual(agent_output["harness_agent_id"], "project_review")
+            self.assertEqual(agent_output["runtime_kind"], "local_deterministic_review_agent")
+            self.assertTrue(agent_output["read_only"])
+            self.assertEqual(review["linked_case_ids"], [])
+            self.assertNotIn("repair", [task.get("agent_id") for task in review["tasks"]])
+            self.assertNotIn("verification", [task.get("agent_id") for task in review["tasks"]])
+            store.close()
+
+    def test_review_scope_skips_disabled_checks_without_creating_case(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = _make_repo(Path(directory))
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = run_drive(
+                store, str(repo),
+                browse_fn=self._browse_with_test,
+                test_fn=lambda *_: self.fail("disabled test probe should not run"),
+                scan_fn=lambda *_: self.fail("disabled static scan should not run"),
+                llm_fn=lambda *_: {"status": "unavailable"},
+                scope={"mode": "fast", "components": {"tests": False, "static": False, "git": False}},
+            )
+            review = store.get_review_run(result["run_id"])
+            tasks = {task["task_key"]: task for task in review["tasks"]}
+            self.assertEqual(tasks["test_probe"]["status"], "skipped")
+            self.assertEqual(tasks["static_scan"]["status"], "skipped")
+            self.assertFalse(result["browse"]["case_promotion"]["triggered"])
+            self.assertEqual(review["scope"]["mode"], "fast")
+            store.close()
+
+    def test_parallel_scan_exception_is_persisted_without_stalling_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = _make_repo(Path(directory))
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = run_drive(
+                store, str(repo),
+                browse_fn=self._browse_with_test,
+                test_fn=lambda *_: {"detected": True, "ran": True, "timed_out": False,
+                                    "passed": True, "exit_code": 0},
+                scan_fn=lambda *_: (_ for _ in ()).throw(RuntimeError("scan failed")),
+                llm_fn=lambda *_: {"status": "unavailable"},
+            )
+            review = store.get_review_run(result["run_id"])
+            tasks = {task["task_key"]: task for task in review["tasks"]}
+            self.assertEqual(review["status"], "complete")
+            self.assertEqual(tasks["test_probe"]["status"], "complete")
+            self.assertEqual(tasks["static_scan"]["status"], "error")
+            self.assertIn("RuntimeError", tasks["static_scan"]["failure_reason"])
+            self.assertEqual(tasks["summary"]["status"], "complete")
+            self.assertFalse(result["browse"]["case_promotion"]["triggered"])
+            store.close()
+
 
 class DriveEndpointTests(unittest.TestCase):
     def _start_server(self, store, runner=None):
@@ -232,6 +434,27 @@ class DriveEndpointTests(unittest.TestCase):
                     body = json.loads(resp.read())
                 self.assertTrue(body["ok"])
                 self.assertEqual(body["run"]["status"], "complete")
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_get_review_history_returns_first_class_review_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            run_id = store.begin_review_run(directory, {"mode": "full"}, [{
+                "task_key": "prepare", "title": "准备", "stage": "prepare", "order": 1,
+            }])
+            store.finish_review_run(run_id, "complete", 0.1, {"file_count": 1}, None, [], None)
+            server, base, token = self._start_server(store)
+            try:
+                req = Request(
+                    f"{base}/api/projects/{directory.replace('/', '%2F')}/reviews",
+                    headers={"X-Code-CCTV-Token": token},
+                )
+                with urlopen(req, timeout=3) as resp:
+                    body = json.loads(resp.read())
+                self.assertTrue(body["ok"])
+                self.assertEqual(body["count"], 1)
+                self.assertEqual(body["runs"][0]["run_id"], run_id)
             finally:
                 server.shutdown(); server.server_close(); store.close()
 

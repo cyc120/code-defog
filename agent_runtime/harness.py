@@ -21,6 +21,14 @@ class AgentExecutionAdapter(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class ProjectReviewExecutionAdapter(Protocol):
+    """Optional read-only execution port for project Review Runs."""
+
+    def dispatch_review_task(
+        self, review_run_id: str, task_key: str, context: dict[str, Any],
+    ) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class HarnessTask:
     """One explicit business-Agent task in the Case workflow."""
@@ -70,6 +78,38 @@ AGENT_TASKS: tuple[HarnessTask, ...] = (
 TASK_BY_STATE = {task.state: task for task in AGENT_TASKS}
 
 
+@dataclass(frozen=True)
+class ProjectReviewTask:
+    """An Agent-owned task that belongs to a project review, never a Case."""
+
+    task_key: str
+    agent_id: str
+    title: str
+    order: int
+    boundary: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "task_key": self.task_key,
+            "agent_id": self.agent_id,
+            "title": self.title,
+            "order": self.order,
+            "boundary": self.boundary,
+        }
+
+
+PROJECT_REVIEW_TASKS: tuple[ProjectReviewTask, ...] = (
+    ProjectReviewTask(
+        task_key="project_review",
+        agent_id="project_review",
+        title="项目结构审查",
+        order=2,
+        boundary="只读分析项目结构和已收集元数据；不执行命令、不改代码、不创建审批。",
+    ),
+)
+PROJECT_REVIEW_TASK_BY_KEY = {task.task_key: task for task in PROJECT_REVIEW_TASKS}
+
+
 class DevLoopHarness:
     """Coordinate every business-Agent task through one local control point.
 
@@ -92,6 +132,8 @@ class DevLoopHarness:
             "execution_mode": getattr(self.executor, "mode", "custom"),
             "agent_count": len(AGENT_TASKS),
             "tasks": [task.to_dict() for task in AGENT_TASKS],
+            "review_agent_count": len(PROJECT_REVIEW_TASKS),
+            "review_tasks": [task.to_dict() for task in PROJECT_REVIEW_TASKS],
             "approval_boundary": (
                 "审批状态不进入 Harness；Harness 不持有 service token、"
                 "审批密钥或 approval token。"
@@ -147,4 +189,55 @@ class DevLoopHarness:
             }
         # Dispatch metadata originates at the Harness and cannot be supplied
         # by an Agent result.
+        return {**result, **dispatch_metadata}
+
+    def dispatch_review(
+        self, review_run_id: str, task_key: str, context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Dispatch the read-only Project Review Agent through the Harness.
+
+        This intentionally has no ``state`` argument and cannot select any
+        Case Agent.  Repair and Verification remain reachable only through the
+        existing Case lifecycle and its approval boundaries.
+        """
+        task = PROJECT_REVIEW_TASK_BY_KEY.get(task_key)
+        if task is None:
+            return {
+                "status": "failed",
+                "failure_reason": f"harness has no project-review task: {task_key}",
+            }
+        if not isinstance(context, dict):
+            return {"status": "failed", "failure_reason": "review context must be an object"}
+        if context.get("review_run_id") and context["review_run_id"] != review_run_id:
+            return {
+                "status": "failed",
+                "failure_reason": "review context review_run_id does not match dispatch review_run_id",
+            }
+        dispatch = getattr(self.executor, "dispatch_review_task", None)
+        if not callable(dispatch):
+            return {
+                "status": "failed",
+                "failure_reason": "harness executor does not support project-review tasks",
+            }
+        dispatch_metadata = {
+            "harness_id": self.harness_id,
+            "harness_task_id": f"hrtask-{uuid.uuid4().hex[:12]}",
+            "harness_task_kind": "project_review",
+            "harness_task_key": task.task_key,
+            "harness_agent_id": task.agent_id,
+        }
+        try:
+            result = dispatch(review_run_id, task_key, {**context, **dispatch_metadata})
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "failure_reason": f"harness review executor exception: {exc}",
+                **dispatch_metadata,
+            }
+        if not isinstance(result, dict):
+            return {
+                "status": "failed",
+                "failure_reason": "harness review executor returned a non-object result",
+                **dispatch_metadata,
+            }
         return {**result, **dispatch_metadata}

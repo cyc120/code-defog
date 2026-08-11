@@ -8,8 +8,6 @@ venv/
 AI_WORKLOG.md
 build/
 dist/
-# Generated local runtime evidence is never source material. Keep only the
-# package marker so imports continue to work.
-/evidence/*
-!/evidence/__init__.py
+# Generated local runtime evidence is never source material.
+/evidence/
 docs/_shots/

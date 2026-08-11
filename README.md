@@ -11,9 +11,9 @@
 - 管理界面已收敛为 `web/` 下的本地 Web 控制台，原 macOS SwiftUI、Windows PySide6 和旧静态看板已移除。
 - 本地服务提供 Case API、SQLite 留存、SSE 更新、Web 控制台和本机服务发现。
 - **企业级项目监控**：自动检索本机 git 仓库与运行中进程工作目录，选择要监控的项目，持续跟踪文件变化与 git 提交。
-- **项目优先导航**：左侧边栏展示监控项目列表，视图（总览 / Case 审计 / 监控项目）按当前选中项目隔离。
-- **自动化驱动**：对选中项目一键启动全量诊断（浏览文件树 / git / 测试探测 / 静态扫描），由 DeepSeek 生成中文总结，**即使无 Case 或错误也输出项目结论**，前端展示运行状态与计时。
-- **Harness 统筹**：`DevLoopHarness` 是所有业务 Agent 的唯一派发入口，集中维护分诊、诊断、修复、验证四个显式任务及其交接顺序，并将 Harness 任务标记写入每次 Agent 运行记录。
+- **项目优先导航**：左侧边栏展示监控项目列表，视图（项目审查 / Case 审计 / 监控项目）按当前选中项目隔离。
+- **全项目 Review Run**：首屏可选择完整/快速范围和检查项，启动只读的项目结构审查、测试探测、静态扫描、总结与 Case 处理。每一步都持久化为可刷新、可通过 SSE 观察的任务记录。
+- **Harness 统筹**：`DevLoopHarness` 维护 Case 的分诊、诊断、修复、验证任务图；另有独立的只读 Project Review Agent。全项目审查不会直接启动 Repair 或 Verification。
 - 默认运行的是进程内 Mock 工作流；`--runtime-mode agentscope` 是 AgentScope + DeepSeek 的本地实验路径，`production` 仅保留为其旧别名，不是 AgentTeams 的真实接入。
 - **真实 AgentTeams 尚未配置、部署或验证。** 当前没有可作为 AgentTeams Team/Task/Handoff/Trace 的竞赛运行证据；本地生成的 UUID 和 AgentScope 事件不能这样表述。
 
@@ -67,13 +67,13 @@ python3 -m daemon.dashboard --open
 
 ## Web 控制台
 
-`web/index.html` 是唯一的管理界面来源，采用**项目优先导航**：左侧边栏固定展示品牌、监控项目列表（点击切换当前项目）和视图导航（总览 / Case 审计 / 监控项目），顶部栏显示当前项目与运行时状态。
+`web/index.html` 是唯一的管理界面来源，采用**项目优先导航**：左侧边栏固定展示品牌、监控项目列表（点击切换当前项目）和视图导航（项目审查 / Case 审计 / 监控项目），顶部栏显示当前项目与运行时状态。
 
 - **项目选择窗口**：自动检索本机 git 仓库与运行中进程工作目录，勾选要监控的项目；支持手动添加路径。
-- **总览视图**：当前项目的聚合统计（状态分布 / Agent 分工 / 活动趋势 / 工具 / 审批），加上 LLM 信息金字塔总结与「启动自动化驱动」按钮。
+- **项目审查视图**：首屏为自助化驱动。范围使用完整/快速分段控件，检查项可分别启用测试、静态风险和 Git；随后显示 Harness 运行模式、阶段任务图、确定性发现、关联 Case 和审查历史。聚合统计与 LLM 信息金字塔下移到结果之后。
 - **Case 审计**：Case 队列、详情与来源、Agent 运行、工具、审批、制品、知识与复盘证据页签。
 - **Harness 调度**：从只读 `/api/harness` 清单展示当前任务图、各 Agent 边界和实际运行记录；审批状态不会被派发给 Agent。
-- **项目助手**：顶栏打开当前项目的只读问答抽屉，可询问进度、风险和下一步；对话只保留在浏览器内存，切换项目或刷新页面即清空。
+- **项目助手**：顶栏打开当前项目的只读问答抽屉，可询问进度、风险和下一步；每次请求仅携带最近 6 条浏览器内存对话以保持上下文，不落库，切换项目或刷新页面即清空。重复请求在同一项目状态下短时复用结果，生成中可随时停止。
 - **监控项目**：已监控项目列表、运行状态与停止监控。
 - SSE 自动刷新、主题切换、人工审批密钥输入。
 
@@ -104,6 +104,7 @@ flowchart LR
 | Diagnosis Impact | 形成根因与影响范围建议 | 不写工作树、不发布 |
 | Repair | 在受控流程中生成补丁建议 | 不写主分支、不部署 |
 | Verification Release | 执行质量门禁并形成建议 | 不忽略失败门禁、不批准发布 |
+| Project Review | 归纳已收集的项目结构元数据 | 只读；不创建审批、不推进 Case、不执行修复 |
 
 Case 状态机：
 
@@ -122,16 +123,17 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 
 对选中的本机项目，服务会持续跟踪文件变化（复用 `watch_worklog` 快照/差异引擎）与 git 提交增量，将事件写入本地 SQLite 并显示在总览的活动趋势中。监控是**只读**的，从不修改项目本身。
 
-### 自动化驱动
+### 全项目 Review Run
 
-总览视图的「启动自动化驱动」按钮对当前项目执行一次完整诊断（在后台线程进行，前端显示运行状态与计时）：
+项目审查视图的「开始全项目审查」会创建独立的 `Review Run`（在后台线程进行），而不是伪造一个 Case。运行会持久化下列任务并通过 SSE 推送状态：
 
-1. **浏览项目**：文件树、语言分布、规模、git 状态（remote / 分支 / HEAD / 未提交变更 / 近期提交）、关键文件与符号。
-2. **测试探测**：安全检测并运行项目自身测试命令（pytest / npm test / make test / go test），带硬超时。
-3. **静态扫描**：统计 TODO / FIXME 标记，定位错误处理缺口（Python `bare except`、JS 空 `catch`）。
-4. **LLM 总结**：将浏览结果与确定性统计交给 DeepSeek，生成中文信息金字塔总结——**即使 0 个 Case、无测试失败也输出项目结论**。
+1. **准备上下文与项目结构审查**：收集文件树、语言分布、规模、关键符号，以及按范围选择的 Git 元数据；Project Review Agent 只归纳这些已收集的只读信息。
+2. **测试探测与静态扫描**：两个确定性任务并行执行。Python 的 `tests/` 目录会根据测试源码选择 `unittest discover` 或 pytest；调用使用守护进程自身的解释器并带硬超时。快速模式把测试超时限制为 20 秒，并缩小静态扫描文件/行数预算。
+3. **总结与 Case 处理**：将确定性结果交给可选 LLM 总结；只有已实际执行的测试超时或非零退出才创建/合并 Case，然后进入既有 Triage -> Diagnosis 流程。
 
-结果以「项目浏览报告」（确定性 KPI）+「LLM 信息金字塔」双面板展示。驱动不改变项目文件。
+单个审查任务可以是 `error`，但 Review Run 仍会完成其余独立任务、总结和 Case 判定；页面不会把部分失败显示为全绿。项目审查、测试和静态扫描均不改变项目文件。
+
+自动升级 Case 的触发条件严格限定为：已检测并实际执行的测试**超时**，或测试进程以**非零退出码**结束。静态扫描的 TODO/FIXME、错误处理提示、文件变更、git 提交、未检测到测试，以及测试命令无法启动，都只保留为观测信息，避免以噪声自动创建 Case。升级后由既有 `Orchestrator -> DevLoopHarness -> Triage` 链路处理；同一开放事故会按现有指纹归并。
 
 ### 项目 API
 
@@ -142,11 +144,12 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 | `GET` | `/api/harness` | `service_token` | 本地 Harness 任务图与 Agent 边界（只读） |
 | `POST` | `/api/projects` | `service_token` | 注册一个项目开始监控 |
 | `DELETE` | `/api/projects/{workspace}` | `service_token` | 停止监控并移除 |
-| `POST` | `/api/projects/{workspace}/drive` | `service_token` | 启动自动化驱动（202；已在运行则 409） |
-| `GET` | `/api/projects/{workspace}/drive` | `service_token` | 最近一次驱动运行结果 |
-| `POST` | `/api/projects/{workspace}/assistant` | `service_token` | 基于该已监控项目的聚合统计与最新浏览报告进行只读问答 |
+| `POST` | `/api/projects/{workspace}/drive` | `service_token` | 启动全项目 Review Run（202；已在运行则 409；路径名为兼容保留） |
+| `GET` | `/api/projects/{workspace}/drive` | `service_token` | 最近一次 Review Run（兼容路径） |
+| `GET` | `/api/projects/{workspace}/reviews` | `service_token` | 最近的 Review Run 及任务历史 |
+| `POST` | `/api/projects/{workspace}/assistant` | `service_token` | 基于该已监控项目的聚合统计、最新浏览报告和有界浏览器内存上下文进行只读问答 |
 
-项目助手不具备审批、调度、命令执行、代码修改或发布权限。它只接收经过裁剪的项目监控记录、Case 聚合统计和最新项目浏览报告；不会发送 git remote、令牌、源码、完整测试输出或原始聊天内容。未配置 `DEEPSEEK_API_KEY` 时，接口会明确返回不可用状态，不会伪造回答。
+项目助手不具备审批、调度、命令执行、代码修改或发布权限。它只接收经过裁剪的项目监控记录、Case 聚合统计、最新项目浏览报告和最近 6 条经服务端裁剪的浏览器内存消息；不会发送 git remote、令牌、源码、完整测试输出或完整聊天记录。未配置 `DEEPSEEK_API_KEY` 时，接口会明确返回不可用状态，不会伪造回答。
 
 ## Case API 与审批
 
@@ -180,7 +183,6 @@ Web 审批流程为：人工输入审批密钥，服务端验证服务令牌和�
 
 在真实接入完成前：
 
-- 不将 `agent_runtime/smoke_test.py` 的本地 UUID 当作 AgentTeams Team、Task 或 Trace 证据。
 - 不将 AgentScope 的 Agent、模型调用事件或 `--runtime-mode agentscope`（以及旧别名 `production`）称为已部署 AgentTeams。
 - 不将 `evidence/*.json` 作为已验证的赛事运行凭据提交；这些都是本地生成物，已被忽略规则排除。
 
@@ -202,20 +204,19 @@ code-cctv-general/
 │   ├── server.py            # Case / 项目 / 驱动路由、双因子审批与 SSE
 │   ├── serve.py             # 本机服务入口
 │   ├── dashboard.py         # 本机服务发现入口
-│   ├── store.py             # Case、监控项目与驱动运行存储
+│   ├── store.py             # Case、监控项目、Review Run 与任务存储
 │   ├── project_discovery.py # 本机 git 仓库 + 进程工作目录自动发现
 │   ├── project_monitor.py   # 每项目监控线程（文件变化 + git 提交）
-│   ├── drive.py             # 自动化驱动（浏览 + 测试 + 静态扫描）
+│   ├── drive.py             # Review Run（浏览 + Agent + 测试 + 静态扫描）
 │   ├── repo_identity.py     # 仓库身份规范化与 base_commit 解析
 │   └── llm_summary.py       # DeepSeek 项目总结、驱动与只读助手 prompt
 ├── web/                     # 唯一 Web 管理界面（项目优先导航）
-├── agent_runtime/           # 状态机、DevLoop Harness 和 AgentScope 实验适配
-├── agents/                  # 分诊、诊断、修复、验证角色
+├── agent_runtime/           # 状态机、Case/Review Context、Harness 和 AgentScope 实验适配
+├── agents/                  # 分诊、诊断、修复、验证与只读项目审查角色
 ├── connectors/              # 外部输入规范化
 ├── tools/                   # 受控工具接口
 ├── retrospective/           # 异步复盘
 ├── demo_target/             # 隔离故障演练仓库
-├── evidence/__init__.py     # 包标记；运行时导出不入库
 ├── tests/                   # 单元与 HTTP 集成测试
 └── docs/                    # 赛题与设计材料
 ```
@@ -224,7 +225,7 @@ code-cctv-general/
 
 - 服务只监听 `127.0.0.1`。
 - SQLite 保存结构化状态和证据索引；运行时 JSON 证据、工件与本地数据库不提交到仓库。
-- `AI_WORKLOG.md`、`evidence/` 下的生成物和本机数据目录都由 `.gitignore` 排除。
+- `AI_WORKLOG.md`、运行时 `evidence/` 导出和本机数据目录都由 `.gitignore` 排除。
 - 审批 Grant 只保存哈希，不保存明文 `approval_token`。
 
 ## 许可证

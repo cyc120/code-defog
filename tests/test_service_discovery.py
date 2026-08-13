@@ -1,4 +1,4 @@
-"""Contract tests for the tokenless local Code CCTV service registry."""
+"""Contract tests for the tokenless local Code Defog service registry."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class _HealthHandler(BaseHTTPRequestHandler):
             return
         body = json.dumps({
             "ok": True,
-            "service": "code-cctv",
+            "service": self.server.service_id,
             "instance_id": self.server.instance_id,
             "ui": self.server.ui_available,
         }).encode("utf-8")
@@ -37,10 +37,13 @@ class _HealthHandler(BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def _healthy_service(instance_id: str, *, ui_available: bool = True) -> Iterator[int]:
+def _healthy_service(
+    instance_id: str, *, ui_available: bool = True, service_id: str = "code-defog",
+) -> Iterator[int]:
     server = ThreadingHTTPServer(("127.0.0.1", 0), _HealthHandler)
     server.instance_id = instance_id
     server.ui_available = ui_available
+    server.service_id = service_id
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -61,7 +64,7 @@ def _descriptor(instance_id: str, port: int, **overrides: object) -> dict[str, o
     payload: dict[str, object] = {
         "schema_version": 1,
         "instance_id": instance_id,
-        "display_name": f"Code CCTV {instance_id}",
+        "display_name": f"Code Defog {instance_id}",
         "host": "127.0.0.1",
         "port": port,
         "pid": 4242,
@@ -91,7 +94,7 @@ class LocalServiceDiscoveryAgentTests(unittest.TestCase):
                     "source", "pid", "updated_at",
                 }.issubset(service))
                 self.assertEqual(service["id"], "alpha-01")
-                self.assertEqual(service["label"], "Code CCTV alpha-01")
+                self.assertEqual(service["label"], "Code Defog alpha-01")
                 self.assertEqual(service["host"], "127.0.0.1")
                 self.assertEqual(service["port"], port)
                 self.assertEqual(service["ui_url"], f"http://127.0.0.1:{port}/ui")
@@ -149,6 +152,18 @@ class LocalServiceDiscoveryAgentTests(unittest.TestCase):
 
                 self.assertEqual(len(services), 1)
                 self.assertEqual(services[0]["status"], "offline")
+
+    def test_registry_probe_accepts_legacy_health_identity(self) -> None:
+        """Old local daemons remain discoverable after the product rename."""
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "services"
+            with _healthy_service("legacy-01", service_id="code-cctv") as port:
+                agent = LocalServiceDiscoveryAgent(registry)
+                agent.register(_descriptor("legacy-01", port))
+                services = agent.discover()
+
+        self.assertEqual(len(services), 1)
+        self.assertEqual(services[0]["status"], "ready")
 
     def test_legacy_config_is_discoverable_without_returning_its_token(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

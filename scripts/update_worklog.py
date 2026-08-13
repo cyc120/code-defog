@@ -15,8 +15,10 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from event_client import post_event
 
 
-START = "<!-- code-cctv:start -->"
-END = "<!-- code-cctv:end -->"
+START = "<!-- code-defog:start -->"
+END = "<!-- code-defog:end -->"
+LEGACY_CODE_CCTV_START = "<!-- code-cctv:start -->"
+LEGACY_CODE_CCTV_END = "<!-- code-cctv:end -->"
 LEGACY_START = "<!-- show-your-shit:start -->"
 LEGACY_END = "<!-- show-your-shit:end -->"
 OLDER_LEGACY_START = "<!-- ai-work-monitor:start -->"
@@ -386,7 +388,12 @@ def parse_final(lines: list[str]) -> str:
         return ""
     collected: list[str] = []
     for line in lines[start + 2 :]:
-        if line.startswith(END) or line.startswith(LEGACY_END) or line.startswith(OLDER_LEGACY_END):
+        if (
+            line.startswith(END)
+            or line.startswith(LEGACY_CODE_CCTV_END)
+            or line.startswith(LEGACY_END)
+            or line.startswith(OLDER_LEGACY_END)
+        ):
             break
         collected.append(line)
     final = "\n".join(collected).strip()
@@ -494,6 +501,8 @@ def monitored_section(text: str) -> str:
 def section_markers(text: str) -> tuple[str, str] | None:
     if START in text and END in text:
         return START, END
+    if LEGACY_CODE_CCTV_START in text and LEGACY_CODE_CCTV_END in text:
+        return LEGACY_CODE_CCTV_START, LEGACY_CODE_CCTV_END
     if LEGACY_START in text and LEGACY_END in text:
         return LEGACY_START, LEGACY_END
     if OLDER_LEGACY_START in text and OLDER_LEGACY_END in text:
@@ -619,7 +628,7 @@ def render_worklog(worklog: Worklog, timestamp: str, language: str) -> str:
     labels = TEXT[language]
     risks = "\n".join(f"- {single_line(risk)}" for risk in worklog.risks) if worklog.risks else f"- {labels['none']}"
     return f"""{START}
-# Code CCTV
+# Code Defog
 
 {labels["last_updated"]}：{timestamp}
 {labels["status"]}：{single_line(worklog.status)}

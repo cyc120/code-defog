@@ -1,9 +1,9 @@
 ---
-name: code-cctv
-description: Code CCTV 定位你的ai编程。Maintain a Chinese-first live Markdown monitor for AI-assisted programming work, with information-pyramid summaries, Mermaid module diagrams, function locations, code-section explanations, and beginner verification checks. Use when the user asks for automated updates, says update my md, wants every interaction or code output recorded, needs code modules visualized, wants important information shown first, or needs progress through messy legacy code exposed. Use when the user wants to understand what Codex is doing, asks for a Chinese template, real-time visibility, progress monitoring, function locations, code-section explanations, beginner-friendly verification steps, an AI worklog, a flowchart, a decision log, a summary of coding work, or explicitly asks to use $code-cctv while implementing, debugging, reviewing, testing, refactoring, or planning code changes.
+name: code-defog
+description: Code Defog makes AI-assisted programming observable. Maintain a Chinese-first live Markdown monitor with information-pyramid summaries, Mermaid module diagrams, function locations, code-section explanations, and beginner verification checks. Use when the user asks for automated updates, a worklog, progress monitoring, code visualization, code explanations, or explicitly asks to use $code-defog while implementing, debugging, reviewing, testing, refactoring, or planning code changes.
 ---
 
-# Code CCTV
+# Code Defog
 
 Use this skill to make programming work observable. Keep a Markdown file named `AI_WORKLOG.md` in the current workspace root unless the user names another file. Prefer the Chinese template by default.
 
@@ -40,7 +40,7 @@ Do not wait for a final summary to update the monitor. The point of this skill i
 Use these Chinese sections in this order:
 
 ````markdown
-# Code CCTV
+# Code Defog
 
 最后更新：YYYY-MM-DD HH:MM:SS CST
 状态：侦察中 | 制定方案 | 修改中 | 验证中 | 阻塞 | 完成
@@ -177,7 +177,7 @@ The watcher records file creation, modification, and deletion into `AI_WORKLOG.m
 
 ## Local service mode
 
-When the macOS Code CCTV service is installed, `scripts/update_worklog.py` also sends a best-effort structured summary event to the local service. The event contains the workspace, phase, status, focus, short note, evidence, and touched file paths; it does not contain raw chat transcripts.
+When the macOS Code Defog service is installed, `scripts/update_worklog.py` also sends a best-effort structured summary event to the local service. The event contains the workspace, phase, status, focus, short note, evidence, and touched file paths; it does not contain raw chat transcripts.
 
 The service is optional. If it is unavailable, the Markdown update must still succeed. Do not describe the service as a universal background chat monitor: file changes are automatic, while user interaction, tool output, code output, validation, blockers, and decisions are reported by Codex following this skill.
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
-from daemon.server import CodeCCTVServer
+from daemon.server import CodeCCTVServer, CodeDefogServer
 from daemon.store import StateStore
 
 
@@ -310,11 +310,14 @@ class StateStoreTests(unittest.TestCase):
 
 
 class ServerTests(unittest.TestCase):
+    def test_legacy_server_name_remains_an_alias(self) -> None:
+        self.assertIs(CodeCCTVServer, CodeDefogServer)
+
     def test_health_and_ui_config_expose_only_same_origin_connection_data(self) -> None:
         class DiscoveryStub:
             def discover(self) -> list[dict[str, object]]:
                 return [{
-                    "id": "local-0001", "label": "Code CCTV", "host": "127.0.0.1",
+                    "id": "local-0001", "label": "Code Defog", "host": "127.0.0.1",
                     "port": 43210, "ui_url": "http://127.0.0.1:43210/ui",
                     "status": "ready", "source": "registry", "pid": 1,
                     "updated_at": "2026-08-06T08:00:00Z",
@@ -323,7 +326,7 @@ class ServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
             ui_dir = Path(__file__).resolve().parents[1] / "web"
-            server = CodeCCTVServer(
+            server = CodeDefogServer(
                 ("127.0.0.1", 0), "test-token", store, ui_dir=str(ui_dir),
                 discovery_agent=DiscoveryStub(), instance_id="local-0001",
             )
@@ -333,6 +336,7 @@ class ServerTests(unittest.TestCase):
             try:
                 with urlopen(f"{base_url}/health", timeout=1) as response:
                     health = json.loads(response.read())
+                self.assertEqual(health["service"], "code-defog")
                 self.assertEqual(health["instance_id"], "local-0001")
                 self.assertTrue(health["ui"])
 
@@ -355,7 +359,7 @@ class ServerTests(unittest.TestCase):
     def test_http_api_authenticates_and_ingests_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")
-            server = CodeCCTVServer(("127.0.0.1", 0), "test-token", store)
+            server = CodeDefogServer(("127.0.0.1", 0), "test-token", store)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -374,7 +378,7 @@ class ServerTests(unittest.TestCase):
                     f"{base_url}/api/events",
                     data=payload,
                     method="POST",
-                    headers={"Content-Type": "application/json", "X-Code-CCTV-Token": "test-token"},
+                    headers={"Content-Type": "application/json", "X-Code-Defog-Token": "test-token"},
                 )
                 with urlopen(request, timeout=1) as response:
                     body = json.loads(response.read())
@@ -868,6 +872,38 @@ class DevLoopStoreTransitionTests(unittest.TestCase):
             r = store.transition_case(case_id, "CLOSED")
             self.assertEqual(r["status"], "CLOSED")
             self.assertIsNotNone(r.get("closed_at"))
+            store.close()
+
+    def test_cancel_respects_state_machine(self) -> None:
+        """cancel escalates only from an escalatable state; terminal CLOSED is rejected."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue",
+                "source_uri": "test-cancel",
+                "client_nonce": "nonce-cancel-1",
+                "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError",
+                    "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"],
+                    "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+
+            # From RECEIVED, cancel → ESCALATED is valid.
+            r = store.perform_case_action(case_id, "cancel", {"reason": "stop"})
+            self.assertEqual(r["status"], "ESCALATED")
+
+            # From a terminal CLOSED, cancel must be rejected.
+            store.transition_case(case_id, "CLOSED")
+            r = store.perform_case_action(case_id, "cancel", {"reason": "stop"})
+            self.assertEqual(r.get("status"), 409)
+            self.assertIn("cannot cancel", r.get("error", ""))
+            self.assertEqual(store.get_case(case_id)["status"], "CLOSED")
             store.close()
 
     def test_patch_rejected_path(self) -> None:

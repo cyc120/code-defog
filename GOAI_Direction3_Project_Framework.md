@@ -1,6 +1,6 @@
 # GOAI 方向三项目框架（已审核）
 
-> **项目暂定名：** Code CCTV DevLoop（可观测、可审计的多 Agent 软件研发闭环）  
+> **项目名称：** Code Defog（可观测、可审计的多 Agent 软件研发闭环）
 > **版本：** v0.5 Reviewed  
 > **状态：** 已审核的赛题目标架构；实现状态与规划分开记录。
 > **赛道对应：** GOAI Agent Infra - 方向三「软件研发全流程协同」
@@ -11,7 +11,7 @@
 
 ## 1. 一页结论
 
-Code CCTV 已经具备本项目最难替代的基础能力：本地结构化事件采集、按工作区/会话隔离的 SQLite 事件留存、SSE 实时状态流、中文工作日志，以及 Web 管理与本机服务发现入口。
+Code Defog 已经具备本项目最难替代的基础能力：本地结构化事件采集、按工作区/会话隔离的 SQLite 事件留存、SSE 实时状态流、中文工作日志，以及 Web 管理与本机服务发现入口。
 
 新项目不应推倒重来，而应在现有"**研发过程可见**"的产品上增加"**受控的多 Agent 研发处置闭环**"：将 Issue、日志、测试失败和用户反馈聚合为研发事件；由 AgentTeams 编排的多个 Agent 完成诊断、修复、验证和复盘；全部中间结论、审批和结果都作为可审计证据保留。
 
@@ -40,7 +40,7 @@ MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结�
 ### 1.3 本轮设计边界
 
 - 首个 Demo 运行在本地沙箱和受控测试仓库中，不直接修改生产环境或自动发布生产版本。
-- 现有 `POST /api/events`、`GET /api/state` 和 SSE 流保持兼容；新增研发闭环数据不破坏 Code CCTV 的监控功能。
+- 现有 `POST /api/events`、`GET /api/state` 和 SSE 流保持兼容；新增研发闭环数据不破坏 Code Defog 的监控功能。
 - AgentTeams 的具体 SDK、部署方式和鉴权方案仍须在 P0 阶段通过官方 Hello World 验证确认；目前尚未完成。本文先固定职责边界和适配接口。本地 Mock/AgentScope（见第 6.1 节）仅用于单元测试、离线开发和实验，不作为赛事 Demo 的替代路径。
 
 ---
@@ -53,13 +53,13 @@ MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结�
 | `daemon/store.py` | SQLite、会话隔离、事件保留、状态聚合 | 保存 Case、Agent 运行、证据、审批、知识记录 | 保留 `projects`/`events` 表；复用现有 `migrate_schema()` 机制新增专用表。 |
 | `scripts/event_client.py` | 向 daemon 上报结构化事件 | 作为各 Agent 的统一观测事件客户端 | 扩展事件类型，不让 Agent 直接写 SQLite。 |
 | `scripts/update_worklog.py` | 中文工作日志、文件/验证/决策记录 | 生成面向人的案件摘要和复盘材料 | 工作日志是可读证据的投影，不是唯一事实来源。 |
-| `skills/code-cctv/SKILL.md` | AI 编程过程的可见性规范 | 形成"每一步都留下证据"的通用研发协作 Skill | 新增竞赛专用 Skill，不改变当前日常工作流。 |
+| `skills/code-defog/SKILL.md` | AI 编程过程的可见性规范 | 形成"每一步都留下证据"的通用研发协作 Skill | 新增竞赛专用 Skill，不改变当前日常工作流。 |
 | `web/`、`daemon/dashboard.py` 与 `daemon/service_discovery.py` | 本机 Web 控制台、服务选择和状态展示 | 展示 Case 队列、审批、证据链和发布状态视图 | 保持 Web-only；不再维护原生桌面界面。 |
 | `tests/` | Python 单元测试、HTTP/SSE 覆盖 | 作为修复验证证据和演示中的质量门禁 | 所有 Agent 产生的补丁必须经过测试。 |
 
 ### 2.1 现有能力与竞赛差距
 
-当前 Code CCTV 已具备 Case、审批、证据与 Web 展示的基础闭环；真实 AgentTeams 编排、受控补丁执行、生产部署验证和可核验的官方 Trace 仍是待完成能力。这些缺口正是本框架后续需要补齐的部分。
+当前 Code Defog 已具备 Case、审批、证据与 Web 展示的基础闭环；真实 AgentTeams 编排、受控补丁执行、生产部署验证和可核验的官方 Trace 仍是待完成能力。这些缺口正是本框架后续需要补齐的部分。
 
 ---
 
@@ -80,7 +80,7 @@ MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结�
 
 ### 3.2 MVP 范围
 
-首版建议以"**本地可回放的故障演练仓库 + Code CCTV 自身基础设施**"完成演示，不把未知的生产 Git、CI/CD、工单系统作为前置依赖。
+首版建议以"**本地可回放的故障演练仓库 + Code Defog 自身基础设施**"完成演示，不把未知的生产 Git、CI/CD、工单系统作为前置依赖。
 
 | MVP 包含 | MVP 不包含 |
 | --- | --- |
@@ -93,7 +93,7 @@ MVP 采用 **4 个核心业务 Agent + 编排层 + 异步复盘模块** 的结�
 
 ### 3.3 演练案例原则与具体内容
 
-演练缺陷应被显式放在独立 `demo_target/` 或专用测试分支，不能把 Code CCTV 当前存在的问题当作未经确认的"缺陷"宣传。每个案例至少提供同一问题的 Issue、日志和测试失败三种输入，并保留已知根因与预期修复作为评测基准。
+演练缺陷应被显式放在独立 `demo_target/` 或专用测试分支，不能把 Code Defog 当前存在的问题当作未经确认的"缺陷"宣传。每个案例至少提供同一问题的 Issue、日志和测试失败三种输入，并保留已知根因与预期修复作为评测基准。
 
 `demo_target/` 在 **P1 阶段** 即应创建并植入案例，作为 P2-P4 Agent 开发的测试目标。
 
@@ -324,16 +324,16 @@ stateDiagram-v2
 
 | 凭证 | 持有者 | 允许的操作 | 明确禁止 |
 | --- | --- | --- | --- |
-| `service_token`（`X-Code-CCTV-Token`） | 本地服务页面、受限脚本、普通 API 调用方 | 事件、Case 创建与查询、SSE、取消 Case | 单独签发审批 Grant、知识复核、消费审批 Grant |
-| 人工审批密钥（`X-Code-CCTV-Approval-Key`） | 人工审批者 | 与有效 `service_token` 一起签发 Grant；复核知识条目 | 不经 `/ui/config`、`service.json` 或服务发现描述符下发 |
-| `approval_token` | 单次审批流程 | 在 `X-Code-CCTV-Token-Type: approval` 下消费对应 Grant | 重复使用、跨 Case/动作/目标引用使用 |
+| `service_token`（`X-Code-Defog-Token`） | 本地服务页面、受限脚本、普通 API 调用方 | 事件、Case 创建与查询、SSE、取消 Case | 单独签发审批 Grant、知识复核、消费审批 Grant |
+| 人工审批密钥（`X-Code-Defog-Approval-Key`） | 人工审批者 | 与有效 `service_token` 一起签发 Grant；复核知识条目 | 不经 `/ui/config`、`service.json` 或服务发现描述符下发 |
+| `approval_token` | 单次审批流程 | 在 `X-Code-Defog-Token-Type: approval` 下消费对应 Grant | 重复使用、跨 Case/动作/目标引用使用 |
 
 #### 当前签发与消费流程
 
 1. 人工在 Web 控制台输入独立审批密钥。该密钥不会由服务端配置端点返回，也不会登记到本机服务发现记录。
-2. 页面以 `service_token` 和 `X-Code-CCTV-Approval-Key` 调用 `POST /api/cases/{case_id}/approval-grant`，提交 `{action, target_ref, approver}`。
+2. 页面以 `service_token` 和 `X-Code-Defog-Approval-Key` 调用 `POST /api/cases/{case_id}/approval-grant`，提交 `{action, target_ref, approver}`。
 3. 服务端验证当前 Case 状态、`pending_action`、`target_ref` 与待审批版本的匹配，然后生成一次性 `approval_token`，只持久化其 SHA-256 哈希和有效期。
-4. 页面以 `X-Code-CCTV-Token-Type: approval` 调用 `POST /api/cases/{case_id}/actions`，提交 `action`、`target_ref`、`reason` 和 `approval_token`。
+4. 页面以 `X-Code-Defog-Token-Type: approval` 调用 `POST /api/cases/{case_id}/actions`，提交 `action`、`target_ref`、`reason` 和 `approval_token`。
 5. 服务端校验 Grant 的哈希、Case/动作/目标绑定、有效期和未使用状态；成功后标记为已使用，写入 `approvals`，再推进状态机。
 
 `POST /api/knowledge/{record_id}/review` 同样要求服务令牌与独立人工审批密钥，且审阅人由服务进程所属用户记录，不信任请求体伪造的身份。
@@ -341,7 +341,7 @@ stateDiagram-v2
 #### 当前服务端校验规则
 
 1. **双因子签发：** 仅有 `service_token` 的调用返回 `403 Forbidden`，不能获得 `approval_token`。
-2. **Grant 类型：** 审批或拒绝动作必须声明 `X-Code-CCTV-Token-Type: approval`；普通服务令牌不能替代一次性 Grant。
+2. **Grant 类型：** 审批或拒绝动作必须声明 `X-Code-Defog-Token-Type: approval`；普通服务令牌不能替代一次性 Grant。
 3. **绑定与时效：** Grant 绑定 Case、动作、目标引用和当前待审批状态，过期或状态变化后拒绝消费。
 4. **单次使用与审计：** Grant 消费后立即标记为已用；审批记录保存 `grant_id`、`token_hash`、审批人、目标引用、有效期与处理时间。
 
@@ -451,7 +451,7 @@ incident_signature = SHA256(
 
 #### 数据库迁移策略
 
-复用现有 `store.py` 的 `migrate_schema()` 机制（见 [store.py:90-155](code-cctv-general/daemon/store.py#L90-L155)）：
+复用现有 `store.py` 的 `migrate_schema()` 机制（见 `daemon/store.py`）：
 
 1. 在 `migrate_schema()` 中新增对 Case 相关表的检测和创建。
 2. 使用 `BEGIN IMMEDIATE → CREATE TABLE IF NOT EXISTS → COMMIT` 的事务模式，确保迁移原子性。
@@ -467,12 +467,12 @@ incident_signature = SHA256(
 | `POST` | `/api/cases` | 创建或接收一条规范化研发事件。 | `service_token` |
 | `GET` | `/api/cases` | 按状态、优先级、工作区、仓库查询 Case 队列。 | `service_token` |
 | `GET` | `/api/cases/{case_id}` | 获取 Case、状态、Agent Run、证据和审批摘要。 | `service_token` |
-| `POST` | `/api/cases/{case_id}/approval-grant` | 为批准或拒绝签发一次性 Grant。 | `service_token` + `X-Code-CCTV-Approval-Key` |
-| `POST` | `/api/cases/{case_id}/actions` | 执行 `approve_plan`、`approve_release`、`reject_plan`、`reject_release` 或 `cancel`。前四种消费一次性 Grant。 | `approval_token` + `X-Code-CCTV-Token-Type: approval`（Grant 动作）；`service_token`（cancel） |
-| `POST` | `/api/knowledge/{record_id}/review` | 复核知识条目。 | `service_token` + `X-Code-CCTV-Approval-Key` |
+| `POST` | `/api/cases/{case_id}/approval-grant` | 为批准或拒绝签发一次性 Grant。 | `service_token` + `X-Code-Defog-Approval-Key` |
+| `POST` | `/api/cases/{case_id}/actions` | 执行 `approve_plan`、`approve_release`、`reject_plan`、`reject_release` 或 `cancel`。前四种消费一次性 Grant。 | `approval_token` + `X-Code-Defog-Token-Type: approval`（Grant 动作）；`service_token`（cancel） |
+| `POST` | `/api/knowledge/{record_id}/review` | 复核知识条目。 | `service_token` + `X-Code-Defog-Approval-Key` |
 | `GET` | `/api/cases/{case_id}/evidence` | 返回可下载/可查看的证据索引，而非未授权原始敏感数据。 | `service_token` |
 
-所有接口沿用 Code CCTV 的 `127.0.0.1` 本地绑定。Case 的状态变化通过现有 SSE 机制发布新的事件类型，不让界面轮询多个互不一致的来源。
+所有接口沿用 Code Defog 的 `127.0.0.1` 本地绑定。Case 的状态变化通过现有 SSE 机制发布新的事件类型，不让界面轮询多个互不一致的来源。
 
 ### 7.3 证据包标准
 
@@ -518,7 +518,7 @@ incident_signature = SHA256(
 以下为目标与当前实现的对应结构；`web/` 是唯一管理界面，真实 AgentTeams Bridge 尚未创建：
 
 ```text
-code-cctv-general/
+code-defog/
 ├── daemon/                         # HTTP、SSE、SQLite、Web 托管与服务发现
 │   ├── server.py                    # Case API、双因子审批、SSE
 │   └── store.py                     # Case 存储与迁移
@@ -659,7 +659,7 @@ code-cctv-general/
 | --- | --- | --- |
 | AgentTeams SDK 能力边界 | **P0 阶段先跑通 Hello World**，确认 SDK 是否支持 Task Graph / Handoff / Trace 原语。 | 这是整个编排层的基础假设。如果 SDK 不提供这些原语，Adapter 需要自行实现，影响 P2 工作量和架构。 |
 | AgentTeams 真实运行 | **P2 完成条件为两条案例在真实 AgentTeams Runtime 跑通。** Mock 仅用于单元测试与离线开发。 | 赛题明确要求以 AgentTeams 为协同设计基点。若评审时案例跑在 mock 上，合规性和真实 Trace 将被质疑。 |
-| 首个演示目标仓库 | 使用独立 `demo_target/`，并复用 Code CCTV 的事件与展示底座。 | 避免把正在使用的主仓库作为故障注入目标，也便于重复回放。 |
+| 首个演示目标仓库 | 使用独立 `demo_target/`，并复用 Code Defog 的事件与展示底座。 | 避免把正在使用的主仓库作为故障注入目标，也便于重复回放。 |
 | AgentTeams 具体实现 | 审核后选定官方可用 SDK；本地代码只依赖 Adapter 接口。 | 赛题强制使用 AgentTeams，但当前文档未提供具体版本、鉴权与部署约束。 |
 | 审批令牌分离 | 当前已实现 `service_token`、独立人工审批密钥和一次性 `approval_token` 的三层模型，服务端强制校验。 | Agent 不持有独立人工审批密钥是安全模型的底线；本地同用户环境仍不是对抗性安全边界。 |
 | 模型与外部服务 | 先支持可替换模型和本地 mock；真实云资源作为可选适配。 | 保证 Demo 可离线复现，降低密钥、额度和网络风险。 |

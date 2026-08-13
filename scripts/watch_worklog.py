@@ -65,7 +65,7 @@ def parse_args() -> argparse.Namespace:
 
 def default_state_file(workspace: Path, worklog_name: str) -> Path:
     digest = hashlib.sha256(f"{workspace}:{worklog_name}".encode("utf-8")).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / "code-cctv" / f"{digest}.json"
+    return Path(tempfile.gettempdir()) / "code-defog" / f"{digest}.json"
 
 
 def load_state(path: Path) -> dict[str, dict[str, int]]:

@@ -1,4 +1,4 @@
-# Code CCTV DevLoop — pinned dependencies for reproducible builds
+# Code Defog — pinned dependencies for reproducible builds
 # Python 3.10+ required
 #
 # Install:  pip install -r requirements.txt

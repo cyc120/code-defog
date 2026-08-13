@@ -1,6 +1,6 @@
 # Skill 清单
 
-> Code CCTV DevLoop · GOAI Agent Infra 方向三 · 竞赛材料
+> Code Defog · GOAI Agent Infra 方向三 · 竞赛材料
 > 依据框架 §11.1 六类 Skill 候选扩展；标注每项的**实现状态**（✅ 已在代码实现 / 🟡 接口预留 / 📋 待独立化）。
 
 > **说明：** 本清单描述本地代码与赛事候选 Skill 的实现状态，不构成真实 AgentTeams Worker、Team、Handoff 或 Trace 已部署的声明。

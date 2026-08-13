@@ -1,4 +1,4 @@
-"""Per-platform data/config path resolution for Code CCTV.
+"""Per-platform data/config path resolution for Code Defog.
 
 This is the single source of truth for where service.json, state.sqlite3 and
 log files live. macOS keeps the historical location byte-identical; Windows
@@ -18,29 +18,57 @@ import sys
 from pathlib import Path
 
 
-def data_dir() -> Path:
-    """Root directory for config, state and logs (per user, per platform)."""
+def _platform_data_dir(product_dir: str) -> Path:
+    """Return the platform-native application data path for one product name."""
     if sys.platform == "win32":
         base = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
         if base:
-            return Path(base) / "CodeCCTV"
-        return Path.home() / "AppData" / "Roaming" / "CodeCCTV"
+            return Path(base) / product_dir
+        return Path.home() / "AppData" / "Roaming" / product_dir
     if sys.platform == "darwin":
-        # Historical location; must stay byte-identical for existing installs.
-        return Path.home() / "Library" / "Application Support" / "CodeCCTV"
+        return Path.home() / "Library" / "Application Support" / product_dir
     # Other POSIX (Linux, *BSD).
     xdg = os.environ.get("XDG_DATA_HOME")
     if xdg:
-        return Path(xdg) / "code-cctv"
-    return Path.home() / ".local" / "share" / "code-cctv"
+        return Path(xdg) / product_dir.lower()
+    return Path.home() / ".local" / "share" / product_dir.lower()
+
+
+def legacy_data_dir() -> Path:
+    """Pre-rename data location, kept read-compatible for existing installs."""
+    return _platform_data_dir("CodeCCTV")
+
+
+def data_dir() -> Path:
+    """Root directory for config, state and logs (per user, per platform).
+
+    New installations use ``CodeDefog``.  When only the former Code CCTV
+    directory exists, keep using it so a product rename never strands local
+    SQLite history, service descriptors, or provider configuration.
+    """
+    current = _platform_data_dir("CodeDefog")
+    legacy = legacy_data_dir()
+    return legacy if legacy.exists() and not current.exists() else current
 
 
 def config_path() -> Path:
-    """Path to service.json (host/port/token). Honors CODE_CCTV_CONFIG override."""
-    override = os.environ.get("CODE_CCTV_CONFIG")
+    """Path to service.json; new and legacy environment names are supported."""
+    override = os.environ.get("CODE_DEFOG_CONFIG") or os.environ.get("CODE_CCTV_CONFIG")
     if override:
         return Path(override).expanduser()
     return data_dir() / "service.json"
+
+
+def llm_provider_config_path() -> Path:
+    """Local confidential LLM configuration, never part of project state.
+
+    ``CODE_DEFOG_LLM_CONFIG`` is primarily useful for isolated local tests and
+    advanced deployments that provide their own protected data directory.
+    """
+    override = os.environ.get("CODE_DEFOG_LLM_CONFIG") or os.environ.get("CODE_CCTV_LLM_CONFIG")
+    if override:
+        return Path(override).expanduser()
+    return data_dir() / "llm_providers.json"
 
 
 def service_registry_dir() -> Path:

@@ -77,7 +77,7 @@ class WorklogTests(unittest.TestCase):
             path = Path(directory) / "AI_WORKLOG.md"
             existing = (
                 update_worklog.START
-                + "\n# Code CCTV\n\n最后更新：2026-08-02 10:00:00 CST\n状态：侦察中\n"
+                + "\n# Code Defog\n\n最后更新：2026-08-02 10:00:00 CST\n状态：侦察中\n"
                 "当前关注：准备查看项目上下文。\n\n## 涉及文件\n\n| 文件 | 用途 | 状态 |\n"
                 "| --- | --- | --- |\n| src/normal.ts | 正常 | 修改中 |\n"
                 "| src/hand_edited.ts | 手写行（缺状态列） |\n\n## 流程图\n\n- 收到目标\n"
@@ -91,6 +91,21 @@ class WorklogTests(unittest.TestCase):
             self.assertIn("src/hand_edited.ts", updated)
             self.assertIn("src/normal.ts", updated)
             self.assertIn("src/new.ts", updated)
+
+    def test_legacy_code_cctv_markers_migrate_to_code_defog(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "AI_WORKLOG.md"
+            path.write_text(
+                "<!-- code-cctv:start -->\n# Code CCTV\n\n状态：侦察中\n"
+                "<!-- code-cctv:end -->\n",
+                encoding="utf-8",
+            )
+            worklog = update_worklog.load_worklog(path, "zh")
+            rendered = update_worklog.render_worklog(worklog, "2026-08-03 12:00:00 CST", "zh")
+            updated = update_worklog.replace_section(path.read_text(encoding="utf-8"), rendered)
+            self.assertIn(update_worklog.START, updated)
+            self.assertNotIn(update_worklog.LEGACY_CODE_CCTV_START, updated)
+            self.assertIn("# Code Defog", updated)
 
     def test_single_line_collapses_newlines(self) -> None:
         self.assertEqual(update_worklog.single_line("a\n\nb\nc"), "a b c")

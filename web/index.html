@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Code CCTV DevLoop · 审计总览</title>
+<title>Code Defog · 审计总览</title>
 <style>
   :root {
     color-scheme: light;
@@ -81,7 +81,6 @@
   html { background: var(--page); }
   body {
     margin: 0;
-    min-width: 320px;
     background: var(--page);
     color: var(--ink);
     font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -169,6 +168,7 @@
   .theme-toggle .icon-button[aria-pressed="true"] { border-color: var(--line-strong); color: var(--ink); background: var(--surface-muted); }
   [data-tooltip] { position: relative; }
   [data-tooltip]::after {
+    display: none;
     position: absolute;
     z-index: 20;
     left: 50%;
@@ -186,7 +186,7 @@
     pointer-events: none;
     transition: opacity 120ms ease;
   }
-  [data-tooltip]:hover::after, [data-tooltip]:focus-visible::after { opacity: 1; }
+  [data-tooltip]:hover::after, [data-tooltip]:focus-visible::after { display: block; opacity: 1; }
 
   .metric-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin-top: 20px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
   .metric { min-height: 112px; padding: 17px 18px; }
@@ -564,6 +564,68 @@
     .bar-row { grid-template-columns: 80px minmax(0, 1fr) 40px; }
   }
 
+  /* ── 代码图谱：被监控项目的只读关系地图 ───────────────────────── */
+  .code-map-view { width: min(1440px, 100%); margin: 0 auto; padding: 26px 30px 52px; }
+  .code-map-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
+  .code-map-head h1 { margin: 0; font-size: 20px; font-weight: 500; }
+  .code-map-head p { margin: 5px 0 0; color: var(--ink-muted); font-size: 12px; line-height: 1.5; }
+  .code-map-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .code-map-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 400px); gap: 16px; align-items: start; margin-top: 18px; }
+  .code-map-canvas, .code-map-inspector { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .code-map-canvas { overflow: hidden; }
+  .code-map-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 11px 13px; border-bottom: 1px solid var(--line); }
+  .code-map-toolbar-group { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+  .code-map-filter { min-height: 30px; max-width: 190px; padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface); color: var(--ink); font: inherit; font-size: 11px; }
+  .code-map-meta { color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; }
+  .code-map-stage { min-width: 0; overflow: auto; background: var(--surface-muted); }
+  .code-map-svg { display: block; width: 100%; min-width: 720px; height: 570px; background: var(--surface-muted); }
+  .code-map-edge { stroke: var(--line-strong); stroke-width: 1.25; opacity: .76; }
+  .code-map-edge.unresolved { stroke: var(--yellow); stroke-dasharray: 5 5; }
+  .code-map-node { cursor: pointer; }
+  .code-map-node circle, .code-map-node rect { stroke: var(--line-strong); stroke-width: 1.5; fill: var(--surface); transition: fill 120ms ease, stroke 120ms ease; }
+  .code-map-node.directory rect { fill: var(--blue-soft); stroke: var(--blue); }
+  .code-map-node.file circle { fill: var(--green-soft); stroke: var(--green); }
+  .code-map-node.symbol circle { fill: var(--surface); stroke: var(--ink-faint); }
+  .code-map-node.unresolved circle, .code-map-node.parse_error circle { fill: var(--yellow-soft); stroke: var(--yellow); }
+  .code-map-node:hover circle, .code-map-node:hover rect, .code-map-node.selected circle, .code-map-node.selected rect { stroke: var(--blue); stroke-width: 2.5; fill: var(--blue-soft); }
+  .code-map-node text { fill: var(--ink); font-family: Inter, ui-sans-serif, system-ui, sans-serif; font-size: 11px; pointer-events: none; }
+  .code-map-node text.node-type { fill: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 8.5px; }
+  .code-map-empty { display: grid; min-height: 570px; place-items: center; padding: 24px; color: var(--ink-faint); font-size: 12px; text-align: center; }
+  .code-map-legend { display: flex; gap: 10px; flex-wrap: wrap; padding: 10px 13px; border-top: 1px solid var(--line); color: var(--ink-faint); font-size: 10px; }
+  .code-map-legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .code-map-key { width: 8px; height: 8px; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--surface); }
+  .code-map-key.directory { border-radius: 2px; border-color: var(--blue); background: var(--blue-soft); }
+  .code-map-key.file { border-color: var(--green); background: var(--green-soft); }
+  .code-map-key.pending { border-color: var(--yellow); background: var(--yellow-soft); }
+  .code-map-inspector { display: grid; min-height: 570px; grid-template-rows: auto minmax(0, 1fr); }
+  .code-map-inspector-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding: 13px; border-bottom: 1px solid var(--line); }
+  .code-map-inspector-head h2 { margin: 2px 0 0; font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
+  .code-map-inspector-body { display: grid; align-content: start; gap: 14px; overflow-y: auto; padding: 13px; }
+  .code-map-empty-detail { color: var(--ink-faint); font-size: 11px; line-height: 1.6; }
+  .code-map-section { display: grid; gap: 7px; padding-top: 13px; border-top: 1px solid var(--line); }
+  .code-map-section:first-child { padding-top: 0; border-top: 0; }
+  .code-map-section-title { color: var(--ink-faint); font-size: 10px; font-weight: 500; }
+  .code-map-facts { display: grid; gap: 5px; }
+  .code-map-fact { display: grid; grid-template-columns: 82px minmax(0, 1fr); gap: 8px; color: var(--ink-muted); font-size: 10.5px; line-height: 1.45; }
+  .code-map-fact strong { color: var(--ink); font-weight: 500; overflow-wrap: anywhere; }
+  .code-map-neighbors, .code-map-lines, .code-map-semantic-list { display: grid; gap: 5px; }
+  .code-map-neighbor, .code-map-line { padding: 6px 7px; border: 1px solid var(--line); border-radius: 4px; color: var(--ink-muted); background: var(--surface-muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+  .code-map-neighbor button { margin: 0; padding: 0; border: 0; background: transparent; color: var(--blue); font: inherit; cursor: pointer; text-align: left; }
+  .code-map-control-row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .code-map-control-row .button { min-height: 32px; }
+  .code-map-range { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .code-map-range label, .code-map-source-consent { display: grid; gap: 5px; color: var(--ink-muted); font-size: 10px; }
+  .code-map-range input { width: 100%; min-height: 31px; box-sizing: border-box; padding: 5px 6px; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface); color: var(--ink); font: inherit; font-size: 11px; }
+  .code-map-source-consent { grid-template-columns: auto minmax(0, 1fr); align-items: start; line-height: 1.45; cursor: pointer; }
+  .code-map-source-consent input { margin: 1px 0 0; accent-color: var(--blue); }
+  .code-map-preview { max-height: 260px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 5px; background: var(--surface-muted); color: var(--ink-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; line-height: 1.55; white-space: pre; }
+  .code-map-semantic-role { margin: 0; color: var(--ink); font-size: 12px; line-height: 1.5; }
+  .code-map-semantic-status { color: var(--ink-faint); font-size: 10px; }
+  .code-map-evidence { display: flex; gap: 5px; flex-wrap: wrap; }
+  .code-map-evidence span { padding: 2px 5px; border: 1px solid var(--line); border-radius: 3px; color: var(--ink-muted); background: var(--surface-muted); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
+  @media (max-width: 1040px) { .code-map-layout { grid-template-columns: minmax(0, 1fr); } .code-map-inspector { min-height: 0; } }
+  @media (max-width: 680px) { .code-map-view { padding: 16px 12px 30px; } .code-map-svg { height: 480px; } .code-map-empty { min-height: 480px; } }
+
   /* ── 左侧边栏 + 全局顶栏（项目优先导航）───────────────────────── */
   #app { display: grid; grid-template-columns: 248px minmax(0, 1fr); min-height: 100vh; align-items: start; }
   #sidebar { position: sticky; top: 0; height: 100vh; align-self: start; display: flex;
@@ -668,6 +730,26 @@
   .assistant-input:disabled { cursor: not-allowed; background: var(--surface-muted); }
   .assistant-send, .assistant-cancel { width: 36px; height: 36px; }
   body.assistant-open { overflow: hidden; }
+  /* ── LLM 设置 ─────────────────────────────────────────────────── */
+  .llm-settings-scrim { position: fixed; z-index: 62; inset: 0; background: rgba(11, 14, 11, .38); }
+  .llm-settings-drawer { position: fixed; z-index: 63; top: 0; right: 0; bottom: 0; display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto; width: min(430px, 100vw); border-left: 1px solid var(--line);
+    background: var(--surface); box-shadow: -18px 0 42px rgba(0, 0, 0, .16); }
+  .llm-settings-scrim[hidden], .llm-settings-drawer[hidden] { display: none; }
+  .llm-settings-head { display: flex; align-items: flex-start; gap: 12px; padding: 17px 18px 14px; border-bottom: 1px solid var(--line); }
+  .llm-settings-head-copy { min-width: 0; margin-right: auto; }
+  .llm-settings-head h2 { margin: 3px 0 0; font-size: 16px; font-weight: 500; line-height: 1.25; }
+  .llm-settings-body { display: grid; align-content: start; gap: 15px; overflow-y: auto; padding: 18px; }
+  .llm-settings-field { display: grid; gap: 6px; color: var(--ink-muted); font-size: 11px; font-weight: 500; }
+  .llm-settings-field input, .llm-settings-field select { width: 100%; min-height: 36px; border: 1px solid var(--line-strong); border-radius: 5px;
+    background: var(--surface); color: var(--ink); font: inherit; font-size: 12px; padding: 7px 8px; }
+  .llm-settings-field input:focus, .llm-settings-field select:focus { outline: 2px solid var(--blue-soft); outline-offset: 1px; border-color: var(--blue); }
+  .llm-settings-state { min-height: 20px; color: var(--ink-faint); font-size: 11px; line-height: 1.45; }
+  .llm-settings-clear { display: flex; align-items: center; gap: 8px; color: var(--ink-muted); font-size: 11px; cursor: pointer; }
+  .llm-settings-clear input { accent-color: var(--blue); }
+  .llm-settings-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 18px 16px; border-top: 1px solid var(--line); }
+  .llm-settings-foot .button { min-height: 36px; }
+  body.llm-settings-open { overflow: hidden; }
   @media (max-width: 900px) {
     #app { grid-template-columns: 1fr; }
     #sidebar { position: static; height: auto; flex-direction: row; flex-wrap: wrap;
@@ -679,17 +761,20 @@
     .sidebar-project-list { max-height: none; grid-auto-flow: column;
       grid-auto-columns: minmax(160px, 1fr); overflow-x: auto; }
     .assistant-drawer { width: min(450px, 100vw); }
+    .llm-settings-drawer { width: min(430px, 100vw); }
   }
   @media (max-width: 480px) {
     .assistant-head, .assistant-thread, .assistant-footer { padding-left: 14px; padding-right: 14px; }
+    .llm-settings-head, .llm-settings-body, .llm-settings-foot { padding-left: 14px; padding-right: 14px; }
     .assistant-bubble { max-width: calc(100% - 8px); }
+    [data-tooltip]::after { display: none !important; }
   }
 </style>
 </head>
 <body>
   <div id="connect-screen">
     <section class="connect-card" aria-labelledby="connect-title">
-      <div class="connect-title-row"><div><div class="eyebrow">本地连接</div><h2 id="connect-title">选择 Code CCTV 服务</h2></div><button class="icon-button" id="connect-close-btn" type="button" aria-label="关闭服务选择" data-tooltip="关闭服务选择"><i data-lucide="x" aria-hidden="true">×</i></button></div>
+      <div class="connect-title-row"><div><div class="eyebrow">本地连接</div><h2 id="connect-title">选择 Code Defog 服务</h2></div><button class="icon-button" id="connect-close-btn" type="button" aria-label="关闭服务选择" data-tooltip="关闭服务选择"><i data-lucide="x" aria-hidden="true">×</i></button></div>
       <p id="connect-copy">本机服务发现 Agent 只显示已登记的回环地址服务。</p>
       <section class="connect-discovery" aria-labelledby="discovery-title">
         <div class="connect-discovery-head"><span class="connect-discovery-title" id="discovery-title">发现的本机服务</span><button class="icon-button" id="discover-refresh-btn" type="button" aria-label="刷新本机服务" data-tooltip="刷新本机服务"><i data-lucide="refresh-cw" aria-hidden="true">↻</i></button></div>
@@ -711,10 +796,10 @@
   <div id="app">
     <aside id="sidebar">
       <div class="sidebar-brand">
-        <div class="brand-mark" aria-hidden="true">CC</div>
+        <div class="brand-mark" aria-hidden="true">CD</div>
         <div>
-          <div class="eyebrow">Code CCTV</div>
-          <h1>DevLoop 审计</h1>
+          <div class="eyebrow">Code Defog</div>
+          <h1>代码审查</h1>
         </div>
       </div>
 
@@ -730,6 +815,7 @@
 
       <nav class="sidebar-nav" aria-label="视图切换">
         <button class="sidebar-nav-item" type="button" data-view="overview" id="view-overview-btn" aria-pressed="false">项目审查</button>
+        <button class="sidebar-nav-item" type="button" data-view="code-map" id="view-code-map-btn" aria-pressed="false">代码地图</button>
         <button class="sidebar-nav-item" type="button" data-view="audit" id="view-audit-btn" aria-pressed="true">Case 审计</button>
         <button class="sidebar-nav-item" type="button" data-view="projects" id="view-projects-btn" aria-pressed="false">监控项目</button>
       </nav>
@@ -740,6 +826,7 @@
         <span class="topbar-project" id="topbar-project">未选择项目</span>
         <span class="runtime-status" id="runtime-status" data-online="false" data-mode="mock"><span class="runtime-dot" aria-hidden="true"></span><span id="runtime-label">正在连接</span></span>
         <button class="icon-button" id="assistant-open-btn" type="button" aria-label="打开项目助手" data-tooltip="项目助手" aria-controls="assistant-drawer" aria-expanded="false" disabled><i data-lucide="bot-message-square" aria-hidden="true">AI</i></button>
+        <button class="icon-button" id="llm-settings-open-btn" type="button" aria-label="打开 LLM 设置" data-tooltip="LLM 设置" aria-controls="llm-settings-drawer" aria-expanded="false"><i data-lucide="sliders-horizontal" aria-hidden="true">设置</i></button>
         <button class="icon-button" id="connect-btn" type="button" aria-label="切换本机服务" data-tooltip="切换本机服务"><i data-lucide="plug-zap" aria-hidden="true">↔</i></button>
         <button class="icon-button" id="refresh-btn" type="button" aria-label="刷新数据" data-tooltip="刷新数据"><i data-lucide="refresh-cw" aria-hidden="true">↻</i></button>
         <div class="theme-toggle" role="group" aria-label="主题">
@@ -973,6 +1060,41 @@
       </div>
     </section>
 
+    <section id="view-code-map" class="code-map-view" hidden aria-labelledby="code-map-title">
+      <header class="code-map-head">
+        <div>
+          <div class="eyebrow">被监控项目</div>
+          <h1 id="code-map-title">代码地图</h1>
+          <p>目录、文件、符号与可解析导入关系。关系标签区分静态证据与待确认引用。</p>
+        </div>
+        <div class="code-map-actions">
+          <span class="section-note" id="code-map-status">选择项目后加载</span>
+          <button class="button" id="code-map-refresh-btn" type="button"><i data-lucide="refresh-cw" aria-hidden="true">刷新</i>刷新地图</button>
+        </div>
+      </header>
+      <div class="code-map-layout">
+        <section class="code-map-canvas" aria-labelledby="code-map-canvas-title">
+          <div class="code-map-toolbar">
+            <div class="code-map-toolbar-group">
+              <strong id="code-map-canvas-title" class="section-note">结构关系</strong>
+              <input class="code-map-filter" id="code-map-filter" type="search" maxlength="120" placeholder="筛选路径或符号" aria-label="筛选代码地图节点">
+              <label class="review-components"><input id="code-map-show-symbols" type="checkbox">显示符号</label>
+            </div>
+            <span class="code-map-meta" id="code-map-meta">—</span>
+          </div>
+          <div class="code-map-stage" id="code-map-stage"><div class="code-map-empty">选择一个已监控项目后加载代码地图。</div></div>
+          <div class="code-map-legend"><span><i class="code-map-key directory"></i>目录</span><span><i class="code-map-key file"></i>文件</span><span><i class="code-map-key"></i>符号</span><span><i class="code-map-key pending"></i>未解析引用</span></div>
+        </section>
+        <aside class="code-map-inspector" aria-labelledby="code-map-inspector-title">
+          <header class="code-map-inspector-head">
+            <div><div class="eyebrow">节点详情</div><h2 id="code-map-inspector-title">尚未选择节点</h2></div>
+            <span class="llm-badge warn" id="code-map-agent-status">等待选择</span>
+          </header>
+          <div class="code-map-inspector-body" id="code-map-inspector-body"><div class="code-map-empty-detail">点击地图中的文件或符号，可查看可核验的关系，再决定是否让代码解读 Agent 生成说明。</div></div>
+        </aside>
+      </div>
+    </section>
+
     <section id="view-projects" class="overview-view" hidden aria-labelledby="projects-title">
       <div class="audit-toolbar">
         <h1 class="section-title" id="projects-title">监控项目</h1>
@@ -1043,6 +1165,29 @@
         <button class="icon-button assistant-cancel" id="assistant-cancel-btn" type="button" aria-label="停止生成" data-tooltip="停止生成" hidden><i data-lucide="square" aria-hidden="true">停止</i></button>
         <button class="icon-button assistant-send" id="assistant-send-btn" type="submit" aria-label="发送问题" data-tooltip="发送问题" disabled><i data-lucide="send" aria-hidden="true">发送</i></button>
       </form>
+    </footer>
+  </aside>
+
+  <div class="llm-settings-scrim" id="llm-settings-scrim" hidden></div>
+  <aside class="llm-settings-drawer" id="llm-settings-drawer" role="dialog" aria-modal="true" aria-labelledby="llm-settings-title" hidden>
+    <header class="llm-settings-head">
+      <div class="llm-settings-head-copy">
+        <div class="eyebrow">本地模型配置</div>
+        <h2 id="llm-settings-title">LLM 设置</h2>
+      </div>
+      <button class="icon-button" id="llm-settings-close-btn" type="button" aria-label="关闭 LLM 设置" data-tooltip="关闭"><i data-lucide="x" aria-hidden="true">×</i></button>
+    </header>
+    <form class="llm-settings-body" id="llm-settings-form">
+      <label class="llm-settings-field"><span>厂商</span><select id="llm-provider-select" aria-label="选择 LLM 厂商"></select></label>
+      <div class="llm-settings-state" id="llm-settings-state" aria-live="polite">加载配置中</div>
+      <label class="llm-settings-field"><span>兼容服务地址</span><input id="llm-base-url" type="url" inputmode="url" autocomplete="url" spellcheck="false" maxlength="512" required></label>
+      <label class="llm-settings-field"><span>模型</span><input id="llm-model" type="text" autocomplete="off" spellcheck="false" maxlength="160" required></label>
+      <label class="llm-settings-field"><span>API 密钥</span><input id="llm-api-key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048"></label>
+      <label class="llm-settings-clear"><input id="llm-clear-key" type="checkbox">删除此厂商已保存的密钥</label>
+    </form>
+    <footer class="llm-settings-foot">
+      <button class="button" id="llm-test-btn" type="button">测试已保存配置</button>
+      <button class="button primary" id="llm-save-btn" type="submit" form="llm-settings-form">保存并启用</button>
     </footer>
   </aside>
 
@@ -1117,6 +1262,14 @@
   let assistantBusy = false;
   let assistantAbortController = null;
   let assistantRequestId = 0;
+  let llmProviderConfig = null;
+  let llmSettingsBusy = false;
+  let codeGraph = null;
+  let codeGraphWorkspace = null;
+  let codeMapSelectedNodeId = null;
+  let codeMapDossier = null;
+  let codeMapInterpreter = null;
+  let codeMapBusy = false;
 
   const root = document.documentElement;
   const urlTheme = new URLSearchParams(location.search).get("theme");
@@ -1131,20 +1284,21 @@
   }));
   syncThemeButtons();
 
-  // ── View switching (hash routes #/audit / #/overview / #/projects) ──
+  // ── View switching (hash routes #/audit / #/overview / #/code-map / #/projects) ──
   // Pure toggle — data loading is funneled through refreshActiveView()/
   // refreshAll() (see data layer), so switching never double-fetches.
   function setView(view) {
-    currentView = ["overview", "projects"].includes(view) ? view : "audit";
+    currentView = ["overview", "code-map", "projects"].includes(view) ? view : "audit";
     $("view-audit").hidden = currentView !== "audit";
     $("view-overview").hidden = currentView !== "overview";
+    $("view-code-map").hidden = currentView !== "code-map";
     $("view-projects").hidden = currentView !== "projects";
     document.querySelectorAll(".sidebar-nav-item").forEach((btn) =>
       btn.setAttribute("aria-pressed", String(btn.dataset.view === currentView)));
   }
   function applyHash() {
     const hash = location.hash.replace(/^#\/?/, "");
-    setView(hash === "overview" ? "overview" : hash === "projects" ? "projects" : "audit");
+    setView(hash === "overview" ? "overview" : hash === "code-map" ? "code-map" : hash === "projects" ? "projects" : "audit");
   }
   document.querySelectorAll(".sidebar-nav-item").forEach((btn) =>
     btn.addEventListener("click", () => { location.hash = "#/" + btn.dataset.view; }));
@@ -1169,9 +1323,9 @@
   }
   function baseUrl() { return config.served ? "" : `http://${config.host}:${config.port}`; }
   async function api(path, options = {}) {
-    const headers = { "X-Code-CCTV-Token": config.token };
-    if (options.tokenType) headers["X-Code-CCTV-Token-Type"] = options.tokenType;
-    if (options.humanApprovalKey) headers["X-Code-CCTV-Approval-Key"] = options.humanApprovalKey;
+    const headers = { "X-Code-Defog-Token": config.token };
+    if (options.tokenType) headers["X-Code-Defog-Token-Type"] = options.tokenType;
+    if (options.humanApprovalKey) headers["X-Code-Defog-Approval-Key"] = options.humanApprovalKey;
     if (options.body) headers["Content-Type"] = "application/json";
     let response;
     try {
@@ -1330,6 +1484,108 @@
     if (event.key === "Escape" && !$("assistant-drawer").hidden) {
       if (assistantBusy) cancelAssistantRequest(); else closeAssistantDrawer();
     }
+    if (event.key === "Escape" && !$("llm-settings-drawer").hidden) closeLLMSettings();
+  });
+
+  // ── 本地 LLM 设置：密钥不进入 localStorage 或界面状态 ──────────────
+  function llmProviderById(providerId) {
+    return (llmProviderConfig?.providers || []).find((provider) => provider.id === providerId) || null;
+  }
+  function setLLMSettingsBusy(busy) {
+    llmSettingsBusy = busy;
+    ["llm-provider-select", "llm-base-url", "llm-model", "llm-api-key", "llm-clear-key", "llm-test-btn", "llm-save-btn"].forEach((id) => {
+      $(id).disabled = busy;
+    });
+  }
+  function fillLLMProviderForm(providerId) {
+    const provider = llmProviderById(providerId);
+    if (!provider) return;
+    $("llm-provider-select").value = provider.id;
+    $("llm-base-url").value = provider.base_url || "";
+    $("llm-model").value = provider.model || "";
+    $("llm-api-key").value = "";
+    $("llm-clear-key").checked = false;
+    $("llm-settings-state").textContent = provider.configured
+      ? `已配置 · ${provider.key_source || "本地受限配置"}`
+      : "未配置密钥";
+  }
+  function renderLLMProviderConfig(payload, selectedId) {
+    llmProviderConfig = payload?.llm || payload || null;
+    const providers = llmProviderConfig?.providers || [];
+    const select = $("llm-provider-select");
+    select.replaceChildren();
+    providers.forEach((provider) => {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.name;
+      select.append(option);
+    });
+    fillLLMProviderForm(selectedId || llmProviderConfig?.active_provider || providers[0]?.id);
+  }
+  async function loadLLMProviderConfig() {
+    const payload = await api("/api/llm/providers");
+    renderLLMProviderConfig(payload);
+  }
+  function openLLMSettings() {
+    $("llm-settings-scrim").hidden = false;
+    $("llm-settings-drawer").hidden = false;
+    document.body.classList.add("llm-settings-open");
+    $("llm-settings-open-btn").setAttribute("aria-expanded", "true");
+    loadLLMProviderConfig().catch((error) => {
+      $("llm-settings-state").textContent = error.message || "无法读取 LLM 配置";
+    });
+  }
+  function closeLLMSettings() {
+    $("llm-settings-scrim").hidden = true;
+    $("llm-settings-drawer").hidden = true;
+    document.body.classList.remove("llm-settings-open");
+    $("llm-settings-open-btn").setAttribute("aria-expanded", "false");
+    $("llm-api-key").value = "";
+    $("llm-settings-open-btn").focus();
+  }
+  function llmSettingsPayload(includeKey) {
+    const payload = {
+      provider_id: $("llm-provider-select").value,
+      base_url: $("llm-base-url").value.trim(),
+      model: $("llm-model").value.trim(),
+      clear_key: $("llm-clear-key").checked,
+    };
+    const key = $("llm-api-key").value.trim();
+    if (includeKey && key) payload.api_key = key;
+    return payload;
+  }
+  $("llm-settings-open-btn").addEventListener("click", openLLMSettings);
+  $("llm-settings-close-btn").addEventListener("click", closeLLMSettings);
+  $("llm-settings-scrim").addEventListener("click", closeLLMSettings);
+  $("llm-provider-select").addEventListener("change", (event) => fillLLMProviderForm(event.currentTarget.value));
+  $("llm-settings-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (llmSettingsBusy) return;
+    const payload = llmSettingsPayload(true);
+    $("llm-api-key").value = "";
+    setLLMSettingsBusy(true);
+    try {
+      const result = await api("/api/llm/providers", { method: "POST", body: payload });
+      renderLLMProviderConfig(result, payload.provider_id);
+      toast("LLM 配置已保存并启用");
+      await loadProjectSummary(true);
+    } catch (error) {
+      $("llm-settings-state").textContent = error.message || "保存失败";
+    } finally {
+      setLLMSettingsBusy(false);
+    }
+  });
+  $("llm-test-btn").addEventListener("click", async () => {
+    if (llmSettingsBusy) return;
+    setLLMSettingsBusy(true);
+    try {
+      const result = await api("/api/llm/providers/test", { method: "POST", body: llmSettingsPayload(false) });
+      $("llm-settings-state").textContent = result.ok ? "连接正常" : (result.test?.reason || "连接测试失败");
+    } catch (error) {
+      $("llm-settings-state").textContent = error.message || "连接测试失败";
+    } finally {
+      setLLMSettingsBusy(false);
+    }
   });
   function cachedServices() {
     try {
@@ -1362,9 +1618,9 @@
       const option = create("button", `service-option ${current ? "current" : ""}`);
       option.type = "button";
       option.disabled = !selectable;
-      option.setAttribute("aria-label", `${service.label || "Code CCTV"}，${current ? "当前服务" : serviceState(service)}`);
+      option.setAttribute("aria-label", `${service.label || "Code Defog"}，${current ? "当前服务" : serviceState(service)}`);
       const copy = create("span", "");
-      copy.append(create("span", "service-option-name", service.label || "Code CCTV"));
+      copy.append(create("span", "service-option-name", service.label || "Code Defog"));
       copy.append(create("span", "service-option-meta", `${service.host}:${service.port}`));
       option.append(copy);
       option.append(create("span", `service-option-state ${current ? "ready" : service.status || "offline"}`, current ? "当前服务" : serviceState(service)));
@@ -1887,12 +2143,254 @@
     renderCase();
     return true;
   }
+  // ── 代码地图：只显示当前已登记项目的结构元数据 ───────────────────
+  function codeMapNodeById(nodeId) {
+    return (codeGraph?.nodes || []).find((node) => node.id === nodeId) || null;
+  }
+  function codeMapNodeLabel(node) {
+    if (!node) return "未选择节点";
+    return node.type === "symbol" ? `${node.label} · ${node.path}` : (node.path || node.label || "节点");
+  }
+  function codeMapEvidenceLabel(value) {
+    return ({ static: "静态证据", inferred: "推断", unresolved: "待确认" })[value] || value || "待确认";
+  }
+  function codeMapCertaintyLabel(value) {
+    return ({ confirmed: "已确认", inferred: "推断", pending_confirmation: "待确认" })[value] || "待确认";
+  }
+  function clearCodeMapSelection() {
+    codeMapSelectedNodeId = null;
+    codeMapDossier = null;
+    codeMapInterpreter = null;
+  }
+  function resetCodeMap() {
+    codeGraph = null;
+    codeGraphWorkspace = null;
+    codeMapBusy = false;
+    clearCodeMapSelection();
+    const stage = $("code-map-stage");
+    if (stage) stage.replaceChildren(create("div", "code-map-empty", "选择一个已监控项目后加载代码地图。"));
+    const inspector = $("code-map-inspector-body");
+    if (inspector) inspector.replaceChildren(create("div", "code-map-empty-detail", "点击地图中的文件或符号，可查看可核验的关系，再决定是否让代码解读 Agent 生成说明。"));
+    const title = $("code-map-inspector-title");
+    if (title) title.textContent = "尚未选择节点";
+    const status = $("code-map-agent-status");
+    if (status) { status.textContent = "等待选择"; status.className = "llm-badge warn"; }
+    const meta = $("code-map-meta");
+    if (meta) meta.textContent = "—";
+    const overall = $("code-map-status");
+    if (overall) overall.textContent = "选择项目后加载";
+  }
+  function codeMapVisibleNodes() {
+    const query = $("code-map-filter").value.trim().toLowerCase();
+    const all = Array.isArray(codeGraph?.nodes) ? codeGraph.nodes : [];
+    const showSymbols = $("code-map-show-symbols").checked;
+    return all.filter((node) => {
+      const matches = !query || [node.label, node.path, node.type, node.symbol_kind]
+        .filter(Boolean).join(" ").toLowerCase().includes(query);
+      return matches && (showSymbols || query || node.type !== "symbol");
+    });
+  }
+  function renderCodeMap() {
+    const stage = $("code-map-stage");
+    if (!codeGraph) {
+      stage.replaceChildren(create("div", "code-map-empty", selectedProject ? "正在加载结构关系…" : "选择一个已监控项目后加载代码地图。"));
+      return;
+    }
+    const visibleNodes = codeMapVisibleNodes();
+    const visibleIds = new Set(visibleNodes.map((node) => node.id));
+    const nodesById = new Map((codeGraph.nodes || []).map((node) => [node.id, node]));
+    const visibleEdges = (codeGraph.edges || []).filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target));
+    const groups = ["directory", "file", "symbol", "unresolved", "parse_error"];
+    const ordered = groups.flatMap((type) => visibleNodes.filter((node) => node.type === type));
+    const columns = Math.max(2, Math.ceil(Math.sqrt(Math.max(ordered.length, 1) * 1.5)));
+    const width = Math.max(720, columns * 150 + 80);
+    const rows = Math.max(3, Math.ceil(Math.max(ordered.length, 1) / columns));
+    const height = Math.max(500, rows * 128 + 80);
+    const positions = new Map();
+    ordered.forEach((node, index) => {
+      const groupOffset = groups.indexOf(node.type) * 12;
+      positions.set(node.id, {
+        x: 62 + (index % columns) * ((width - 124) / Math.max(columns - 1, 1)),
+        y: 58 + Math.floor(index / columns) * Math.max(96, (height - 116) / Math.max(rows - 1, 1)) + groupOffset,
+      });
+    });
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "code-map-svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "当前被监控项目的代码关系图");
+    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+    marker.setAttribute("id", "code-map-arrow"); marker.setAttribute("viewBox", "0 0 8 8"); marker.setAttribute("refX", "7"); marker.setAttribute("refY", "4"); marker.setAttribute("markerWidth", "5"); marker.setAttribute("markerHeight", "5"); marker.setAttribute("orient", "auto-start-reverse");
+    const arrow = document.createElementNS("http://www.w3.org/2000/svg", "path"); arrow.setAttribute("d", "M 0 0 L 8 4 L 0 8 z"); arrow.setAttribute("fill", "currentColor"); marker.append(arrow); defs.append(marker); svg.append(defs);
+    visibleEdges.forEach((edge) => {
+      const source = positions.get(edge.source); const target = positions.get(edge.target);
+      if (!source || !target) return;
+      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      line.setAttribute("class", `code-map-edge ${edge.evidence === "unresolved" ? "unresolved" : ""}`);
+      line.setAttribute("x1", source.x); line.setAttribute("y1", source.y); line.setAttribute("x2", target.x); line.setAttribute("y2", target.y);
+      line.setAttribute("marker-end", "url(#code-map-arrow)");
+      line.style.color = edge.evidence === "unresolved" ? "var(--yellow)" : "var(--line-strong)";
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = `${edge.relation} · ${codeMapEvidenceLabel(edge.evidence)}${edge.line ? ` · ${edge.line} 行` : ""}`;
+      line.append(title); svg.append(line);
+    });
+    ordered.forEach((node) => {
+      const position = positions.get(node.id); if (!position) return;
+      const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.setAttribute("class", `code-map-node ${node.type}${node.id === codeMapSelectedNodeId ? " selected" : ""}`);
+      group.setAttribute("transform", `translate(${position.x} ${position.y})`);
+      group.setAttribute("tabindex", "0"); group.setAttribute("role", "button"); group.setAttribute("aria-label", `选择 ${codeMapNodeLabel(node)}`);
+      if (node.type === "directory") {
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect"); rect.setAttribute("x", "-42"); rect.setAttribute("y", "-16"); rect.setAttribute("width", "84"); rect.setAttribute("height", "32"); rect.setAttribute("rx", "4"); group.append(rect);
+      } else {
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle"); circle.setAttribute("r", node.type === "file" ? "18" : "14"); group.append(circle);
+      }
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text"); label.setAttribute("text-anchor", "middle"); label.setAttribute("y", node.type === "directory" ? "31" : "32"); label.textContent = String(node.label || "节点").slice(0, 22); group.append(label);
+      const type = document.createElementNS("http://www.w3.org/2000/svg", "text"); type.setAttribute("class", "node-type"); type.setAttribute("text-anchor", "middle"); type.setAttribute("y", node.type === "directory" ? "43" : "44"); type.textContent = node.type === "symbol" ? (node.symbol_kind || "symbol") : node.type; group.append(type);
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title"); title.textContent = `${codeMapNodeLabel(node)}${node.line_start ? `:${node.line_start}` : ""}`; group.append(title);
+      const select = () => selectCodeMapNode(node.id);
+      group.addEventListener("click", select);
+      group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } });
+      svg.append(group);
+    });
+    stage.replaceChildren(svg);
+    $("code-map-meta").textContent = `${visibleNodes.length}/${codeGraph.counts?.nodes || 0} 节点 · ${visibleEdges.length} 关系`;
+    if (!visibleNodes.length) stage.replaceChildren(create("div", "code-map-empty", "没有匹配的代码节点。"));
+  }
+  function codeMapSection(title, content) {
+    const section = create("section", "code-map-section");
+    section.append(create("div", "code-map-section-title", title));
+    if (content) section.append(content);
+    return section;
+  }
+  function codeMapFacts(dossier) {
+    const facts = create("div", "code-map-facts");
+    const node = dossier.node || {};
+    const selection = dossier.selection || {};
+    const rows = [
+      ["位置", `${selection.path || node.path || "—"}:${selection.start_line || node.line_start || 1}-${selection.end_line || node.line_end || 1}`],
+      ["类型", node.symbol_kind || node.type || "—"],
+      ["语言", node.language || "—"],
+      ["解析", dossier.facts?.parse_status === "ok" ? "静态解析成功" : "待确认"],
+      ["关系", `${dossier.facts?.neighbor_count || 0} 个一跳节点`],
+    ];
+    rows.forEach(([label, value]) => { const row = create("div", "code-map-fact"); row.append(create("span", "", label), create("strong", "", value)); facts.append(row); });
+    return facts;
+  }
+  function codeMapNeighbors(dossier) {
+    const target = create("div", "code-map-neighbors");
+    const neighbors = Array.isArray(dossier.neighbors) ? dossier.neighbors : [];
+    if (!neighbors.length) { target.append(create("div", "code-map-empty-detail", "未发现可解析的一跳关系。")); return target; }
+    neighbors.slice(0, 10).forEach((neighbor) => {
+      const row = create("div", "code-map-neighbor");
+      const button = create("button", "", `${neighbor.direction === "outgoing" ? "→" : "←"} ${neighbor.label || neighbor.path || "节点"}`);
+      button.type = "button"; button.addEventListener("click", () => selectCodeMapNode(neighbor.node_id));
+      row.append(button, document.createTextNode(` · ${neighbor.relation || "关系"} · ${codeMapEvidenceLabel(neighbor.evidence)}`)); target.append(row);
+    });
+    return target;
+  }
+  function codeMapSemanticSection(result) {
+    const data = result?.semantic;
+    if (!data || typeof data !== "object") return null;
+    const content = create("div", "code-map-semantic-list");
+    content.append(create("p", "code-map-semantic-role", data.role || "—"));
+    content.append(create("div", "code-map-semantic-status", `${codeMapCertaintyLabel(data.certainty)} · ${result.source_included ? "含用户允许的代码片段" : "仅元数据与关系"}`));
+    const groups = [["职责", data.responsibilities], ["输入/输出", data.inputs_outputs], ["流程理解", data.flow], ["风险与待确认", data.risks], ["局限", data.limitations]];
+    groups.forEach(([label, values]) => {
+      if (!Array.isArray(values) || !values.length) return;
+      const wrapper = create("div", ""); wrapper.append(create("div", "code-map-section-title", label));
+      values.forEach((value) => wrapper.append(create("div", "code-map-line", value)));
+      content.append(wrapper);
+    });
+    const refs = create("div", "code-map-evidence");
+    (data.evidence_refs || []).forEach((ref) => refs.append(create("span", "", ref)));
+    if (refs.childElementCount) content.append(refs);
+    return codeMapSection("代码解读 Agent · 非执行证据", content);
+  }
+  function renderCodeMapInspector() {
+    const body = $("code-map-inspector-body"); const title = $("code-map-inspector-title"); const status = $("code-map-agent-status");
+    const node = codeMapNodeById(codeMapSelectedNodeId);
+    body.replaceChildren();
+    if (!node || !codeMapDossier) {
+      title.textContent = "尚未选择节点"; status.textContent = "等待选择"; status.className = "llm-badge warn";
+      body.append(create("div", "code-map-empty-detail", "点击地图中的文件或符号，可查看可核验的关系，再决定是否让代码解读 Agent 生成说明。")); return;
+    }
+    title.textContent = codeMapNodeLabel(node);
+    const state = codeMapInterpreter?.status || "not_requested";
+    status.textContent = state === "ok" ? (codeMapInterpreter.source_included ? "已解读 · 含片段" : "已解读 · 元数据") : state === "unavailable" ? "Agent 不可用" : state === "error" ? "解读失败" : "尚未解读";
+    status.className = `llm-badge ${state === "ok" ? "ok" : state === "error" ? "bad" : "warn"}`;
+    body.append(codeMapSection("确定性事实", codeMapFacts(codeMapDossier)));
+    body.append(codeMapSection("可解析协作关系", codeMapNeighbors(codeMapDossier)));
+    const controls = create("div", ""); const range = create("div", "code-map-range");
+    const startLabel = create("label", "", "起始行"); const start = create("input", ""); start.type = "number"; start.min = String(node.line_start || 1); start.max = String(node.line_end || node.line_start || 1); start.value = String(codeMapDossier.selection?.start_line || node.line_start || 1); start.id = "code-map-start-line"; startLabel.append(start);
+    const endLabel = create("label", "", "结束行"); const end = create("input", ""); end.type = "number"; end.min = String(node.line_start || 1); end.max = String(node.line_end || node.line_start || 1); end.value = String(Math.min(codeMapDossier.selection?.end_line || node.line_end || node.line_start || 1, (codeMapDossier.selection?.start_line || node.line_start || 1) + 79)); end.id = "code-map-end-line"; endLabel.append(end); range.append(startLabel, endLabel); controls.append(range);
+    const consent = create("label", "code-map-source-consent"); const consentInput = create("input", ""); consentInput.type = "checkbox"; consentInput.id = "code-map-source-consent"; consent.append(consentInput, create("span", "", "允许把此处选定代码片段发送给当前 LLM 厂商。未勾选时仅发送结构元数据、签名和关系。")); controls.append(consent);
+    const buttons = create("div", "code-map-control-row"); const preview = create("button", "button", "查看本地代码"); preview.type = "button"; preview.addEventListener("click", () => loadCodeMapDossier({ preview: true, interpret: false })); const interpret = create("button", "button primary", codeMapBusy ? "正在解读" : "让 Agent 解读"); interpret.type = "button"; interpret.disabled = codeMapBusy; interpret.addEventListener("click", () => loadCodeMapDossier({ interpret: true, source: consentInput.checked })); buttons.append(preview, interpret); controls.append(buttons);
+    body.append(codeMapSection("选区与解读范围", controls));
+    if (codeMapDossier.preview?.text) body.append(codeMapSection("本地代码预览", Object.assign(create("pre", "code-map-preview"), { textContent: codeMapDossier.preview.text })));
+    const semantic = codeMapSemanticSection(codeMapInterpreter); if (semantic) body.append(semantic);
+    if (state === "unavailable" || state === "error") body.append(codeMapSection("解读状态", create("div", "code-map-empty-detail", codeMapInterpreter.reason || "代码解读 Agent 暂时不可用。")));
+  }
+  async function loadCodeMapDossier(options = {}) {
+    const node = codeMapNodeById(codeMapSelectedNodeId);
+    if (!selectedProject || !node || (node.type !== "file" && node.type !== "symbol")) return;
+    const start = $("code-map-start-line"); const end = $("code-map-end-line");
+    const selection = {
+      path: node.path,
+      start_line: Number(start?.value || node.line_start || 1),
+      end_line: Number(end?.value || node.line_end || node.line_start || 1),
+    };
+    if (!Number.isInteger(selection.start_line) || !Number.isInteger(selection.end_line) || selection.end_line < selection.start_line) { toast("请选择有效的代码行范围"); return; }
+    codeMapBusy = options.interpret === true; renderCodeMapInspector();
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/code-graph/interpret`, {
+        method: "POST", body: { node_id: node.id, selection, include_preview: options.preview === true || options.source === true, include_source: options.source === true, interpret: options.interpret !== false },
+      });
+      if (!selectedProject || selectedProject.workspace !== codeGraphWorkspace || codeMapSelectedNodeId !== node.id) return;
+      codeMapDossier = payload.dossier || null;
+      codeMapInterpreter = payload.interpreter || null;
+      if (payload.cached) toast("已复用当前代码版本的解读");
+    } catch (error) { codeMapInterpreter = { status: "error", reason: error.message || "节点请求失败" }; }
+    finally { codeMapBusy = false; renderCodeMapInspector(); }
+  }
+  async function selectCodeMapNode(nodeId) {
+    const node = codeMapNodeById(nodeId);
+    if (!node) return;
+    codeMapSelectedNodeId = nodeId; codeMapDossier = null; codeMapInterpreter = null; renderCodeMap(); renderCodeMapInspector();
+    if (node.type !== "file" && node.type !== "symbol") return;
+    await loadCodeMapDossier({ interpret: false });
+  }
+  async function loadCodeMap(force = false, epoch = dataEpoch) {
+    if (!selectedProject) { resetCodeMap(); return; }
+    if (!force && codeGraph && codeGraphWorkspace === selectedProject.workspace) { renderCodeMap(); renderCodeMapInspector(); return; }
+    const workspace = selectedProject.workspace; clearCodeMapSelection(); codeGraph = null; codeGraphWorkspace = workspace;
+    $("code-map-status").textContent = "加载结构关系…"; renderCodeMap();
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/code-graph`);
+      if (epoch !== dataEpoch || !selectedProject || selectedProject.workspace !== workspace) return;
+      codeGraph = payload.graph || null;
+      const counts = codeGraph?.counts || {};
+      $("code-map-status").textContent = codeGraph?.truncated ? "已加载（节点预算已截断）" : "已加载确定性结构";
+      $("code-map-meta").textContent = `${counts.nodes || 0} 节点 · ${counts.edges || 0} 关系`;
+      renderCodeMap(); renderCodeMapInspector();
+    } catch (error) {
+      if (epoch !== dataEpoch) return;
+      codeGraph = null; $("code-map-status").textContent = "地图不可用";
+      $("code-map-stage").replaceChildren(create("div", "code-map-empty", error.message || "无法加载代码地图。"));
+    }
+  }
+  $("code-map-refresh-btn").addEventListener("click", () => loadCodeMap(true));
+  $("code-map-filter").addEventListener("input", renderCodeMap);
+  $("code-map-show-symbols").addEventListener("change", renderCodeMap);
   // Refresh only the data the ACTIVE view needs, plus the sidebar project list.
   async function refreshActiveView(epoch = dataEpoch) {
     if (currentView === "overview") {
       await loadProjectSummary(false, epoch);
       await loadDriveLatest(epoch);
       await loadReviewHistory(epoch);
+    } else if (currentView === "code-map") {
+      await loadCodeMap(false, epoch);
     } else if (currentView === "projects") {
       await loadProjects(epoch);
     } else {
@@ -1942,7 +2440,7 @@
       streamController = controller;
       try {
         const response = await fetch(baseUrl() + "/api/stream", {
-          headers: { "X-Code-CCTV-Token": config.token }, signal: controller.signal,
+          headers: { "X-Code-Defog-Token": config.token }, signal: controller.signal,
         });
         if (!response.ok || !response.body) throw new Error("stream unavailable");
         const reader = response.body.getReader();
@@ -2380,7 +2878,10 @@
     if (!project) return;
     const changed = !selectedProject || selectedProject.workspace !== project.workspace;
     selectedProject = project;
-    if (changed) resetAssistantConversation();
+    if (changed) {
+      resetAssistantConversation();
+      resetCodeMap();
+    }
     localStorage.setItem(PROJECT_KEY, workspace);
     const epoch = ++dataEpoch;                 // invalidate in-flight loads from the old project
     renderSidebarProjects();

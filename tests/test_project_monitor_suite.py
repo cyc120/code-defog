@@ -165,12 +165,13 @@ class ProjectMonitorTests(unittest.TestCase):
             store = StateStore(base / "s.sqlite3")
             store.register_monitored_project({"workspace": str(repo)})
             events = []
+            invalidated = []
 
             def capture(payload):
                 events.append(payload)
                 return True
             mon = ProjectMonitor(store, post_event=capture, poll_interval=1.0,
-                                 git_poll_interval=999)
+                                 git_poll_interval=999, on_project_change=invalidated.append)
             mon.start_project(str(repo))
             time.sleep(2)  # baseline
             (repo / "a.txt").write_text("changed\n", encoding="utf-8")
@@ -178,6 +179,8 @@ class ProjectMonitorTests(unittest.TestCase):
             mon.stop()
             self.assertTrue(any(e.get("event_type") == "file_change" for e in events),
                             f"expected file_change event, got {events}")
+            self.assertIn(str(repo), invalidated,
+                          "expected a monitored file change to invalidate dependent caches")
             self.assertEqual(store.get_monitored_project(str(repo))["status"], "watching")
             store.close()
 
@@ -198,6 +201,42 @@ class ProjectMonitorTests(unittest.TestCase):
             projects = state.get("projects", [])
             self.assertTrue(any(p["workspace"] == str(repo.resolve()) for p in projects),
                             "expected project row in state after ingest")
+            store.close()
+
+    def test_git_commits_are_not_re_emitted(self) -> None:
+        """A stale loop-local snapshot must not re-emit the same commits.
+
+        The watcher captures `project` once at start, but `_advance_head` only
+        updates the store row.  Re-emitting every poll would duplicate git_commit
+        events; `_emit_git_commits` must re-read the persisted base_commit.
+        """
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            repo = _make_git_repo(base, "proj")
+            store = StateStore(base / "s.sqlite3")
+            store.register_monitored_project({"workspace": str(repo)})
+            events = []
+
+            def capture(payload):
+                events.append(payload)
+                return True
+
+            mon = ProjectMonitor(store, post_event=capture, poll_interval=1.0,
+                                 git_poll_interval=999)
+            # Create a second commit beyond the registered base_commit.
+            (repo / "b.txt").write_text("new\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-qm", "second"], cwd=repo, check=True,
+                           capture_output=True)
+
+            stale_project = store.get_monitored_project(str(repo))
+            # First emit sees exactly one new commit and advances base_commit.
+            mon._emit_git_commits(str(repo), stale_project)
+            self.assertEqual(sum(1 for e in events if e.get("event_type") == "git_commit"), 1)
+
+            # Second emit reuses the same stale snapshot: must NOT re-emit.
+            mon._emit_git_commits(str(repo), stale_project)
+            self.assertEqual(sum(1 for e in events if e.get("event_type") == "git_commit"), 1)
             store.close()
 
 

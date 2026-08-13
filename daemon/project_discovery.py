@@ -1,7 +1,7 @@
 """Local project discovery — enumerate candidate projects on this machine.
 
 Finds two kinds of candidates for the "select projects to monitor" window:
-1. **Git repositories** under configured root directories (``CODE_CCTV_PROJECT_ROOTS``).
+1. **Git repositories** under configured root directories (``CODE_DEFOG_PROJECT_ROOTS``).
 2. **Running processes** whose working directory looks like a project.
 
 Privacy: processes expose only ``pid``/``name``/``executable``/``cwd`` — never
@@ -85,7 +85,10 @@ class LocalProjectDiscoveryAgent:
 
     @staticmethod
     def _resolve_roots() -> tuple[str, ...]:
-        env = os.environ.get("CODE_CCTV_PROJECT_ROOTS", "").strip()
+        env = (
+            os.environ.get("CODE_DEFOG_PROJECT_ROOTS")
+            or os.environ.get("CODE_CCTV_PROJECT_ROOTS", "")
+        ).strip()
         if env:
             return tuple(part.strip() for part in env.split(os.pathsep) if part.strip())
         return DEFAULT_ROOTS

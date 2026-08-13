@@ -6,7 +6,7 @@ The "启动自动化驱动" button in the overview view starts a daemon thread t
 2. detects and runs the project's own test suite (safe subprocess + timeout),
 3. statically scans for TODO/FIXME markers and error-handling gaps,
 4. feeds all of that plus the deterministic store stats to DeepSeek, producing a
-   codecctv-style info-pyramid summary regardless of Case count.
+   Code Defog-style information-pyramid summary regardless of Case count.
 
 Read-only: this module never mutates the project.  Test runs execute only an
 obviously-detected project test command (pytest / npm test / make test / go test)
@@ -101,7 +101,7 @@ def browse_project(
     total_size = 0
     if _snapshot is not None:
         try:
-            tree = _snapshot(ws, ".code-cctv-monitor", Path("/dev/null"))
+            tree = _snapshot(ws, ".code-defog-monitor", Path("/dev/null"))
             for rel, meta in tree.items():
                 file_count += 1
                 total_size += int(meta.get("size", 0) or 0)

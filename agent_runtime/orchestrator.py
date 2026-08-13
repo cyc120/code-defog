@@ -202,11 +202,7 @@ class Orchestrator:
                         # No patch reference — cannot issue a release grant
                         self.store.transition_case(case_id, "ESCALATED")
                     else:
-                        self.store.connection.execute(
-                            "UPDATE cases SET patch_ref = ? WHERE case_id = ?",
-                            (patch_ref, case_id),
-                        )
-                        self.store.connection.commit()
+                        self.store.set_patch_ref(case_id, patch_ref)
                         self.store.transition_case(case_id, "RELEASE_APPROVAL",
                                                     pending_action_for_state("RELEASE_APPROVAL"))
                 elif agent_result.get("quality_gate_passed") is False:

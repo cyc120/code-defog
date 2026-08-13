@@ -347,20 +347,42 @@ class AgentScopeExecutionAdapter:
                 **_harness_metadata(context),
             }
 
+    def dispatch_code_interpreter_task(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Run the dossier-only Code Interpreter Agent through the local adapter.
+
+        This remains a local provider call in both modes: the agent has no
+        filesystem or tool access and never becomes an AgentTeams claim.
+        """
+        if not isinstance(context, dict) or not isinstance(context.get("dossier"), dict):
+            return {"status": "error", "reason": "代码解读任务缺少节点证据包。"}
+        try:
+            module = importlib.import_module("agents.code_interpreter")
+            result = module.run(context)
+            if not isinstance(result, dict):
+                raise RuntimeError("Code Interpreter Agent returned a non-object result")
+            status = result.get("status")
+            if status not in ("ok", "unavailable", "error"):
+                raise RuntimeError("Code Interpreter Agent returned invalid status")
+            return {
+                **result,
+                "agent": "code_interpreter",
+                "execution_mode": self._mode,
+                "runtime_kind": "local_bounded_code_interpreter",
+                **_harness_metadata(context),
+            }
+        except Exception as exc:
+            return {
+                "status": "error", "reason": str(exc), "agent": "code_interpreter",
+                "execution_mode": self._mode,
+                "runtime_kind": "local_bounded_code_interpreter",
+                **_harness_metadata(context),
+            }
     # ── Mock dispatch ────────────────────────────────────────────────────
 
     def _dispatch_mock(
         self, case_id: str, state: str, module_path: str, context: dict[str, Any],
     ) -> dict[str, Any]:
-        import time
-        run_id = f"run-{uuid.uuid4().hex[:8]}"
-        self._store.connection.execute(
-            "INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at) "
-            "VALUES (?, ?, ?, 'running', ?, ?)",
-            (run_id, case_id, module_path, context.get("trace_id", ""),
-             time.strftime("%Y-%m-%dT%H:%M:%SZ")),
-        )
-        self._store.connection.commit()
+        run_id = self._store.begin_agent_run(case_id, module_path, context.get("trace_id", ""))
         try:
             mod = importlib.import_module(module_path)
             agent_fn = getattr(mod, "run", None)
@@ -377,19 +399,10 @@ class AgentScopeExecutionAdapter:
             if result["status"] not in ("completed", "failed"):
                 raise RuntimeError(f"Agent module {module_path} returned invalid status")
             result = {**result, **_harness_metadata(context)}
-            self._store.connection.execute(
-                "UPDATE agent_runs SET status = ?, output_ref = ?, finished_at = ? WHERE run_id = ?",
-                (result["status"], json.dumps(result, ensure_ascii=False),
-                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-            )
+            self._store.finish_agent_run(run_id, result["status"], json.dumps(result, ensure_ascii=False))
         except Exception as exc:
             result = {"status": "failed", "failure_reason": str(exc), **_harness_metadata(context)}
-            self._store.connection.execute(
-                "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                (json.dumps(result, ensure_ascii=False),
-                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-            )
-        self._store.connection.commit()
+            self._store.finish_agent_run(run_id, "failed", json.dumps(result, ensure_ascii=False))
         return result
 
     # ── AgentScope dispatch ──────────────────────────────────────────────
@@ -409,8 +422,6 @@ class AgentScopeExecutionAdapter:
                           team_id, status: "failed", failure_reason: "...",
                           raw_text, runtime_events}
         """
-        import time
-
         agent = self._agents.get(agent_key)
         if agent is None:
             return {"error": f"Agent '{agent_key}' not initialised — call set_mode('agentscope') first"}
@@ -418,14 +429,7 @@ class AgentScopeExecutionAdapter:
         # Application-layer IDs (NOT runtime-native identifiers)
         devloop_task_id = f"devtask-{uuid.uuid4().hex[:12]}"
         devloop_trace_id = context.get("trace_id", f"devtrace-{uuid.uuid4().hex[:16]}")
-        run_id = f"run-{uuid.uuid4().hex[:8]}"
-
-        self._store.connection.execute(
-            "INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at) "
-            "VALUES (?, ?, ?, 'running', ?, ?)",
-            (run_id, case_id, agent_key, devloop_trace_id, time.strftime("%Y-%m-%dT%H:%M:%SZ")),
-        )
-        self._store.connection.commit()
+        run_id = self._store.begin_agent_run(case_id, agent_key, devloop_trace_id)
 
         prompt = self._build_task_prompt(state, context)
 
@@ -525,11 +529,7 @@ class AgentScopeExecutionAdapter:
                     "failure_reason": failure,
                     "raw_text": raw_text[:2000],
                 }
-                self._store.connection.execute(
-                    "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                    (json.dumps(result, ensure_ascii=False),
-                     time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-                )
+                self._store.finish_agent_run(run_id, "failed", json.dumps(result, ensure_ascii=False))
             else:
                 # ── Structured JSON extraction + validation ──────────
                 structured = _extract_json_block(raw_text)
@@ -541,11 +541,7 @@ class AgentScopeExecutionAdapter:
                         "failure_reason": f"invalid_structured_output: {validation_error}",
                         "raw_text": raw_text[:2000],
                     }
-                    self._store.connection.execute(
-                        "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                        (json.dumps(result, ensure_ascii=False),
-                         time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-                    )
+                    self._store.finish_agent_run(run_id, "failed", json.dumps(result, ensure_ascii=False))
                 else:
                     # Runtime text is advisory for a mutating demo repair and
                     # for its release decision. The controlled repair tool and
@@ -582,11 +578,7 @@ class AgentScopeExecutionAdapter:
                         "result_summary": raw_text[:500],
                         "raw_text": raw_text[:4000],
                     }
-                    self._store.connection.execute(
-                        "UPDATE agent_runs SET status = 'completed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                        (json.dumps(result, ensure_ascii=False),
-                         time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-                    )
+                    self._store.finish_agent_run(run_id, "completed", json.dumps(result, ensure_ascii=False))
         except Exception as exc:
             result = {
                 "agent": agent_key, "case_id": case_id,
@@ -597,12 +589,7 @@ class AgentScopeExecutionAdapter:
                 "failure_reason": f"exception: {exc}",
                 **_harness_metadata(context),
             }
-            self._store.connection.execute(
-                "UPDATE agent_runs SET status = 'failed', output_ref = ?, finished_at = ? WHERE run_id = ?",
-                (json.dumps(result, ensure_ascii=False),
-                 time.strftime("%Y-%m-%dT%H:%M:%SZ"), run_id),
-            )
-        self._store.connection.commit()
+            self._store.finish_agent_run(run_id, "failed", json.dumps(result, ensure_ascii=False))
         return result
 
     @staticmethod

@@ -29,6 +29,12 @@ class ProjectReviewExecutionAdapter(Protocol):
     ) -> dict[str, Any]: ...
 
 
+class CodeInterpreterExecutionAdapter(Protocol):
+    """Optional execution port for a bounded code-node explanation."""
+
+    def dispatch_code_interpreter_task(self, context: dict[str, Any]) -> dict[str, Any]: ...
+
+
 @dataclass(frozen=True)
 class HarnessTask:
     """One explicit business-Agent task in the Case workflow."""
@@ -110,6 +116,23 @@ PROJECT_REVIEW_TASKS: tuple[ProjectReviewTask, ...] = (
 PROJECT_REVIEW_TASK_BY_KEY = {task.task_key: task for task in PROJECT_REVIEW_TASKS}
 
 
+@dataclass(frozen=True)
+class CodeInterpreterTask:
+    """The only LLM Agent task permitted from a selected code node."""
+
+    agent_id: str = "code_interpreter"
+    boundary: str = (
+        "只读取调用方提供的 Node/Selection Dossier；不检索任意路径、"
+        "不执行命令、不改代码、不访问凭据。"
+    )
+
+    def to_dict(self) -> dict[str, object]:
+        return {"agent_id": self.agent_id, "boundary": self.boundary}
+
+
+CODE_INTERPRETER_TASK = CodeInterpreterTask()
+
+
 class DevLoopHarness:
     """Coordinate every business-Agent task through one local control point.
 
@@ -134,6 +157,7 @@ class DevLoopHarness:
             "tasks": [task.to_dict() for task in AGENT_TASKS],
             "review_agent_count": len(PROJECT_REVIEW_TASKS),
             "review_tasks": [task.to_dict() for task in PROJECT_REVIEW_TASKS],
+            "code_interpreter": CODE_INTERPRETER_TASK.to_dict(),
             "approval_boundary": (
                 "审批状态不进入 Harness；Harness 不持有 service token、"
                 "审批密钥或 approval token。"
@@ -241,3 +265,24 @@ class DevLoopHarness:
                 **dispatch_metadata,
             }
         return {**result, **dispatch_metadata}
+
+    def dispatch_code_interpreter(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Dispatch a single dossier-only explanation through the local Harness."""
+        if not isinstance(context, dict) or not isinstance(context.get("dossier"), dict):
+            return {"status": "error", "reason": "代码解读任务缺少节点证据包。"}
+        dispatch = getattr(self.executor, "dispatch_code_interpreter_task", None)
+        if not callable(dispatch):
+            return {"status": "error", "reason": "Harness 执行器不支持代码解读 Agent。"}
+        metadata = {
+            "harness_id": self.harness_id,
+            "harness_task_id": f"hctask-{uuid.uuid4().hex[:12]}",
+            "harness_task_kind": "code_interpreter",
+            "harness_agent_id": CODE_INTERPRETER_TASK.agent_id,
+        }
+        try:
+            result = dispatch({**context, **metadata})
+        except Exception as exc:
+            return {"status": "error", "reason": f"Harness 代码解读执行异常：{exc}", **metadata}
+        if not isinstance(result, dict):
+            return {"status": "error", "reason": "Harness 代码解读返回非对象结果。", **metadata}
+        return {**result, **metadata}

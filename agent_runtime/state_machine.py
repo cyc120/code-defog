@@ -1,4 +1,4 @@
-# Case state machine for Code CCTV DevLoop.
+# Case state machine for Code Defog.
 #
 # Valid transitions (v0.5):
 #   RECEIVED → TRIAGED → DIAGNOSED → PLAN_APPROVAL

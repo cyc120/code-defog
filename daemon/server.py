@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Threaded localhost HTTP and SSE server for Code CCTV — extended with DevLoop Case API."""
+"""Threaded localhost HTTP and SSE server for Code Defog — extended with DevLoop Case API."""
 
 from __future__ import annotations
 
@@ -19,11 +19,15 @@ from threading import Lock
 from typing import Any
 from urllib.parse import urlparse
 
+from .code_graph import CodeGraphError, build_code_graph, build_node_dossier
+from .code_semantics import interpret_code_dossier
 from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text
+from .llm_providers import LLMProviderStore
 from .llm_summary import (
     get_llm_summary,
     generate_project_assistant_reply,
     normalize_project_assistant_history,
+    test_llm_provider,
 )
 
 
@@ -32,9 +36,12 @@ TOKEN_TYPE_SERVICE = "service"
 TOKEN_TYPE_APPROVAL = "approval"
 ASSISTANT_CACHE_TTL_S = 30.0
 ASSISTANT_CACHE_MAX_ENTRIES = 128
+CODE_GRAPH_CACHE_TTL_S = 8.0
+CODE_GRAPH_CACHE_MAX_ENTRIES = 12
+CODE_SEMANTIC_CACHE_MAX_ENTRIES = 160
 
 
-class CodeCCTVServer(ThreadingHTTPServer):
+class CodeDefogServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
 
@@ -49,8 +56,11 @@ class CodeCCTVServer(ThreadingHTTPServer):
         drive_runner: Any | None = None,
         harness: Any | None = None,
         llm_chat_fn: Any | None = None,
+        llm_provider_store: LLMProviderStore | None = None,
+        code_graph_builder: Any | None = None,
+        code_interpreter_fn: Any | None = None,
     ) -> None:
-        super().__init__(address, CodeCCTVHandler)
+        super().__init__(address, CodeDefogHandler)
         self.token = token
         self.store = store
         self.orchestrator = orchestrator
@@ -66,7 +76,15 @@ class CodeCCTVServer(ThreadingHTTPServer):
         # The cache lives server-side so SSE-triggered stat refreshes never
         # re-run the LLM until TTL expiry or an explicit ?refresh=1.
         self.summary_cache: dict[str, Any] = {}
-        self.llm_summary_fn = llm_summary_fn or get_llm_summary
+        self.llm_provider_store = llm_provider_store or LLMProviderStore()
+        self.code_graph_builder = code_graph_builder or build_code_graph
+        if llm_summary_fn is None:
+            self.llm_summary_fn = lambda stats, refresh=False, cache=None, key="default": get_llm_summary(
+                stats, refresh=refresh, cache=cache, key=key,
+                provider_store=self.llm_provider_store,
+            )
+        else:
+            self.llm_summary_fn = llm_summary_fn
         # Local project discovery + monitoring (enterprise milestone 1).
         self.project_discovery_agent = project_discovery_agent
         self.project_monitor = project_monitor
@@ -75,12 +93,30 @@ class CodeCCTVServer(ThreadingHTTPServer):
         self.harness = harness
         # A separate injection point keeps project-assistant HTTP tests fully
         # offline and independent from the dashboard summary generator.
-        self.llm_chat_fn = llm_chat_fn or generate_project_assistant_reply
+        if llm_chat_fn is None:
+            self.llm_chat_fn = lambda question, project, stats, latest_drive, history: generate_project_assistant_reply(
+                question, project, stats, latest_drive, history,
+                provider_store=self.llm_provider_store,
+            )
+        else:
+            self.llm_chat_fn = llm_chat_fn
         # Short-lived answers make retries and accidental double submits fast
         # without storing any conversation on disk. The key includes the
         # bounded context snapshot, so project changes naturally invalidate it.
         self.assistant_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self.assistant_cache_lock = Lock()
+        # Graph data is local deterministic metadata.  It expires quickly and
+        # ProjectMonitor explicitly invalidates it on file or Git changes.
+        self.code_graph_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self.code_graph_cache_lock = Lock()
+        # Semantic cache never stores source snippets, only normalized Agent
+        # JSON. Provider/model and dossier fingerprints are part of its key.
+        self.code_semantic_cache: dict[str, dict[str, Any]] = {}
+        self.code_semantic_cache_lock = Lock()
+        # Tests may inject a deterministic interpreter. Production requests
+        # otherwise flow through the Harness so this Agent remains visible in
+        # the single local coordination boundary.
+        self.code_interpreter_fn = code_interpreter_fn
         self.started_at = time.monotonic()
         self.subscribers: set[queue.Queue[dict[str, Any]]] = set()
         self.subscriber_lock = Lock()
@@ -95,6 +131,86 @@ class CodeCCTVServer(ThreadingHTTPServer):
             "uptime_seconds": round(time.monotonic() - self.started_at, 1),
         })
         return payload
+
+    def clear_llm_caches(self) -> None:
+        """Discard narrative responses after a provider/model/key switch."""
+        self.summary_cache.clear()
+        with self.assistant_cache_lock:
+            self.assistant_cache.clear()
+        with self.code_semantic_cache_lock:
+            self.code_semantic_cache.clear()
+
+    def invalidate_code_graph_cache(self, workspace: str | None = None) -> None:
+        """Forget structural and semantic views after monitored project changes."""
+        with self.code_graph_cache_lock:
+            if workspace is None:
+                self.code_graph_cache.clear()
+            else:
+                self.code_graph_cache.pop(str(Path(workspace).expanduser().resolve()), None)
+        with self.code_semantic_cache_lock:
+            if workspace is None:
+                self.code_semantic_cache.clear()
+            else:
+                prefix = hashlib.sha256(
+                    str(Path(workspace).expanduser().resolve()).encode("utf-8")
+                ).hexdigest()[:16] + ":"
+                for key in [key for key in self.code_semantic_cache if key.startswith(prefix)]:
+                    self.code_semantic_cache.pop(key, None)
+
+    def get_code_graph(self, workspace: str) -> dict[str, Any]:
+        """Build/cache one registered workspace's metadata-only code graph."""
+        normalized = str(Path(workspace).expanduser().resolve())
+        now = time.monotonic()
+        with self.code_graph_cache_lock:
+            cached = self.code_graph_cache.get(normalized)
+            if cached is not None and cached[0] > now:
+                return cached[1]
+        graph = self.code_graph_builder(normalized)
+        if not isinstance(graph, dict):
+            raise CodeGraphError("code graph builder returned invalid data")
+        with self.code_graph_cache_lock:
+            if len(self.code_graph_cache) >= CODE_GRAPH_CACHE_MAX_ENTRIES:
+                oldest = next(iter(self.code_graph_cache), None)
+                if oldest is not None:
+                    self.code_graph_cache.pop(oldest, None)
+            self.code_graph_cache[normalized] = (now + CODE_GRAPH_CACHE_TTL_S, graph)
+        return graph
+
+    def code_semantic_cache_key(
+        self, workspace: str, dossier: dict[str, Any], include_source: bool,
+    ) -> str:
+        provider = self.llm_provider_store.public_config()
+        active = provider.get("active_provider")
+        selected = next(
+            (item for item in provider.get("providers", []) if isinstance(item, dict) and item.get("id") == active),
+            {},
+        )
+        workspace_prefix = hashlib.sha256(
+            str(Path(workspace).expanduser().resolve()).encode("utf-8")
+        ).hexdigest()[:16]
+        material = {
+            "dossier": dossier.get("fingerprint"), "source": bool(include_source),
+            "provider": selected.get("id"), "model": selected.get("model"), "schema": 1,
+        }
+        digest = hashlib.sha256(
+            json.dumps(material, ensure_ascii=True, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return f"{workspace_prefix}:{digest}"
+
+    def get_cached_code_semantic(self, key: str) -> dict[str, Any] | None:
+        with self.code_semantic_cache_lock:
+            response = self.code_semantic_cache.get(key)
+            return dict(response) if isinstance(response, dict) else None
+
+    def cache_code_semantic(self, key: str, response: dict[str, Any]) -> None:
+        if response.get("status") not in ("ok", "unavailable"):
+            return
+        with self.code_semantic_cache_lock:
+            if len(self.code_semantic_cache) >= CODE_SEMANTIC_CACHE_MAX_ENTRIES:
+                oldest = next(iter(self.code_semantic_cache), None)
+                if oldest is not None:
+                    self.code_semantic_cache.pop(oldest, None)
+            self.code_semantic_cache[key] = dict(response)
 
     def handle_error(self, request: Any, client_address: Any) -> None:
         """Ignore expected disconnects when a dashboard switches its SSE stream."""
@@ -186,8 +302,8 @@ class CodeCCTVServer(ThreadingHTTPServer):
             )
 
 
-class CodeCCTVHandler(BaseHTTPRequestHandler):
-    server: CodeCCTVServer
+class CodeDefogHandler(BaseHTTPRequestHandler):
+    server: CodeDefogServer
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: object) -> None:
@@ -196,10 +312,13 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
     # ── Auth helpers ─────────────────────────────────────────────────────
 
     def _supplied_token(self) -> str:
-        return self.headers.get("X-Code-CCTV-Token", "")
+        return self.headers.get("X-Code-Defog-Token", "") or self.headers.get("X-Code-CCTV-Token", "")
 
     def _token_type(self) -> str:
-        declared = self.headers.get("X-Code-CCTV-Token-Type", "service").strip().lower()
+        declared = (
+            self.headers.get("X-Code-Defog-Token-Type", "")
+            or self.headers.get("X-Code-CCTV-Token-Type", "service")
+        ).strip().lower()
         return TOKEN_TYPE_APPROVAL if declared == "approval" else TOKEN_TYPE_SERVICE
 
     def authorized_service(self) -> bool:
@@ -207,7 +326,10 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         return bool(supplied) and hmac.compare_digest(supplied, self.server.token)
 
     def authorized_human_approval(self) -> bool:
-        supplied = self.headers.get("X-Code-CCTV-Approval-Key", "")
+        supplied = (
+            self.headers.get("X-Code-Defog-Approval-Key", "")
+            or self.headers.get("X-Code-CCTV-Approval-Key", "")
+        )
         return bool(supplied) and hmac.compare_digest(supplied, self.server.approval_secret)
 
     # ── Response helpers ─────────────────────────────────────────────────
@@ -325,8 +447,12 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers",
-                         "Content-Type, X-Code-CCTV-Token, X-Code-CCTV-Token-Type, X-Code-CCTV-Approval-Key")
+        self.send_header(
+            "Access-Control-Allow-Headers",
+            "Content-Type, X-Code-Defog-Token, X-Code-Defog-Token-Type, "
+            "X-Code-Defog-Approval-Key, X-Code-CCTV-Token, "
+            "X-Code-CCTV-Token-Type, X-Code-CCTV-Approval-Key",
+        )
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
@@ -336,7 +462,7 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         if route == "/health":
             self.send_json({
                 "ok": True,
-                "service": "code-cctv",
+                "service": "code-defog",
                 "instance_id": self.server.instance_id,
                 "ui": bool(self.server.ui_dir),
             })
@@ -367,6 +493,9 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         if route == "/api/harness":
             self.get_harness()
             return
+        if route == "/api/llm/providers":
+            self.get_llm_providers()
+            return
         if route == "/api/project/summary":
             self.project_summary()
             return
@@ -378,6 +507,12 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
 
             workspace = unquote(route[len("/api/projects/"):-len("/reviews")])
             self.get_project_reviews(workspace)
+            return
+        if route.startswith("/api/projects/") and route.endswith("/code-graph"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/code-graph")])
+            self.get_project_code_graph(workspace)
             return
         if route.startswith("/api/projects/") and route.endswith("/drive"):
             from urllib.parse import unquote
@@ -407,7 +542,7 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         route = urlparse(self.path).path
 
-        # ── Original Code CCTV endpoints (service token) ─────────────────
+        # ── Event endpoints (service token) ───────────────────────────────
         if route == "/api/events":
             if not self.require_service_auth():
                 return
@@ -435,6 +570,25 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             state = self.server.store.clear_all()
             self.server.publish({"type": "state", "state": state})
             self.send_json({"ok": True, "state": state}, HTTPStatus.ACCEPTED)
+            return
+
+        # ── Local LLM provider settings (service token) ───────────────────
+        if route == "/api/llm/providers":
+            if not self.require_service_auth():
+                return
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            self.save_llm_provider(payload)
+            return
+
+        if route == "/api/llm/providers/test":
+            if not self.require_service_auth():
+                return
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            self.test_llm_provider_connection(payload)
             return
 
         # ── DevLoop: Case intake (service token) ─────────────────────────
@@ -535,6 +689,19 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.project_assistant(workspace, payload)
             return
 
+        # ── Selected code node interpretation (read-only, dossier-bound) ─
+        if route.startswith("/api/projects/") and route.endswith("/code-graph/interpret"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/code-graph/interpret")])
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            self.interpret_project_code_node(workspace, payload)
+            return
+
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     def do_DELETE(self) -> None:
@@ -562,7 +729,7 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
     # ═══════════════════════════════════════════════════════════════════════
-    # Original Code CCTV handlers
+    # Event handlers
     # ═══════════════════════════════════════════════════════════════════════
 
     def clear_session(self) -> None:
@@ -638,6 +805,39 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "harness manifest unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
             return
         self.send_json({"ok": True, "harness": manifest})
+
+    def get_llm_providers(self) -> None:
+        """GET /api/llm/providers — browser-safe local provider state."""
+        self.send_json({"ok": True, "llm": self.server.llm_provider_store.public_config()})
+
+    def save_llm_provider(self, payload: dict[str, Any]) -> None:
+        """POST /api/llm/providers — persist and activate one provider.
+
+        ``api_key`` is intentionally consumed by the confidential store only;
+        the response and SSE message contain the redacted public view.
+        """
+        try:
+            public = self.server.llm_provider_store.save_and_activate(payload)
+        except ValueError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        self.server.clear_llm_caches()
+        self.server.publish({"type": "llm_provider_updated", "llm": public})
+        self.send_json({"ok": True, "llm": public})
+
+    def test_llm_provider_connection(self, payload: dict[str, Any]) -> None:
+        """POST /api/llm/providers/test — validate a saved or one-time key."""
+        try:
+            candidate = self.server.llm_provider_store.resolve_candidate(payload)
+        except ValueError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        result = test_llm_provider(candidate)
+        self.send_json({
+            "ok": result.get("status") == "ok",
+            "test": result,
+            "llm": self.server.llm_provider_store.public_config(),
+        })
 
     def project_assistant(self, workspace: str, payload: dict[str, Any]) -> None:
         """POST /api/projects/{workspace}/assistant — grounded read-only chat."""
@@ -725,6 +925,124 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         projects = self.server.store.list_monitored_projects()
         self.send_json({"ok": True, "projects": projects, "count": len(projects)})
 
+    def _registered_project(self, workspace: str) -> dict[str, Any] | None:
+        """Canonical registered-project lookup used by every code-map route."""
+        if not workspace:
+            return None
+        try:
+            return self.server.store.get_monitored_project(workspace)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _public_code_graph(graph: dict[str, Any]) -> dict[str, Any]:
+        """Explicitly whitelist graph response fields; never expose source text."""
+        node_keys = (
+            "id", "type", "label", "path", "language", "symbol_kind", "line_start", "line_end",
+            "content_hash", "symbol_count", "parse_status", "note",
+        )
+        edge_keys = ("id", "source", "target", "relation", "evidence", "line", "specifier")
+        return {
+            "schema_version": graph.get("schema_version"), "truncated": bool(graph.get("truncated")),
+            "limits": graph.get("limits", {}), "counts": graph.get("counts", {}),
+            "graph_fingerprint": graph.get("graph_fingerprint"),
+            "edge_fingerprint": graph.get("edge_fingerprint"),
+            "nodes": [
+                {key: node.get(key) for key in node_keys if key in node}
+                for node in graph.get("nodes", []) if isinstance(node, dict)
+            ],
+            "edges": [
+                {key: edge.get(key) for key in edge_keys if key in edge}
+                for edge in graph.get("edges", []) if isinstance(edge, dict)
+            ],
+        }
+
+    def get_project_code_graph(self, workspace: str) -> None:
+        """GET graph metadata for one registered monitored project."""
+        project = self._registered_project(workspace)
+        if project is None:
+            self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            graph = self.server.get_code_graph(project["workspace"])
+        except CodeGraphError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        except Exception:
+            self.send_json({"error": "code graph unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        self.send_json({
+            "ok": True,
+            "project": {key: project.get(key) for key in ("name", "kind", "base_commit", "last_seen")},
+            "graph": self._public_code_graph(graph),
+        })
+
+    def interpret_project_code_node(self, workspace: str, payload: dict[str, Any]) -> None:
+        """POST a node/selection request to the bounded Code Interpreter Agent."""
+        project = self._registered_project(workspace)
+        if project is None:
+            self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+            return
+        node_id = payload.get("node_id")
+        if not isinstance(node_id, str) or not node_id.strip() or len(node_id) > 128:
+            self.send_json({"error": "node_id is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        selection = payload.get("selection")
+        if selection is not None and not isinstance(selection, dict):
+            self.send_json({"error": "selection must be an object"}, HTTPStatus.BAD_REQUEST)
+            return
+        include_source = payload.get("include_source") is True
+        include_preview = payload.get("include_preview") is True or include_source
+        request_interpretation = payload.get("interpret") is not False
+        try:
+            graph = self.server.get_code_graph(project["workspace"])
+            dossier = build_node_dossier(
+                project["workspace"], graph, node_id.strip(), selection=selection,
+                include_preview=include_preview, include_source=include_source,
+            )
+        except CodeGraphError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        except Exception:
+            self.send_json({"error": "code node unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
+            return
+        response: dict[str, Any] = {"status": "not_requested"}
+        cached = False
+        if request_interpretation:
+            cache_key = self.server.code_semantic_cache_key(project["workspace"], dossier, include_source)
+            response = self.server.get_cached_code_semantic(cache_key)
+            cached = response is not None
+            if response is None:
+                try:
+                    if callable(self.server.code_interpreter_fn):
+                        response = self.server.code_interpreter_fn(dossier, include_source=include_source)
+                    elif self.server.harness is not None:
+                        response = self.server.harness.dispatch_code_interpreter({
+                            "dossier": dossier,
+                            "include_source": include_source,
+                            "provider_store": self.server.llm_provider_store,
+                        })
+                    else:
+                        response = interpret_code_dossier(
+                            dossier, include_source=include_source,
+                            provider_store=self.server.llm_provider_store,
+                        )
+                except Exception:
+                    self.send_json({"error": "code interpreter unavailable"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                if not isinstance(response, dict):
+                    self.send_json({"error": "code interpreter returned invalid response"}, HTTPStatus.SERVICE_UNAVAILABLE)
+                    return
+                self.server.cache_code_semantic(cache_key, response)
+        # A dossier is safe metadata by default. Preview/source only return on
+        # an explicit request, and source context is never repeated to browser.
+        public_dossier = dict(dossier)
+        public_dossier.pop("source_context", None)
+        self.send_json({
+            "ok": response.get("status") == "ok", "cached": cached,
+            "dossier": public_dossier, "interpreter": response,
+        })
+
     def start_project_drive(self, workspace: str, payload: dict[str, Any] | None = None) -> None:
         """POST /api/projects/{workspace}/drive — spawn a project Review Run.
 
@@ -737,20 +1055,24 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             self.send_json({"error": f"workspace is not a directory: {workspace}"},
                            HTTPStatus.BAD_REQUEST)
             return
-        latest = self.server.store.get_latest_drive_run(workspace)
-        if latest and latest.get("status") == "running":
-            self.send_json({"error": "a drive is already running for this project"},
-                           HTTPStatus.CONFLICT)
-            return
 
         import threading
 
         review_scope = normalize_review_scope((payload or {}).get("scope"))
-        run_id = self.server.store.begin_review_run(workspace, review_scope, review_task_specs())
+        # Atomic check-and-create: two concurrent POSTs cannot both pass the
+        # "is a drive already running" guard and start two Review Runs.
+        run_id = self.server.store.begin_review_run_if_idle(
+            workspace, review_scope, review_task_specs(),
+        )
+        if run_id is None:
+            self.send_json({"error": "a drive is already running for this project"},
+                           HTTPStatus.CONFLICT)
+            return
         publish = self.server.publish
 
         def _drive_work() -> None:
             from .drive import run_drive
+            from .llm_summary import generate_drive_summary
 
             if self.server.drive_runner is None:
                 case_intake = (
@@ -761,6 +1083,9 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
                 run_drive(
                     self.server.store, workspace, run_id=run_id, publish=publish,
                     case_intake=case_intake, harness=self.server.harness, scope=review_scope,
+                    llm_fn=lambda target, browse, stats: generate_drive_summary(
+                        target, browse, stats, provider_store=self.server.llm_provider_store,
+                    ),
                 )
             else:
                 # Keep the small injection contract used by offline HTTP tests
@@ -861,7 +1186,7 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
 
         Human-approval guarded. Issues a one-time approval_token (stored as
         SHA-256) that the caller then consumes via POST /actions with
-        X-Code-CCTV-Token-Type: approval. The service token alone cannot
+        X-Code-Defog-Token-Type: approval. The service token alone cannot
         obtain this bearer credential; the Grant is one-shot and bound to the
         Case state.
         """
@@ -900,7 +1225,7 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
         """POST /api/cases/{case_id}/actions
 
         Grant-based actions (approve_plan, approve_release, reject_plan,
-        reject_release): require X-Code-CCTV-Token-Type: approval and a
+        reject_release): require X-Code-Defog-Token-Type: approval and a
         valid one-time approval_token.  Uses the same auth model as approve.
 
         Cancel: requires service_token.
@@ -914,7 +1239,7 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
             # ── Grant-consumption path (approve + reject, same model) ─
             if self._token_type() != TOKEN_TYPE_APPROVAL:
                 self.send_json(
-                    {"error": "grant actions require X-Code-CCTV-Token-Type: approval"},
+                    {"error": "grant actions require X-Code-Defog-Token-Type: approval"},
                     HTTPStatus.FORBIDDEN)
                 return
             result = self.server.store.perform_case_action(case_id, action, payload)
@@ -957,3 +1282,9 @@ class CodeCCTVHandler(BaseHTTPRequestHandler):
                            "reject_plan, reject_release, cancel"},
                 HTTPStatus.BAD_REQUEST)
             return
+
+
+# Compatibility import for local scripts and third-party integrations that
+# constructed the server by its former product name. New code uses
+# ``CodeDefogServer``; both names intentionally share the same implementation.
+CodeCCTVServer = CodeDefogServer

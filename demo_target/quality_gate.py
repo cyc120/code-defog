@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quality gate for Code CCTV DevLoop demo.
+"""Quality gate for the Code Defog demo.
 
 Runs the complete test suite against a (possibly modified) cli.py and
 exits 0 if all checks pass or non-zero if the gate fails.

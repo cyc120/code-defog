@@ -74,13 +74,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "agent": "local-service-discovery", "services": self.server.discovery_agent.discover()})
             return
         if route == "/health":
-            self.send_json({"ok": True, "service": "code-cctv-dashboard"})
+            self.send_json({"ok": True, "service": "code-defog-dashboard"})
             return
         self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Code CCTV local service discovery dashboard.")
+    parser = argparse.ArgumentParser(description="Run the Code Defog local service discovery dashboard.")
     parser.add_argument("--port", type=int, default=0, help="Use 0 to select a free local port.")
     parser.add_argument("--registry-dir", type=Path, default=paths.service_registry_dir())
     parser.add_argument("--legacy-config", type=Path, default=paths.config_path())
@@ -94,7 +94,7 @@ def main() -> None:
     server = DashboardServer(("127.0.0.1", args.port), agent)
     host, port = server.server_address
     url = f"http://{host}:{port}/ui"
-    print(f"Code CCTV service discovery dashboard: {url}", flush=True)
+    print(f"Code Defog service discovery dashboard: {url}", flush=True)
     if args.open:
         webbrowser.open(url)
     try:

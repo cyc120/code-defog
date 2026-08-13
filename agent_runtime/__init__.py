@@ -1,1 +1,1 @@
-"""Local DevLoop orchestration primitives for Code CCTV."""
+"""Local DevLoop orchestration primitives for Code Defog."""

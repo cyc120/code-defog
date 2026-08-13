@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the Code CCTV localhost service."""
+"""Start the Code Defog localhost service."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
 from . import paths
 from .project_discovery import LocalProjectDiscoveryAgent
 from .project_monitor import ProjectMonitor
-from .server import CodeCCTVServer
+from .server import CodeDefogServer
 from .service_discovery import LocalServiceDiscoveryAgent
 from .store import StateStore
 
@@ -63,14 +63,14 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run the Code CCTV local background service.")
+    parser = argparse.ArgumentParser(description="Run the Code Defog local background service.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=0, help="Use 0 to select a free local port.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument(
         "--runtime-mode", choices=("mock", "agentscope", "agentteams", "production"),
-        default=os.environ.get("CODE_CCTV_RUNTIME_MODE", "mock"),
+        default=os.environ.get("CODE_DEFOG_RUNTIME_MODE") or os.environ.get("CODE_CCTV_RUNTIME_MODE", "mock"),
         help=(
             "Use agentscope for the local AgentScope runtime. agentteams is fail-closed "
             "until an external AgentTeams workflow bridge is configured. "
@@ -82,8 +82,8 @@ def parse_args() -> argparse.Namespace:
         help="Inspect local AgentTeams prerequisites without starting a service or deployment.",
     )
     parser.add_argument(
-        "--approval-key", default=os.environ.get("CODE_CCTV_APPROVAL_KEY", ""),
-        help="Independent human approval key; prefer CODE_CCTV_APPROVAL_KEY over shell history.",
+        "--approval-key", default=os.environ.get("CODE_DEFOG_APPROVAL_KEY") or os.environ.get("CODE_CCTV_APPROVAL_KEY", ""),
+        help="Independent human approval key; prefer CODE_DEFOG_APPROVAL_KEY over shell history.",
     )
     return parser.parse_args()
 
@@ -107,7 +107,7 @@ def main() -> None:
             "- [missing] control-plane/workflow bridge: no AgentTeams Team/Task/Handoff bridge is "
             "configured\n"
             "  Remedy: Configure the external AgentTeams control plane and workflow bridge before "
-            "requesting agentteams mode. Code CCTV will not substitute AgentScope.",
+            "requesting agentteams mode. Code Defog will not substitute AgentScope.",
             file=sys.stderr,
         )
         raise SystemExit(2)
@@ -125,7 +125,7 @@ def main() -> None:
     approval_secret = args.approval_key or secrets.token_urlsafe(32)
     if not args.approval_key:
         print(
-            "Code CCTV human approval key (keep private; not stored in service.json): "
+            "Code Defog human approval key (keep private; not stored in service.json): "
             f"{approval_secret}",
             file=sys.stderr,
         )
@@ -137,9 +137,16 @@ def main() -> None:
     ).start()
 
     project_discovery_agent = LocalProjectDiscoveryAgent()
-    project_monitor = ProjectMonitor(store)
+    # File and Git changes invalidate graph/semantic caches. The monitor is
+    # created before the server, so use a tiny closure that receives its target
+    # only after local service initialization completes.
+    server_ref: dict[str, CodeDefogServer] = {}
+    project_monitor = ProjectMonitor(
+        store,
+        on_project_change=lambda workspace: server_ref.get("server") and server_ref["server"].invalidate_code_graph_cache(workspace),
+    )
 
-    server = CodeCCTVServer(
+    server = CodeDefogServer(
         (args.host, args.port), token, store, orchestrator,
         ui_dir=str(UI_DIR), discovery_agent=discovery_agent, instance_id=instance_id,
         approval_secret=approval_secret, runtime_mode=teams.mode,
@@ -147,13 +154,14 @@ def main() -> None:
         project_monitor=project_monitor,
         harness=harness,
     )
+    server_ref["server"] = server
     address, port = server.server_address
     descriptor_registered = False
     try:
         if discovery_agent.is_loopback_host(address):
             discovery_agent.register({
                 "instance_id": instance_id,
-                "display_name": f"Code CCTV DevLoop · {instance_id[:8]}",
+                "display_name": f"Code Defog · {instance_id[:8]}",
                 "host": address,
                 "port": port,
                 "pid": os.getpid(),

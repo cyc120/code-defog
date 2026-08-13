@@ -458,6 +458,23 @@ class DriveEndpointTests(unittest.TestCase):
             finally:
                 server.shutdown(); server.server_close(); store.close()
 
+    def test_begin_review_run_if_idle_blocks_concurrent_start(self) -> None:
+        """A second idle-guarded start while one is running must return None."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            first = store.begin_review_run_if_idle(directory, {"mode": "full"}, [{
+                "task_key": "prepare", "title": "准备", "stage": "prepare", "order": 1,
+            }])
+            self.assertIsNotNone(first)
+            # A running Review Run exists → the guard refuses a second one.
+            self.assertIsNone(store.begin_review_run_if_idle(directory))
+            # After finishing, a new run can start.
+            store.finish_review_run(first, "complete", 0.1, None, None, [], None)
+            second = store.begin_review_run_if_idle(directory)
+            self.assertIsNotNone(second)
+            self.assertNotEqual(first, second)
+            store.close()
+
 
 if __name__ == "__main__":
     unittest.main()

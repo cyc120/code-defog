@@ -9,7 +9,7 @@ Covers:
 
 No real network is ever touched: the LLM module tests monkeypatch
 ``_resolve_api_key`` / ``_post_chat``, and the HTTP tests inject a fake
-``llm_summary_fn`` into ``CodeCCTVServer``.
+``llm_summary_fn`` into ``CodeDefogServer``.
 """
 
 from __future__ import annotations

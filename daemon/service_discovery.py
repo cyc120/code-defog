@@ -1,4 +1,4 @@
-"""Tokenless, loopback-only discovery for local Code CCTV services.
+"""Tokenless, loopback-only discovery for local Code Defog services.
 
 The dashboard cannot inspect local files or running processes from a browser.
 This component gives the local dashboard a bounded registry to inspect instead:
@@ -24,6 +24,7 @@ MAX_DESCRIPTOR_BYTES = 16 * 1024
 MAX_DESCRIPTORS = 32
 MAX_PROBE_WORKERS = 8
 INSTANCE_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{8,64}\Z")
+SUPPORTED_SERVICE_IDS = {"code-defog", "code-cctv"}
 
 
 def _endpoint_url(host: str, port: int, path: str = "") -> str:
@@ -32,7 +33,7 @@ def _endpoint_url(host: str, port: int, path: str = "") -> str:
 
 
 class LocalServiceDiscoveryAgent:
-    """Discover registered Code CCTV daemons without handling credentials."""
+    """Discover registered Code Defog daemons without handling credentials."""
 
     def __init__(
         self,
@@ -69,7 +70,7 @@ class LocalServiceDiscoveryAgent:
             label = " ".join(value.split())[:80]
             if label:
                 return label
-        return f"Code CCTV · {host}:{port}"
+        return f"Code Defog · {host}:{port}"
 
     @staticmethod
     def _valid_instance_id(value: object) -> str | None:
@@ -179,7 +180,11 @@ class LocalServiceDiscoveryAgent:
                 payload = json.loads(response.read(MAX_DESCRIPTOR_BYTES).decode("utf-8"))
         except (OSError, ValueError, json.JSONDecodeError, UnicodeDecodeError):
             return "offline"
-        if not isinstance(payload, dict) or payload.get("ok") is not True or payload.get("service") != "code-cctv":
+        if (
+            not isinstance(payload, dict)
+            or payload.get("ok") is not True
+            or payload.get("service") not in SUPPORTED_SERVICE_IDS
+        ):
             return "offline"
         expected_instance_id = candidate["_expected_instance_id"]
         if expected_instance_id is not None:

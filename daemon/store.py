@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SQLite-backed state store for Code CCTV — extended with DevLoop Case management."""
+"""SQLite-backed state store for Code Defog — extended with DevLoop Case management."""
 
 from __future__ import annotations
 
@@ -452,7 +452,7 @@ class StateStore:
             "CREATE INDEX IF NOT EXISTS projects_updated ON projects(updated_at DESC)"
         )
 
-    # ── Original Code CCTV ingest / state ──────────────────────────────────
+    # ── Event ingest / state ───────────────────────────────────────────────
 
     def ingest(self, payload: dict[str, Any]) -> dict[str, Any]:
         workspace_raw = clean_text(payload.get("workspace"), 1000)
@@ -463,7 +463,7 @@ class StateStore:
         conversation_title = clean_text(payload.get("conversation_name"), 200)
         name = clean_text(payload.get("workspace_name"), 200) or Path(workspace).name or workspace
         event_type = clean_text(payload.get("event_type"), 80) or "progress"
-        source = clean_text(payload.get("source"), 80) or "code-cctv"
+        source = clean_text(payload.get("source"), 80) or "code-defog"
         timestamp = clean_text(payload.get("timestamp"), 80) or utc_now()
         phase = clean_text(payload.get("phase"), 120)
         status = clean_text(payload.get("status"), 120) or "侦察中"
@@ -725,12 +725,15 @@ class StateStore:
                 association_state = "linked"
                 association_confidence = 1.0
         elif repository_ref and repository_ref != "unknown" and keywords:
+            # Cases store the canonical identity, not the caller's spelling, so
+            # the association lookup must match on canonical_ref — otherwise the
+            # same repo under different spellings fragments into duplicate Cases.
             candidate_rows = self.connection.execute(
                 """SELECT c.case_id FROM cases c
                    WHERE c.repository_ref = ? AND c.status NOT IN ('CLOSED', 'ESCALATED')
                    AND c.updated_at > ?
                    ORDER BY c.created_at DESC LIMIT 5""",
-                (repository_ref,
+                (canonical_ref,
                  (datetime.now(timezone.utc)
                   - timedelta(seconds=DEFAULT_ASSOCIATION_DEADLINE_S)).isoformat().replace("+00:00", "Z")),
             ).fetchall()
@@ -896,6 +899,12 @@ class StateStore:
                 )
 
             elif action == "cancel":
+                # Cancel escalates the Case.  Respect the state machine: a
+                # terminal (or otherwise non-escalatable) Case must not be
+                # forcibly rewritten to ESCALATED.
+                ivt = _get_validator()
+                if not ivt(case["status"], "ESCALATED"):
+                    return {"error": f"cannot cancel from state: {case['status']}", "status": 409}
                 reason = clean_text(payload.get("reason"), 500)
                 approval_id = uuid.uuid4().hex
                 self.connection.execute(
@@ -1083,6 +1092,50 @@ class StateStore:
             )
             self.connection.commit()
             return self._case_dict(case_id)
+
+    def set_patch_ref(self, case_id: str, patch_ref: str) -> dict[str, Any] | None:
+        """Update only a Case's *patch_ref* (release gate) under the store lock.
+
+        Distinct from :meth:`set_patch_context` so callers that already hold a
+        validated ``sandbox_ref`` do not have to re-supply (and risk
+        overwriting) it.
+        """
+        with self.lock:
+            self.connection.execute(
+                "UPDATE cases SET patch_ref = ?, updated_at = ? WHERE case_id = ?",
+                (clean_text(patch_ref, 200), utc_now(), case_id),
+            )
+            self.connection.commit()
+            return self._case_dict(case_id)
+
+    def begin_agent_run(self, case_id: str, agent_id: str, trace_id: str = "") -> str:
+        """Insert a new 'running' agent_run row and return its id.
+
+        Serialised under the store lock so agent dispatch never writes the
+        shared SQLite connection concurrently with request/drive threads.
+        """
+        run_id = f"run-{uuid.uuid4().hex[:8]}"
+        with self.lock:
+            self.connection.execute(
+                "INSERT INTO agent_runs (run_id, case_id, agent_id, status, trace_id, started_at) "
+                "VALUES (?, ?, ?, 'running', ?, ?)",
+                (run_id, case_id, agent_id, trace_id, utc_now()),
+            )
+            self.connection.commit()
+        return run_id
+
+    def finish_agent_run(self, run_id: str, status: str, output_ref: str) -> None:
+        """Mark an agent_run complete/failed with its serialised output.
+
+        The caller must already have a ``run_id`` from :meth:`begin_agent_run`;
+        this update is written under the store lock.
+        """
+        with self.lock:
+            self.connection.execute(
+                "UPDATE agent_runs SET status = ?, output_ref = ?, finished_at = ? WHERE run_id = ?",
+                (status, output_ref, utc_now(), run_id),
+            )
+            self.connection.commit()
 
     def record_tool_run(self, payload: dict[str, Any]) -> str:
         """Insert a COMPLETE immutable tool run record in one atomic write.
@@ -1441,37 +1494,71 @@ class StateStore:
         ``cases``.  A review can link a Case after actionable evidence exists,
         but it must never be used to bypass Case approval boundaries.
         """
-        run_id = f"review-{uuid.uuid4().hex[:12]}"
         abs_path = str(Path(workspace).expanduser().resolve())
         safe_scope = scope if isinstance(scope, dict) else {}
         specs = task_specs if isinstance(task_specs, list) else []
-        now = utc_now()
         with self.lock:
+            return self._create_review_run_locked(abs_path, safe_scope, specs, utc_now())
+
+    def begin_review_run_if_idle(
+        self,
+        workspace: str,
+        scope: dict[str, Any] | None = None,
+        task_specs: list[dict[str, Any]] | None = None,
+    ) -> str | None:
+        """Atomically create a Review Run only when none is already running.
+
+        Returns the new ``run_id``, or ``None`` when a running Review Run
+        already exists for the workspace.  The check and insert happen under
+        the store lock so concurrent drive-start requests cannot both pass a
+        read-then-write.
+        """
+        abs_path = str(Path(workspace).expanduser().resolve())
+        safe_scope = scope if isinstance(scope, dict) else {}
+        specs = task_specs if isinstance(task_specs, list) else []
+        with self.lock:
+            existing = self.connection.execute(
+                "SELECT 1 FROM review_runs WHERE workspace = ? AND status = 'running' LIMIT 1",
+                (abs_path,),
+            ).fetchone()
+            if existing is not None:
+                return None
+            return self._create_review_run_locked(abs_path, safe_scope, specs, utc_now())
+
+    def _create_review_run_locked(
+        self,
+        abs_path: str,
+        safe_scope: dict[str, Any],
+        specs: list[dict[str, Any]],
+        now: str,
+    ) -> str:
+        """Insert one Review Run and its task rows; caller holds ``self.lock``."""
+        run_id = f"review-{uuid.uuid4().hex[:12]}"
+        self.connection.execute(
+            "INSERT INTO review_runs (run_id, workspace, status, scope_json, started_at) "
+            "VALUES (?, ?, 'running', ?, ?)",
+            (run_id, abs_path, json.dumps(safe_scope, ensure_ascii=False), now),
+        )
+        for order, spec in enumerate(specs, start=1):
+            if not isinstance(spec, dict):
+                continue
+            task_key = clean_text(spec.get("task_key"), 80)
+            title = clean_text(spec.get("title"), 120)
+            stage = clean_text(spec.get("stage"), 80)
+            if not task_key or not title or not stage:
+                continue
             self.connection.execute(
-                "INSERT INTO review_runs (run_id, workspace, status, scope_json, started_at) "
-                "VALUES (?, ?, 'running', ?, ?)",
-                (run_id, abs_path, json.dumps(safe_scope, ensure_ascii=False), now),
+                """INSERT INTO review_task_runs
+                   (task_run_id, review_run_id, task_key, title, stage, agent_id,
+                    task_order, status)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
+                (
+                    f"review-task-{uuid.uuid4().hex[:12]}", run_id, task_key,
+                    title, stage, clean_text(spec.get("agent_id"), 80) or None,
+                    int(spec.get("order") or order),
+                ),
             )
-            for order, spec in enumerate(specs, start=1):
-                if not isinstance(spec, dict):
-                    continue
-                task_key = clean_text(spec.get("task_key"), 80)
-                title = clean_text(spec.get("title"), 120)
-                stage = clean_text(spec.get("stage"), 80)
-                if not task_key or not title or not stage:
-                    continue
-                self.connection.execute(
-                    """INSERT INTO review_task_runs
-                       (task_run_id, review_run_id, task_key, title, stage, agent_id,
-                        task_order, status)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')""",
-                    (
-                        f"review-task-{uuid.uuid4().hex[:12]}", run_id, task_key,
-                        title, stage, clean_text(spec.get("agent_id"), 80) or None,
-                        int(spec.get("order") or order),
-                    ),
-                )
-            self.connection.commit()
+        self.connection.commit()
         return run_id
 
     def update_review_task(

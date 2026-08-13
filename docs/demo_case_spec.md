@@ -1,6 +1,6 @@
 # Demo Case 说明书
 
-> Code CCTV DevLoop · GOAI Agent Infra 方向三 · 竞赛材料
+> Code Defog · GOAI Agent Infra 方向三 · 竞赛材料
 > 依据框架 §3.3 扩展。两个演练案例共享 `demo_target/` 仓库（P1 阶段创建，作为 P2–P4 测试目标）。
 
 > **实施状态：** 本文保留两条演练案例与验收目标。真实 AgentTeams 控制面、Team/Task/Handoff 工作流和可导出 Trace 尚未配置或验证；当前本地 Mock/AgentScope 运行不能替代该验收，也不存在可引用的已验证 `evidence/*.json` 运行证据。

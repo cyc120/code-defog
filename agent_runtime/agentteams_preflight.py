@@ -143,7 +143,7 @@ def inspect_agentteams_preflight(
             ),
             remediation=(
                 "Install the externally managed AgentTeams CLI and make `agt` available on PATH. "
-                "Code CCTV will not substitute AgentScope."
+                "Code Defog will not substitute AgentScope."
             ),
         ),
         PreflightCheck(

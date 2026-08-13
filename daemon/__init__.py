@@ -1,1 +1,1 @@
-"""Local Code CCTV background service."""
+"""Local Code Defog background service."""

@@ -1,6 +1,6 @@
 # Agent Identity 清单
 
-> Code CCTV DevLoop · GOAI Agent Infra 方向三 · 竞赛材料
+> Code Defog · GOAI Agent Infra 方向三 · 竞赛材料
 > 依据框架 §5 扩展，来源：`agent_runtime/identities.yaml`（代码权威定义）+ 当前本地执行契约。
 
 > **实施状态：** 当前公开运行时由本地 `DevLoopHarness` 统筹任务图，再经 `AgentScopeExecutionAdapter` 执行 Mock/AgentScope 实验；真实 AgentTeams Worker、Team/Task/Handoff 与官方 Trace 尚未配置或验证。本文的 AgentTeams 协同要求是赛事目标，不是已部署事实。
@@ -48,7 +48,7 @@
 
 ## 5. 审批安全边界（不可简化为 UI 约定）
 
-1. **双因子签发**：`service_token`（Agent/脚本持有）不能单独签发审批 Grant；签发还要求 `X-Code-CCTV-Approval-Key`，缺失时返回 `403`。
-2. **一次性 Grant**：`approval_token` 绑定 case/action/target_ref/时效，以 `X-Code-CCTV-Token-Type: approval` 消费即失效；仅存 `SHA256(approval_token)`。
+1. **双因子签发**：`service_token`（Agent/脚本持有）不能单独签发审批 Grant；签发还要求 `X-Code-Defog-Approval-Key`，缺失时返回 `403`。
+2. **一次性 Grant**：`approval_token` 绑定 case/action/target_ref/时效，以 `X-Code-Defog-Token-Type: approval` 消费即失效；仅存 `SHA256(approval_token)`。
 3. **知识复核隔离**：`POST /api/knowledge/{record_id}/review` 要求服务令牌和独立人工审批密钥；reviewer 身份取服务端系统用户，客户端不可伪造。
 4. **证据哈希链**：`tool_runs` 的 `chain_hash` 保证工具调用序列不可篡改。

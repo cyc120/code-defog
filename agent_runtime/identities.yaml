@@ -1,4 +1,4 @@
-# Agent identity definitions for Code CCTV DevLoop.
+# Agent identity definitions for Code Defog.
 #
 # These identities are loaded by the local AgentScope execution adapter (or
 # its mock) to configure the team, tool allowlists, and I/O schemas.

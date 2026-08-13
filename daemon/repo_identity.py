@@ -3,7 +3,7 @@
 Real projects can be referenced by many spellings — ``/a/b/c``, ``/a/b/c/``,
 a symlink, two clones, or a git URL — which would fragment ``incident_signature``
 into duplicate Cases for the same incident.  This module resolves a stable
-canonical identity so the DevLoop can associate sources across spellings.
+canonical identity so Code Defog can associate sources across spellings.
 
 Canonical form (in priority order):
 - ``<git_remote>|<abs_path>``  when the path is a git repo with a remote

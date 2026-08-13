@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
-  <title id="title">Code CCTV small icon</title>
-  <desc id="desc">A compact code camera mark for Code CCTV.</desc>
+  <title id="title">Code Defog small icon</title>
+  <desc id="desc">A compact code analysis mark for Code Defog.</desc>
   <defs>
     <linearGradient id="g" x1="18" y1="14" x2="110" y2="114" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#0EA5E9"/>

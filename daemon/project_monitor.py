@@ -49,11 +49,13 @@ class ProjectMonitor:
         self,
         store: Any,
         post_event: Callable[[dict[str, Any]], bool] | None = None,
+        on_project_change: Callable[[str], None] | None = None,
         poll_interval: float = 5.0,
         git_poll_interval: float = 30.0,
     ) -> None:
         self.store = store
         self.post_event = post_event or _default_post_event
+        self.on_project_change = on_project_change
         self.poll_interval = max(1.0, poll_interval)
         self.git_poll_interval = max(5.0, git_poll_interval)
         self._threads: dict[str, threading.Thread] = {}
@@ -129,6 +131,7 @@ class ProjectMonitor:
                     continue
                 changes = _diff(previous, current) if _diff else []
                 if changes:
+                    self._notify_project_change(workspace)
                     self._emit_file_changes(project, changes)
                     self._save_scan_state(workspace, current)
                     previous = current
@@ -145,7 +148,7 @@ class ProjectMonitor:
         """Snapshot wrapper that tolerates a missing watch_worklog import."""
         if _snapshot is None:
             return {}
-        return _snapshot(abs_path, ".code-cctv-monitor", Path("/dev/null"))
+        return _snapshot(abs_path, ".code-defog-monitor", Path("/dev/null"))
 
     def _save_scan_state(self, workspace: str, state: dict[str, dict[str, int]]) -> None:
         try:
@@ -168,6 +171,15 @@ class ProjectMonitor:
             return True
         except Exception:
             return False
+
+    def _notify_project_change(self, workspace: str) -> None:
+        callback = self.on_project_change
+        if not callable(callback):
+            return
+        try:
+            callback(workspace)
+        except Exception:
+            pass
 
     def _emit_file_changes(self, project: dict[str, Any], changes: list[Any]) -> None:
         summary = f"检测到 {len(changes)} 个文件变化"
@@ -197,6 +209,12 @@ class ProjectMonitor:
         import subprocess
 
         abs_path = Path(workspace)
+        # Re-read the persisted head.  ``_advance_head`` updates only the store
+        # row, not the loop-local snapshot captured at watcher start, so a
+        # stale snapshot would otherwise re-emit the same commits every poll.
+        fresh = self.store.get_monitored_project(workspace)
+        if fresh is not None:
+            project = fresh
         last_seen = (project.get("base_commit") or "").strip()
         try:
             if last_seen:
@@ -218,6 +236,7 @@ class ProjectMonitor:
                 self._advance_head(workspace)
             return
         lines = [ln.strip() for ln in proc.stdout.splitlines() if ln.strip()][:20]
+        self._notify_project_change(workspace)
         # Advance last_seen so the same commits are never re-emitted.
         self._advance_head(workspace)
         self._emit({

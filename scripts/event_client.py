@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Best-effort client for the local Code CCTV event service."""
+"""Best-effort client for the local Code Defog event service."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def post_event(payload: dict[str, Any], timeout: float = 0.35) -> bool:
         method="POST",
         headers={
             "Content-Type": "application/json; charset=utf-8",
-            "X-Code-CCTV-Token": str(config["token"]),
+            "X-Code-Defog-Token": str(config["token"]),
         },
     )
     try:

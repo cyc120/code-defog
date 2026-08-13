@@ -1,4 +1,4 @@
-"""Minimal .env loader for Code CCTV DevLoop.
+"""Minimal .env loader for Code Defog.
 
 Reads a KEY=VALUE file from the repo root (default: .env) and populates
 os.environ for keys not already set.  Real environment variables always

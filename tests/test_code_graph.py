@@ -100,6 +100,48 @@ class CodeGraphBuilderTests(unittest.TestCase):
 
 
 class CodeInterpreterTests(unittest.TestCase):
+    def test_interpreter_uses_the_active_shared_provider(self) -> None:
+        """Node explanations must follow the same provider switch as summaries."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = _project(Path(directory) / "target")
+            graph = build_code_graph(root)
+            greet = next(node for node in graph["nodes"] if node.get("label") == "greet")
+            dossier = build_node_dossier(root, graph, greet["id"])
+            providers = LLMProviderStore(
+                Path(directory) / "providers.json", legacy_key_loader=lambda: "",
+            )
+            providers.save_and_activate({
+                "provider_id": "openai",
+                "base_url": "https://api.openai.com/v1",
+                "model": "gpt-4o-mini",
+                "api_key": "shared-provider-test-key",
+            })
+            from daemon import code_semantics
+
+            seen: dict[str, object] = {}
+            original_post = code_semantics._post_chat
+            try:
+                def fake_post(api_key: str, _prompt: str, **kwargs: object) -> str:
+                    seen["api_key"] = api_key
+                    seen["provider"] = kwargs.get("provider")
+                    return json.dumps({
+                        "role": "名称格式化函数", "certainty": "confirmed",
+                        "responsibilities": ["清理字符串"], "inputs_outputs": [],
+                        "collaborators": [], "flow": [], "risks": [],
+                        "evidence_refs": ["E1"], "limitations": [],
+                    })
+
+                code_semantics._post_chat = fake_post
+                response = interpret_code_dossier(dossier, provider_store=providers)
+            finally:
+                code_semantics._post_chat = original_post
+
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["provider"], "openai")
+        self.assertEqual(response["model"], "gpt-4o-mini")
+        self.assertEqual(seen["api_key"], "shared-provider-test-key")
+        self.assertEqual((seen["provider"] or {})["base_url"], "https://api.openai.com/v1")
+
     def test_normalizer_rejects_unknown_neighbor_and_evidence_refs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = _project(Path(directory) / "target")

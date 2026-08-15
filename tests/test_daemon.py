@@ -552,6 +552,30 @@ class DevLoopCaseCreationTests(unittest.TestCase):
             self.assertEqual(result["status"], "RECEIVED")
             store.close()
 
+    def test_create_case_with_dict_key_frames(self) -> None:
+        """Rich clients may send structured frames; intake must not crash."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "test-failure",
+                "source_uri": "probe://integration",
+                "client_nonce": "nonce-frames-001",
+                "raw_content": "AssertionError: probe failure",
+                "repository_ref": "/home/user/demo_target",
+                "extracted_signals": {
+                    "exception_type": "AssertionError",
+                    "message_pattern": "probe failure",
+                    "key_frames": [
+                        {"file": "src/config.py", "line": 42, "function": "load"},
+                    ],
+                    "keywords": ["probe"],
+                },
+                "title": "Dict frames must not crash intake",
+            })
+            self.assertNotIn("duplicate", result)
+            self.assertIn("case_id", result)
+            self.assertEqual(result["status"], "RECEIVED")
+            store.close()
     def test_delivery_idempotency(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3")

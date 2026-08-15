@@ -84,15 +84,39 @@ def compute_delivery_id(source_type: str, source_uri: str, client_nonce: str) ->
     return sha256(f"{source_type}|{source_uri}|{client_nonce}")
 
 
+def frame_signature(frame: Any) -> str:
+    """Canonicalize one key frame for the incident signature.
+
+    Rich clients send dict frames ({file, line, function}); string frames
+    (the canonical "file:line[:function]" form) pass through unchanged, and
+    unknown shapes degrade to cleaned text. Joining raw values crashed intake
+    with TypeError when a dict frame reached the sorted() join below.
+    """
+    if isinstance(frame, str):
+        return clean_text(frame, 500)
+    if isinstance(frame, dict):
+        file = clean_text(frame.get("file"), 200)
+        function = clean_text(frame.get("function"), 200)
+        if file:
+            parts = [file]
+            line = frame.get("line")
+            if line is not None:
+                parts.append(str(line))
+            if function:
+                parts.append(function)
+            return ":".join(parts)
+    return clean_text(frame, 500)
+
+
 def compute_incident_signature(
     repository_ref: str,
     exception_type: str | None,
     message_pattern: str | None,
-    key_frames: list[str] | None,
+    key_frames: list[Any] | None,
 ) -> str:
     exc = (exception_type or "").strip()
     msg = (message_pattern or "").strip().lower().replace(" ", "")
-    frames = "|".join(sorted(key_frames or []))
+    frames = "|".join(sorted(frame_signature(frame) for frame in key_frames or []))
     return sha256(f"{repository_ref}|{exc}|{msg}|{frames}")
 
 

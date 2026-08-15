@@ -30,6 +30,8 @@ from daemon.llm_summary import (
     generate_project_summary,
     get_llm_summary,
 )
+from _helpers import start_server
+from _helpers import start_server
 from daemon.server import CodeCCTVServer
 from daemon.store import StateStore
 
@@ -269,6 +271,51 @@ class ProjectSummaryLLMTests(unittest.TestCase):
         finally:
             llm_summary._resolve_api_key, llm_summary._post_chat = orig_key, orig_post
 
+    def test_malformed_ok_response_shape_is_error(self) -> None:
+        """A 200 with empty choices / missing content must fail closed as
+        status:error — not crash the endpoint with a raw KeyError."""
+        import urllib.request
+        from daemon import llm_summary
+        orig_key, orig_urlopen = llm_summary._resolve_api_key, urllib.request.urlopen
+
+        class _FakeResponse:
+            def __init__(self, body: str) -> None:
+                self._body = body.encode("utf-8")
+
+            def read(self) -> bytes:
+                return self._body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc: object) -> None:
+                return None
+
+        def _fake_urlopen(body: str):
+            def fake(request, timeout=None, context=None):
+                return _FakeResponse(body)
+            return fake
+
+        try:
+            llm_summary._resolve_api_key = lambda: "sk-test"
+            urllib.request.urlopen = _fake_urlopen("{\"choices\": []}")
+            result = generate_project_summary({"totals": {"cases": 1}})
+            self.assertEqual(result["status"], "error")
+            self.assertIn("失败", result["reason"])
+
+            urllib.request.urlopen = _fake_urlopen("{\"choices\": [{\"message\": {}}]}")
+            result = generate_project_summary({"totals": {"cases": 1}})
+            self.assertEqual(result["status"], "error")
+
+            urllib.request.urlopen = _fake_urlopen(
+                "{\"choices\": [{\"message\": {\"content\": 42}}]}",
+            )
+            result = generate_project_summary({"totals": {"cases": 1}})
+            self.assertEqual(result["status"], "error")
+        finally:
+            llm_summary._resolve_api_key = orig_key
+            urllib.request.urlopen = orig_urlopen
+
     def test_extract_json_fence_and_bare(self) -> None:
         self.assertEqual(_extract_json('```json\n{"a": 1}\n```')["a"], 1)
         self.assertEqual(_extract_json('leading prose\n{"a": 2}')["a"], 2)
@@ -324,14 +371,10 @@ class ProjectSummaryLLMTests(unittest.TestCase):
 
 class ProjectSummaryEndpointTests(unittest.TestCase):
     def _start_server(self, store: StateStore, llm_fn=None) -> tuple[CodeCCTVServer, str, str]:
-        token = secrets.token_hex(16)
-        server = CodeCCTVServer(
-            ("127.0.0.1", 0), token, store,
+        return start_server(
+            store,
             llm_summary_fn=llm_fn or (lambda stats, refresh=False, cache=None, key="default": {"status": "ok", "summary": {"overall_status": "test"}}),
         )
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        return server, f"http://127.0.0.1:{server.server_address[1]}", token
 
     def test_requires_service_auth(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

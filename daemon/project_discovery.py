@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .repo_identity import redact_remote_url
+
 # Reuse the junk-dir set from the code scanner so discovery skips the same
 # noise (node_modules, venv, .git internals, build output, …).
 try:
@@ -49,7 +51,11 @@ def _run(args: list[str], cwd: Path | None = None, timeout: float = 2.0) -> str:
 def _git_meta(repo_path: Path) -> dict[str, str]:
     """Best-effort git metadata for a candidate repo (never fatal)."""
     return {
-        "git_remote": _run(["git", "remote", "get-url", "origin"], repo_path, DEFAULT_GIT_TIMEOUT),
+        # Redact any embedded credentials (https://user:token@...) before the
+        # remote reaches the browser or any persisted report.
+        "git_remote": redact_remote_url(
+            _run(["git", "remote", "get-url", "origin"], repo_path, DEFAULT_GIT_TIMEOUT)
+        ),
         "branch": _run(["git", "branch", "--show-current"], repo_path, DEFAULT_GIT_TIMEOUT),
         "last_commit": _run(
             ["git", "log", "-1", "--format=%h %ad %s", "--date=short"],

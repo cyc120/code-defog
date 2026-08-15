@@ -1603,6 +1603,20 @@
   function isCurrentService(service) {
     try { return new URL(service.ui_url).origin === location.origin; } catch (error) { return false; }
   }
+  // Only http(s) loopback URLs may be navigated to: a poisoned discovery
+  // entry (javascript:/data: scheme, or a non-loopback host) must never
+  // execute in the console origin.
+  function serviceUrlSafe(service) {
+    try {
+      const parsed = new URL(service.ui_url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+      if (isCurrentService(service)) return true; // same-origin page already trusted
+      const host = parsed.hostname.toLowerCase().replace(/\.$/, "");
+      return host === "127.0.0.1" || host === "localhost" || host === "::1";
+    } catch (error) {
+      return false;
+    }
+  }
   function renderServices(services, message) {
     const target = $("service-list");
     target.innerHTML = "";
@@ -1614,7 +1628,7 @@
     services.forEach((service) => {
       if (!service || typeof service.ui_url !== "string" || typeof service.host !== "string") return;
       const current = isCurrentService(service);
-      const selectable = !current && (service.status === "ready" || service.status === "legacy");
+      const selectable = !current && (service.status === "ready" || service.status === "legacy") && serviceUrlSafe(service);
       const option = create("button", `service-option ${current ? "current" : ""}`);
       option.type = "button";
       option.disabled = !selectable;
@@ -1684,7 +1698,14 @@
         }
       } catch (error) { /* fall through to direct connection */ }
     }
-    try { config = { ...config, ...JSON.parse(localStorage.getItem("cc-conn") || "{}"), served: false }; } catch (error) { /* use defaults */ }
+    // The service token is a bearer credential: it is kept out of
+    // localStorage (readable by any same-origin script / extension).
+    // Only host/port/user persist; the token rides in sessionStorage,
+    // which dies with the tab.
+    try {
+      const remembered = JSON.parse(localStorage.getItem("cc-conn") || "{}");
+      config = { ...config, ...remembered, token: sessionStorage.getItem("cc-token") || "", served: false };
+    } catch (error) { /* use defaults */ }
     if (!config.token) {
       showConnectionPicker();
       return false;
@@ -1702,7 +1723,9 @@
     }
     stopSubscription();
     config = { host, port, token, user: "reviewer", served: false, runtime_mode: "mock" };
-    localStorage.setItem("cc-conn", JSON.stringify(config));
+    // Persist connection coordinates only; the token never enters localStorage.
+    localStorage.setItem("cc-conn", JSON.stringify({ host, port, user: config.user }));
+    sessionStorage.setItem("cc-token", token);
     $("connect-screen").classList.remove("show");
     resetCaseData();
     boot();
@@ -1851,6 +1874,9 @@
     document.querySelectorAll(".state-edge").forEach((node) => node.classList.remove("is-success", "is-blocked"));
     $("state-caption").textContent = status ? statusMeta(status).detail : "选择 Case 后显示其实际流转位置与分支。";
     if (!status) return;
+    // Whitelist the status before interpolating it into a selector: a
+    // malformed persisted value would otherwise abort the whole render.
+    if (!Object.prototype.hasOwnProperty.call(STATUS_META, status)) return;
     const branch = ["PATCH_REJECTED", "ROLLED_BACK", "ESCALATED"].includes(status);
     const index = MAIN_STATES.indexOf(status);
     const passedCount = status === "PATCH_REJECTED"
@@ -2059,7 +2085,7 @@
     }
   }
 
-  function openApproval(approve) {
+  async function openApproval(approve) {
     const caseData = selectedCase();
     if (!caseData) return;
     const plan = caseData.status === "PLAN_APPROVAL";
@@ -2074,17 +2100,38 @@
     $("dialog-approval-key").value = "";
     $("dialog-confirm").textContent = approve ? "确认并继续" : "确认拒绝";
     const dialog = $("approval-dialog");
-    if (typeof dialog.showModal === "function") dialog.showModal(); else executeApproval(approve, pendingApproval.approver);
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      // No <dialog> support: collect the key via prompt and fail CLOSED
+      // when the user cancels — never issue an approval without the key.
+      const key = window.prompt("请输入人工审批密钥（无法显示对话框时的手动降级）");
+      const pending = pendingApproval;
+      pendingApproval = null;
+      if (pending && key && key.trim()) {
+        await executeApproval(pending.approve, pending.approver, key.trim());
+      } else if (pending) {
+        toast("已取消审批：需要人工审批密钥。");
+      }
+    }
   }
-  $("dialog-cancel").addEventListener("click", () => { pendingApproval = null; $("approval-dialog").close(); });
-  $("dialog-confirm").addEventListener("click", async () => {
+  function submitApproval() {
     const pending = pendingApproval;
     const humanApprovalKey = $("dialog-approval-key").value.trim();
     if (!humanApprovalKey) { toast("请输入人工审批密钥"); return; }
     pendingApproval = null;
-    $("approval-dialog").close();
-    if (pending) await executeApproval(pending.approve, pending.approver, humanApprovalKey);
-  });
+    $("dialog-approval-key").value = ""; // never leave the key in the DOM
+    const dialog = $("approval-dialog");
+    if (typeof dialog.close === "function") dialog.close();
+    if (pending) executeApproval(pending.approve, pending.approver, humanApprovalKey);
+  }
+  $("dialog-cancel").addEventListener("click", () => { pendingApproval = null; $("approval-dialog").close(); });
+  $("dialog-confirm").addEventListener("click", submitApproval);
+  // Enter inside the form must submit-and-approve, not silently close the
+  // dialog (the default method=dialog behaviour discards the typed key).
+  $("approval-dialog").addEventListener("submit", (event) => { event.preventDefault(); submitApproval(); });
+  // Escape / backdrop close must tear down pending state too.
+  $("approval-dialog").addEventListener("close", () => { pendingApproval = null; $("dialog-approval-key").value = ""; });
   async function executeApproval(approve, approver, humanApprovalKey) {
     const caseData = selectedCase();
     if (!caseData) return;
@@ -2130,15 +2177,22 @@
     renderSelector();
     return true;
   }
+  let lastEvidenceKey = null; // { caseId, json } — SSE refreshes dedupe here
   async function loadEvidence(caseId, epoch = dataEpoch) {
     if (!caseId) {
       if (epoch !== dataEpoch) return false;
       evidence = null;
+      lastEvidenceKey = null;
       renderCase();
       return true;
     }
     const result = await api(`/api/cases/${caseId}/evidence`);
     if (epoch !== dataEpoch) return false;
+    // Byte-identical evidence (SSE-triggered refresh of an unchanged case)
+    // must not tear down and rebuild the whole case view.
+    const key = caseId + "\u0000" + JSON.stringify(result.evidence);
+    if (key === lastEvidenceKey) return true;
+    lastEvidenceKey = key;
     evidence = result.evidence;
     renderCase();
     return true;
@@ -2398,9 +2452,9 @@
       await loadEvidence(selectedId, epoch);
     }
   }
-  async function refreshAll(epoch = dataEpoch) {
+  async function refreshAll(epoch = dataEpoch, forceProjects = false) {
     try {
-      await loadProjects(epoch);                  // cheap sidebar, always
+      await loadProjects(epoch, forceProjects);   // sidebar, TTL-cached unless forced
       if (epoch !== dataEpoch) return;
       if (currentView !== "projects") await refreshActiveView(epoch); // projects already rendered
     } catch (error) {
@@ -2412,7 +2466,7 @@
     activeTab = "sources";
     try { await loadEvidence(selectedId); } catch (error) { toast(error.message); }
   });
-  $("refresh-btn").addEventListener("click", refreshAll);
+  $("refresh-btn").addEventListener("click", () => refreshAll(dataEpoch, true));
 
   function stopSubscription() {
     streamEpoch += 1;
@@ -2681,6 +2735,7 @@
       $("ov-drive-note").textContent = run.error || "驱动失败";
     }
   }
+  let taskBurstTimer = null;
   function handleEvent(event) {
     if (event.type === "review_status" || event.type === "drive_status") { onDriveStatus(event); return; }
     if (event.type === "review_task_status") {
@@ -2689,13 +2744,15 @@
         const index = tasks.findIndex((task) => task.task_key === event.task.task_key);
         if (index >= 0) tasks[index] = event.task;
         else tasks.push(event.task);
-        renderReviewRun({ ...reviewRun, tasks });
+        // Coalesce bursts of task events into ONE re-render.
+        clearTimeout(taskBurstTimer);
+        taskBurstTimer = setTimeout(() => renderReviewRun({ ...reviewRun, tasks }), 150);
       }
       return;
     }
     if (!CASE_EVENTS.includes(event.type) && event.type !== "knowledge_reviewed") return;
     clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => refreshAll(), 300);
+    refreshTimer = setTimeout(() => refreshAll(), 500);
   }
 
   function driveReportItem(label, detail, tone = "") {
@@ -2831,9 +2888,16 @@
 
   function statusText(s) { return s === "watching" ? "监控中" : s === "error" ? "错误" : s === "pending" ? "待启动" : (s || "未知"); }
 
-  async function loadProjects(epoch = dataEpoch) {
+  let projectsCache = { at: 0, epoch: -1 };
+  async function loadProjects(epoch = dataEpoch, force = false) {
+    // SSE-triggered refreshes fire often; the monitored-project list changes
+    // rarely, so serve it from a short TTL instead of refetching every event.
+    if (!force && epoch === projectsCache.epoch && Date.now() - projectsCache.at < 8000) {
+      return true;
+    }
     try {
       const payload = await api("/api/projects");
+      projectsCache = { at: Date.now(), epoch };
       if (epoch !== dataEpoch) return false;
       monitoredProjects = payload.projects || [];
       renderSidebarProjects();

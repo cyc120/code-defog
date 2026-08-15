@@ -91,6 +91,49 @@ class LLMProviderStoreTests(unittest.TestCase):
             })
             self.assertEqual(candidate["api_key"], "explicit-one-time-key")
 
+    def test_save_refuses_silent_key_repointing_to_foreign_host(self) -> None:
+        """save_and_activate must not keep the old key when the endpoint
+        host moves outside the provider's preset hosts."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = LLMProviderStore(
+                Path(directory) / "providers.json", legacy_key_loader=lambda: "",
+            )
+            store.save_and_activate({
+                "provider_id": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-chat",
+                "api_key": "stored-secret",
+            })
+            # Repointing to a foreign host without an explicit key is refused.
+            with self.assertRaisesRegex(ValueError, "explicit api_key"):
+                store.save_and_activate({
+                    "provider_id": "deepseek",
+                    "base_url": "https://attacker.example.com",
+                    "model": "deepseek-chat",
+                })
+            # The stored key must still target the original host.
+            resolved = store.resolve_active()
+            self.assertEqual(resolved["base_url"], "https://api.deepseek.com")
+            self.assertEqual(resolved["api_key"], "stored-secret")
+            # Supplying an explicit key for the new host is allowed.
+            store.save_and_activate({
+                "provider_id": "deepseek",
+                "base_url": "https://attacker.example.com",
+                "model": "deepseek-chat",
+                "api_key": "new-host-key",
+            })
+            self.assertEqual(store.resolve_active()["api_key"], "new-host-key")
+            # Preset-host saves without a key (env fallback) stay allowed.
+            store2 = LLMProviderStore(
+                Path(directory) / "p2.json", legacy_key_loader=lambda: "env-key",
+            )
+            store2.save_and_activate({
+                "provider_id": "deepseek",
+                "base_url": "https://api.deepseek.com",
+                "model": "deepseek-chat",
+            })
+            self.assertEqual(store2.resolve_active()["api_key"], "env-key")
+
     def test_candidate_reuses_stored_key_against_its_saved_host(self) -> None:
         """A saved key for a custom provider may be reused against that provider's
         own persisted base_url, but not silently against a different one."""

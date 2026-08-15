@@ -91,20 +91,54 @@ def _record_gate_evidence(
     return {"quality_gate_artifact_ref": artifact_id, "quality_gate_tool_run_id": tool_run_id}
 
 
+_DEMO_TARGET = Path(__file__).resolve().parents[1] / "demo_target"
+
+
+def _gate_target_allowed(repo_ref: str, store: Any) -> bool:
+    """A quality gate executes code (cli.py) — only Store-controlled
+    sandboxes or the exact bundled demo target may be executed."""
+    try:
+        target = Path(repo_ref).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    allowed_roots: list[Path] = [_DEMO_TARGET.resolve(strict=True)]
+    if store is not None and getattr(store, "path", None) is not None:
+        sandbox_root = (Path(store.path).parent / "sandboxes").resolve()
+        if sandbox_root.exists():
+            allowed_roots.append(sandbox_root)
+    for root in allowed_roots:
+        if target == root or root in target.parents:
+            return True
+    return False
+
+
 def run(context: dict[str, Any]) -> dict[str, Any]:
     """Entry point called by the configured execution adapter or its mock.
 
-    If *context* contains ``repository_ref`` pointing to a directory
-    with cli.py, the agent runs the real quality gate.  Otherwise it
-    returns a stub result marked as unchecked.
+    The quality gate executes code, so it runs only against a
+    Store-controlled sandbox (``sandbox_ref``) or the bundled demo target.
+    The intake-supplied ``repository_ref`` is deliberately never used as an
+    execution target.  Without a runnable allowed target the agent returns
+    an unchecked stub.
     """
     case_id = context.get("case_id", "unknown")
-    repo_ref = context.get("sandbox_ref") or context.get("repository_ref", "")
+    store = context.get("_state_store")
+    repo_ref = context.get("sandbox_ref") or ""
+
+    if repo_ref and not _gate_target_allowed(repo_ref, store):
+        return {
+            "agent": "verification",
+            "case_id": case_id,
+            "action": "verified",
+            "quality_gate_passed": None,
+            "quality_gate_error": f"refusing to run quality gate outside Store sandbox: {repo_ref}",
+            "recommendation": "escalate",
+            "note": "Deterministic verification rejected a non-sandbox gate target.",
+        }
 
     if repo_ref and Path(repo_ref, "cli.py").exists():
         gate_result = _run_quality_gate(repo_ref)
         evidence_refs: dict[str, str] = {}
-        store = context.get("_state_store")
         if store is not None and case_id:
             evidence_refs = _record_gate_evidence(store, context, repo_ref, gate_result)
         passed = gate_result.get("passed")
@@ -155,5 +189,5 @@ def run(context: dict[str, Any]) -> dict[str, Any]:
         "action": "verified",
         "quality_gate_passed": None,
         "recommendation": "unchecked",
-        "note": "Verification skipped — no runnable cli.py found at repository_ref.",
+        "note": "Verification skipped — no runnable cli.py found at the Store sandbox.",
     }

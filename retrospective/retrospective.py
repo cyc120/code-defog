@@ -72,6 +72,10 @@ def _generate_locked(
         }
 
     evidence = store.get_case_evidence(case_id)
+    if evidence is None:
+        # The Case vanished between the state check and the evidence read
+        # (concurrent clear/close); fail cleanly instead of crashing skills.
+        return {"error": "case evidence unavailable"}
     report_md = case_summarizer(evidence)
     entries = knowledge_extractor(evidence, report_md)
     candidates = skill_candidates(evidence)
@@ -88,7 +92,18 @@ def _generate_locked(
         case_id, _MANIFEST_KIND, "retrospective/knowledge.json", manifest_payload,
     )
 
-    records = store.record_knowledge_records(case_id, manifest_artifact_id, entries)
+    try:
+        records = store.record_knowledge_records(case_id, manifest_artifact_id, entries)
+    except Exception:
+        # Partial failure: the report/manifest artifacts are persisted but
+        # knowledge rows are not.  A later retry would hit the idempotency
+        # guard (get_retrospective found the report) and never recover, so
+        # clean up the artifacts and re-raise.
+        try:
+            store.delete_artifacts_for_case(case_id, (_REPORT_KIND, _MANIFEST_KIND))
+        except Exception:
+            pass
+        raise
 
     report_artifact = store.get_case_artifact(case_id, _REPORT_KIND) or {}
     retro = {

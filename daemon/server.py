@@ -309,6 +309,62 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         return
 
+    # ── Loopback / origin guards ────────────────────────────────────────
+    # The daemon is a localhost control plane: every request must arrive with
+    # a loopback Host header.  Validating Host blocks DNS-rebinding attacks
+    # (an attacker-controlled domain resolving to 127.0.0.1 would otherwise be
+    # same-origin from the browser's perspective and could read /ui/config's
+    # service token).  CORS responses echo only loopback / null (file://)
+    # origins instead of a wildcard, so a random website can never read API payloads.
+
+    _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+    def _host_allowed(self) -> bool:
+        host_header = (self.headers.get("Host") or "").strip()
+        if not host_header:
+            return False
+        try:
+            # urlparse handles IPv6 brackets and ports correctly
+            # ("[::1]:8080" -> hostname "::1").
+            parsed = urlparse(f"//{host_header}")
+        except ValueError:
+            return False
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return host in self._LOOPBACK_HOSTS
+
+    def _fetch_meta_allows(self) -> bool:
+        """Refuse token-bearing endpoints from cross-site contexts.
+
+        Browsers attach Sec-Fetch-Site to every fetch; absent header (curl,
+        tests, old clients) is allowed and still gated by the Host check.
+        """
+        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        if not site:
+            return True
+        return site in ("same-origin", "same-site", "none")
+
+    def _cors_origin(self) -> str | None:
+        """Return the ACAO value for this request, or None to omit the header.
+
+        Same-origin requests (no Origin) need no CORS header; file:// pages
+        send Origin: null; loopback origins are echoed.  Anything else gets no
+        header, so the browser blocks reading the response.
+        """
+        origin = (self.headers.get("Origin") or "").strip()
+        if not origin:
+            return None
+        try:
+            parsed = urlparse(origin)
+        except ValueError:
+            return None
+        if origin == "null":
+            return "null"
+        if parsed.scheme in ("http", "https"):
+            host = (parsed.hostname or "").lower().rstrip(".")
+            if host in self._LOOPBACK_HOSTS:
+                return origin
+        return None
+
     # ── Auth helpers ─────────────────────────────────────────────────────
 
     def _supplied_token(self) -> str:
@@ -342,7 +398,10 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
         if cors:
-            self.send_header("Access-Control-Allow-Origin", "*")
+            origin = self._cors_origin()
+            if origin is not None:
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
@@ -356,7 +415,10 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", f"{content_type}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self._cors_origin()
+        if origin is not None:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
@@ -446,7 +508,11 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # Only echo loopback / null origins (mirror of _cors_origin).
+        origin = self._cors_origin()
+        if origin is not None:
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         self.send_header(
             "Access-Control-Allow-Headers",
             "Content-Type, X-Code-Defog-Token, X-Code-Defog-Token-Type, "
@@ -458,6 +524,11 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         route = urlparse(self.path).path
+
+        # Loopback Host guard (DNS-rebinding defence) applies to every route.
+        if not self._host_allowed():
+            self.send_json({"error": "invalid Host header"}, HTTPStatus.BAD_REQUEST)
+            return
 
         if route == "/health":
             self.send_json({
@@ -476,9 +547,18 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             self.serve_ui()
             return
         if route == "/ui/config":
+            # Defense in depth: token-bearing endpoint must not be reachable
+            # from cross-site browser contexts (Host check above already
+            # blocks DNS rebinding).
+            if not self._fetch_meta_allows():
+                self.send_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+                return
             self.serve_ui_config()
             return
         if route == "/ui/services":
+            if not self._fetch_meta_allows():
+                self.send_json({"error": "forbidden"}, HTTPStatus.FORBIDDEN)
+                return
             self.serve_ui_services()
             return
 
@@ -541,6 +621,10 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlparse(self.path).path
+
+        if not self._host_allowed():
+            self.send_json({"error": "invalid Host header"}, HTTPStatus.BAD_REQUEST)
+            return
 
         # ── Event endpoints (service token) ───────────────────────────────
         if route == "/api/events":
@@ -706,6 +790,9 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         route = urlparse(self.path).path
+        if not self._host_allowed():
+            self.send_json({"error": "invalid Host header"}, HTTPStatus.BAD_REQUEST)
+            return
         if route.startswith("/api/projects/"):
             if not self.require_service_auth():
                 return
@@ -1051,9 +1138,25 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         from pathlib import Path
         from .drive import normalize_review_scope, review_task_specs
 
-        if not workspace or not Path(workspace).is_dir():
+        if not workspace:
+            self.send_json({"error": "workspace is required"}, HTTPStatus.BAD_REQUEST)
+            return
+        abs_path = str(Path(workspace).expanduser().resolve())
+        if not Path(abs_path).is_dir():
             self.send_json({"error": f"workspace is not a directory: {workspace}"},
                            HTTPStatus.BAD_REQUEST)
+            return
+        # The built-in driver reads the project tree, executes its test suite
+        # and may send browsed content to the configured LLM provider — only
+        # user-registered monitored projects may be driven.  (The injected
+        # drive_runner contract used by offline HTTP tests and custom runners
+        # is exempt: the injector owns that trust decision.)
+        if (self.server.drive_runner is None
+                and self.server.store.get_monitored_project(abs_path) is None):
+            self.send_json(
+                {"error": f"workspace is not a registered monitored project: {workspace}"},
+                HTTPStatus.FORBIDDEN,
+            )
             return
 
         import threading
@@ -1062,7 +1165,7 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         # Atomic check-and-create: two concurrent POSTs cannot both pass the
         # "is a drive already running" guard and start two Review Runs.
         run_id = self.server.store.begin_review_run_if_idle(
-            workspace, review_scope, review_task_specs(),
+            abs_path, review_scope, review_task_specs(),
         )
         if run_id is None:
             self.send_json({"error": "a drive is already running for this project"},
@@ -1081,7 +1184,7 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                     else self.server.store.create_or_find_case
                 )
                 run_drive(
-                    self.server.store, workspace, run_id=run_id, publish=publish,
+                    self.server.store, abs_path, run_id=run_id, publish=publish,
                     case_intake=case_intake, harness=self.server.harness, scope=review_scope,
                     llm_fn=lambda target, browse, stats: generate_drive_summary(
                         target, browse, stats, provider_store=self.server.llm_provider_store,
@@ -1141,7 +1244,12 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         # (retrospective does not import daemon modules at module level).
         from retrospective.retrospective import generate_retrospective
 
-        result = generate_retrospective(self.server.store, case_id)
+        try:
+            result = generate_retrospective(self.server.store, case_id)
+        except Exception as exc:
+            self.send_json({"error": f"retrospective generation failed: {exc}"},
+                           HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
         if "error" in result:
             code = (HTTPStatus.NOT_FOUND if result["error"] == "case not found"
                     else HTTPStatus.CONFLICT)
@@ -1263,7 +1371,7 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "case": result})
             return
 
-        elif action == "cancel":
+        elif action in ("cancel", "close_case", "retry_repair"):
             if not self.require_service_auth():
                 return
             result = self.server.store.perform_case_action(case_id, action, payload)
@@ -1273,13 +1381,23 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             if "error" in result:
                 self.send_json({"error": result["error"]}, result.get("status", 400))
                 return
+            if action == "retry_repair" and self.server.orchestrator is not None:
+                # Resume the repair agent for the re-entered state.
+                try:
+                    resumed = self.server.orchestrator.run_active_state(case_id)
+                except Exception:
+                    resumed = {"error": "retried workflow could not be resumed"}
+                if isinstance(resumed, dict) and "error" not in resumed:
+                    result = resumed
+                elif isinstance(resumed, dict):
+                    result = {**result, "workflow_error": resumed["error"]}
             self.send_json({"ok": True, "case": result})
             return
 
         else:
             self.send_json(
                 {"error": f"unknown action: {action}. Valid: approve_plan, approve_release, "
-                           "reject_plan, reject_release, cancel"},
+                           "reject_plan, reject_release, cancel, close_case, retry_repair"},
                 HTTPStatus.BAD_REQUEST)
             return
 

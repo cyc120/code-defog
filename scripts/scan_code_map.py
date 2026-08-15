@@ -55,7 +55,14 @@ def iter_files(paths: list[str], extensions: set[str]) -> list[Path]:
             continue
         if path.is_dir():
             for child in path.rglob("*"):
-                if any(part in SKIP_DIRS for part in child.parts):
+                # Match against the RELATIVE path: matching the absolute path
+                # would skip an entire workspace living under a directory
+                # named build/dist/env/...
+                try:
+                    relative_parts = child.relative_to(path).parts
+                except ValueError:
+                    continue
+                if any(part in SKIP_DIRS for part in relative_parts):
                     continue
                 if child.is_file() and child.suffix in extensions:
                     files.append(child)

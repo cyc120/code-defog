@@ -247,6 +247,9 @@ def build_code_graph(
         edges.append(edge)
 
     # First pass gives imports a complete source-file lookup table.
+    # Only symbols/imports/parse errors and a content hash are retained —
+    # the full source text is never kept in memory (up to MAX_FILES ×
+    # MAX_FILE_BYTES previously).
     for path in files:
         relative = _relative(root, path)
         text = _safe_text(path)
@@ -255,7 +258,7 @@ def build_code_graph(
             symbols, imports, parse_error = _python_symbols(text)
         else:
             symbols, imports, parse_error = _js_symbols_and_imports(text)
-        parsed[path] = (text, symbols, imports, parse_error)
+        parsed[path] = (symbols, imports, parse_error)
         node = {
             "id": _node_id("file", relative),
             "type": "file",
@@ -263,7 +266,7 @@ def build_code_graph(
             "path": relative,
             "language": language,
             "line_start": 1,
-            "line_end": max(1, len(text.splitlines())),
+            "line_end": max(1, text.count("\n") + 1) if text else 1,
             "content_hash": _content_hash(text),
             "symbol_count": len(symbols),
             "parse_status": "error" if parse_error else "ok",
@@ -293,7 +296,7 @@ def build_code_graph(
         parent = str(Path(relative).parent)
         if parent not in ("", ".") and parent in directory_nodes:
             add_edge(directory_nodes[parent]["id"], file_node["id"], "contains", "static")
-        text, symbols, imports, parse_error = parsed[path]
+        symbols, imports, parse_error = parsed[path]
         if parse_error:
             error_node = {
                 "id": _node_id("parse-error", relative), "type": "parse_error",

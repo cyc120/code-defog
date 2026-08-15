@@ -119,7 +119,31 @@ def apply_case_a_patch(context: dict[str, Any], store: Any) -> dict[str, Any]:
     if sandbox_root not in sandbox_dir.parents:
         raise ControlledRepairError("calculated sandbox path escapes the Store root")
     if sandbox_dir.exists():
-        raise ControlledRepairError("a sandbox already exists for this patch reference")
+        # Idempotent resume: patch_ref is deterministic, so a retry after a
+        # partial failure lands here.  If the patched cli.py is already in
+        # place, return the existing sandbox refs instead of erroring.
+        existing_cli = sandbox_dir / "cli.py"
+        try:
+            existing_bytes = existing_cli.read_bytes()
+        except OSError as exc:
+            raise ControlledRepairError(
+                f"sandbox exists but is unreadable (remove it to retry): {exc}",
+            ) from exc
+        if _sha256_bytes(existing_bytes) == patched_sha256:
+            return {
+                "patch_ref": patch_ref,
+                "sandbox_repository_ref": str(sandbox_dir),
+                "files_changed": ["cli.py"],
+                "patch_artifact_ref": "",
+                "tool_run_ids": [],
+                "source_cli_sha256": source_sha256,
+                "patched_cli_sha256": patched_sha256,
+                "resumed": True,
+            }
+        raise ControlledRepairError(
+            "a sandbox already exists for this patch reference with different content "
+            "(remove it to re-run from scratch)",
+        )
 
     sandbox_dir.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source_dir, sandbox_dir, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))

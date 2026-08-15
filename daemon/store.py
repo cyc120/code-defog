@@ -30,6 +30,9 @@ def _get_validator():
 
 
 DEFAULT_RETENTION = 2000
+# Bumped when the on-disk layout gains a structural change; migrate_schema
+# uses PRAGMA user_version so future data-conditioned migrations have a hook.
+SCHEMA_VERSION = 2
 DEFAULT_CONVERSATION_ID = "default"
 PRUNE_EVERY_INGESTS = 50
 DEFAULT_IDEMPOTENCY_WINDOW_S = 300
@@ -118,6 +121,15 @@ class StateStore:
         self.lock = threading.RLock()
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=NORMAL")
+        # Enforce the FOREIGN KEY clauses declared in the schema.  SQLite
+        # defaults to NO enforcement; without this, orphaned child rows
+        # (agent_runs/tool_runs/artifacts/...) can be written and survive
+        # parent deletes silently.  All existing delete paths already order
+        # children before parents, so enabling it is safe.
+        self.connection.execute("PRAGMA foreign_keys=ON")
+        # A second local process (e.g. a test harness or another daemon
+        # instance) briefly locking the DB must not surface SQLITE_BUSY.
+        self.connection.execute("PRAGMA busy_timeout=5000")
         self.connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS projects (
@@ -383,6 +395,10 @@ class StateStore:
         )
 
     def migrate_schema(self) -> None:
+        # user_version gives future migrations a data-conditioned hook.
+        # v1 = probe-based migrations (still idempotent and re-run every
+        #      startup); v2 = current layout incl. cases.chain_anchor.
+        current_version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         event_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(events)").fetchall()}
         project_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(projects)").fetchall()}
         case_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(cases)").fetchall()}
@@ -396,6 +412,8 @@ class StateStore:
         needs_chain_sequence = "chain_sequence" not in tool_run_cols if tool_run_cols else False
         knowledge_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(knowledge_records)").fetchall()}
         needs_review_note = "review_note" not in knowledge_cols if knowledge_cols else False
+        case_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(cases)").fetchall()}
+        needs_chain_anchor = "chain_anchor" not in case_cols if case_cols else False
 
         if needs_event_column or needs_project_rebuild or needs_name_column:
             self.connection.execute("BEGIN IMMEDIATE")
@@ -432,18 +450,29 @@ class StateStore:
                 raise
             self.connection.execute("COMMIT")
 
-        # DevLoop schema migrations
-        if needs_patch_ref:
-            self.connection.execute("ALTER TABLE cases ADD COLUMN patch_ref TEXT")
-        if needs_sandbox_ref:
-            self.connection.execute("ALTER TABLE cases ADD COLUMN sandbox_ref TEXT")
-        if needs_repo_abs_path:
-            self.connection.execute("ALTER TABLE cases ADD COLUMN repo_abs_path TEXT NOT NULL DEFAULT ''")
-        if needs_chain_sequence:
-            self.connection.execute("ALTER TABLE tool_runs ADD COLUMN chain_sequence INTEGER NOT NULL DEFAULT 0")
-            self.connection.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_sequence ON tool_runs(case_id, chain_sequence)")
-        if needs_review_note:
-            self.connection.execute("ALTER TABLE knowledge_records ADD COLUMN review_note TEXT")
+        # DevLoop schema migrations — one transaction so a crash mid-sequence
+        # cannot leave a partially migrated schema.
+        if any((needs_patch_ref, needs_sandbox_ref, needs_repo_abs_path,
+                needs_chain_sequence, needs_review_note, needs_chain_anchor)):
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                if needs_patch_ref:
+                    self.connection.execute("ALTER TABLE cases ADD COLUMN patch_ref TEXT")
+                if needs_sandbox_ref:
+                    self.connection.execute("ALTER TABLE cases ADD COLUMN sandbox_ref TEXT")
+                if needs_repo_abs_path:
+                    self.connection.execute("ALTER TABLE cases ADD COLUMN repo_abs_path TEXT NOT NULL DEFAULT ''")
+                if needs_chain_sequence:
+                    self.connection.execute("ALTER TABLE tool_runs ADD COLUMN chain_sequence INTEGER NOT NULL DEFAULT 0")
+                    self.connection.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_sequence ON tool_runs(case_id, chain_sequence)")
+                if needs_review_note:
+                    self.connection.execute("ALTER TABLE knowledge_records ADD COLUMN review_note TEXT")
+                if needs_chain_anchor:
+                    self.connection.execute("ALTER TABLE cases ADD COLUMN chain_anchor TEXT")
+            except Exception:
+                self.connection.execute("ROLLBACK")
+                raise
+            self.connection.execute("COMMIT")
 
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS events_session_timestamp ON events(workspace, conversation_id, timestamp DESC)"
@@ -451,6 +480,29 @@ class StateStore:
         self.connection.execute(
             "CREATE INDEX IF NOT EXISTS projects_updated ON projects(updated_at DESC)"
         )
+
+        # Hot-path indexes for Case evidence/audit queries (added idempotently
+        # so existing installs pick them up on upgrade).  Without these, every
+        # per-case evidence read (source_count, artifacts, knowledge, ...) and
+        # every status/repository-filtered list scans the whole table.
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_case_sources_case ON case_sources(case_id)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_artifacts_case_kind ON artifacts(case_id, kind, created_at)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_knowledge_case_status ON knowledge_records(case_id, status)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cases_repository ON cases(repository_ref)"
+        )
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cases_status_updated ON cases(status, updated_at DESC)"
+        )
+
+        if current_version < SCHEMA_VERSION:
+            self.connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     # ── Event ingest / state ───────────────────────────────────────────────
 
@@ -807,6 +859,15 @@ class StateStore:
         with self.lock:
             return self._case_dict(case_id)
 
+    def list_active_case_ids(self) -> list[str]:
+        """All case ids not in a terminal or approval-waiting state."""
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT case_id FROM cases WHERE status NOT IN ("
+                "'CLOSED', 'ESCALATED', 'PLAN_APPROVAL', 'RELEASE_APPROVAL', 'RELEASED', 'ROLLED_BACK')"
+            ).fetchall()
+            return [row["case_id"] for row in rows]
+
     def list_cases(self, status=None, repository_ref=None, limit=50) -> list[dict[str, Any]]:
         with self.lock:
             query = "SELECT case_id FROM cases WHERE 1=1"
@@ -896,6 +957,49 @@ class StateStore:
                 self.connection.execute(
                     "UPDATE cases SET status = ?, pending_action = NULL, updated_at = ? WHERE case_id = ?",
                     (new_status, now, case_id),
+                )
+
+            elif action == "close_case":
+                # Human/service-token close: only from states the state
+                # machine allows to reach CLOSED (validated by the same
+                # transition rules as every other move).
+                ivt = _get_validator()
+                if not ivt(case["status"], "CLOSED"):
+                    return {"error": f"cannot close from state: {case['status']}", "status": 409}
+                reason = clean_text(payload.get("reason"), 500)
+                approval_id = uuid.uuid4().hex
+                self.connection.execute(
+                    """INSERT INTO approvals (approval_id, case_id, action, decision,
+                       approver, reason, target_ref, resolved_at)
+                       VALUES (?, ?, 'close_case', 'closed', ?, ?, ?, ?)""",
+                    (approval_id, case_id,
+                     clean_text(payload.get("approver"), 100) or "system",
+                     reason, clean_text(payload.get("target_ref"), 200) or "", now),
+                )
+                self.connection.execute(
+                    "UPDATE cases SET status = 'CLOSED', pending_action = NULL, updated_at = ?, closed_at = ? WHERE case_id = ?",
+                    (now, now, case_id),
+                )
+
+            elif action == "retry_repair":
+                # A rejected (or escalated) patch may be re-entered into the
+                # controlled repair loop; the state machine governs validity.
+                ivt = _get_validator()
+                if not ivt(case["status"], "REPAIRING"):
+                    return {"error": f"cannot retry repair from state: {case['status']}", "status": 409}
+                reason = clean_text(payload.get("reason"), 500)
+                approval_id = uuid.uuid4().hex
+                self.connection.execute(
+                    """INSERT INTO approvals (approval_id, case_id, action, decision,
+                       approver, reason, target_ref, resolved_at)
+                       VALUES (?, ?, 'retry_repair', 'retried', ?, ?, ?, ?)""",
+                    (approval_id, case_id,
+                     clean_text(payload.get("approver"), 100) or "system",
+                     reason, clean_text(payload.get("target_ref"), 200) or "", now),
+                )
+                self.connection.execute(
+                    "UPDATE cases SET status = 'REPAIRING', pending_action = NULL, updated_at = ?, closed_at = NULL WHERE case_id = ?",
+                    (now, case_id),
                 )
 
             elif action == "cancel":
@@ -1166,17 +1270,27 @@ class StateStore:
             prev_hash = prev["chain_hash"] if prev else case_id
 
             started_at = clean_text(payload.get("started_at"), 80) or now
+            # Every stored column must be committed to by the chain hash,
+            # and exit_code must be normalized BEFORE both the hash and the
+            # row so the hash provably matches the persisted record.
+            exit_code = payload.get("exit_code", -1)
+            if exit_code is None:
+                exit_code = -1
             canonical = json.dumps({
                 "run_id": run_id, "case_id": case_id, "chain_sequence": chain_sequence,
                 "agent_id": payload.get("agent_id", ""),
+                "approval_id": clean_text(payload.get("approval_id"), 64) or "",
                 "tool_name": payload.get("tool_name", ""),
+                "command_template": payload.get("command_template", ""),
                 "actual_argv": payload.get("actual_argv", ""),
                 "working_directory": payload.get("working_directory", ""),
+                "policy_version": payload.get("policy_version", ""),
                 "input_sha256": payload.get("input_sha256", ""),
                 "output_sha256": payload.get("output_sha256", ""),
-                "exit_code": payload.get("exit_code"),
+                "exit_code": exit_code,
                 "started_at": started_at,
                 "finished_at": now,
+                "result_ref": clean_text(payload.get("result_ref"), 200) or "",
             }, sort_keys=True, ensure_ascii=False)
             chain_hash = sha256(f"{prev_hash}|{canonical}")
 
@@ -1197,12 +1311,63 @@ class StateStore:
                  clean_text(payload.get("policy_version"), 80),
                  clean_text(payload.get("input_sha256"), 64),
                  clean_text(payload.get("output_sha256"), 64),
-                 payload.get("exit_code", -1),
+                 exit_code,
                  chain_hash, started_at, now,
                  clean_text(payload.get("result_ref"), 200) or None),
             )
+            # Commit the terminal hash outside tool_runs (tamper-evident anchor).
+            self.connection.execute(
+                "UPDATE cases SET chain_anchor = ? WHERE case_id = ?", (chain_hash, case_id),
+            )
             self.connection.commit()
             return run_id
+
+    def verify_tool_chain(self, case_id: str) -> dict[str, Any]:
+        """Recompute the tool-run hash chain for a Case from stored rows.
+
+        Returns ``{ok, checked, first_bad_sequence, detail}``.  A mismatch
+        means the audit trail was rewritten after insertion."""
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT * FROM tool_runs WHERE case_id = ? ORDER BY chain_sequence", (case_id,)
+            ).fetchall()
+            prev_hash = case_id  # anchor used at insert time
+            for row in rows:
+                canonical = json.dumps({
+                    "run_id": row["run_id"], "case_id": row["case_id"],
+                    "chain_sequence": row["chain_sequence"],
+                    "agent_id": row["agent_id"] or "",
+                    "approval_id": row["approval_id"] or "",
+                    "tool_name": row["tool_name"] or "",
+                    "command_template": row["command_template"] or "",
+                    "actual_argv": row["actual_argv"] or "",
+                    "working_directory": row["working_directory"] or "",
+                    "policy_version": row["policy_version"] or "",
+                    "input_sha256": row["input_sha256"] or "",
+                    "output_sha256": row["output_sha256"] or "",
+                    "exit_code": row["exit_code"],
+                    "started_at": row["started_at"],
+                    "finished_at": row["finished_at"],
+                    "result_ref": row["result_ref"] or "",
+                }, sort_keys=True, ensure_ascii=False)
+                expected = sha256(f"{prev_hash}|{canonical}")
+                if expected != row["chain_hash"]:
+                    return {"ok": False, "checked": rows[-1]["chain_sequence"],
+                            "first_bad_sequence": row["chain_sequence"],
+                            "detail": f"chain hash mismatch at sequence {row['chain_sequence']}"}
+                prev_hash = row["chain_hash"]
+            if not rows:
+                return {"ok": True, "checked": 0, "detail": "no tool runs"}
+            # Tamper-evident anchor on the Case row itself: the terminal hash
+            # is committed outside tool_runs, so rewriting the last record
+            # (or all records) is detectable.
+            case = self.connection.execute(
+                "SELECT chain_anchor FROM cases WHERE case_id = ?", (case_id,)
+            ).fetchone()
+            anchor_ok = case is None or not case["chain_anchor"] or case["chain_anchor"] == prev_hash
+            return {"ok": anchor_ok, "checked": rows[-1]["chain_sequence"],
+                    "anchor": prev_hash, "detail": "chain verified" if anchor_ok
+                    else "terminal chain hash does not match the case anchor"}
 
     def _artifact_target(self, artifact_id: str, case_id: str, suggested_uri: str) -> tuple[str, Path]:
         """Return a Store-controlled relative URI and its absolute target path."""
@@ -1258,6 +1423,30 @@ class StateStore:
                 # artifact_id is unique, so this cleanup cannot remove another record's file.
                 target_path.unlink(missing_ok=True)
                 raise
+
+    def delete_artifacts_for_case(self, case_id: str, kinds: tuple[str, ...]) -> None:
+        """Remove artifact rows (and their files) for *case_id* filtered by kind.
+
+        Used by the retrospective generator to roll back a partially
+        persisted report/manifest so a retry can regenerate."""
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT artifact_id, uri, kind FROM artifacts WHERE case_id = ?", (case_id,)
+            ).fetchall()
+            for row in rows:
+                if row["kind"] in kinds:
+                    relative_path = Path(row["uri"])
+                    if (not relative_path.is_absolute() and relative_path.parts
+                            and relative_path.parts[0] == "artifacts"):
+                        target = (self.path.parent / relative_path).resolve()
+                        if self.artifact_root.resolve() in target.parents:
+                            target.unlink(missing_ok=True)
+            placeholders = ",".join("?" for _ in kinds)
+            self.connection.execute(
+                f"DELETE FROM artifacts WHERE case_id = ? AND kind IN ({placeholders})",
+                (case_id, *kinds),
+            )
+            self.connection.commit()
 
     def read_artifact(self, artifact_id: str) -> bytes | None:
         """Read a persisted artifact and verify it against the recorded hash."""

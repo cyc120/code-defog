@@ -308,8 +308,21 @@ class LLMProviderStore:
                 api_key_supplied=api_key_supplied,
             )
 
+    @staticmethod
+    def _host_of(base_url: str) -> str:
+        try:
+            parsed = urlparse(base_url)
+        except ValueError:
+            return ""
+        return (parsed.hostname or "").strip().lower()
+
     def save_and_activate(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a provider selection.  Empty key input keeps the old key."""
+        """Persist a provider selection.  Empty key input keeps the old key.
+
+        Mirror of the connection-test guard (``resolve_candidate``): a stored
+        key is never silently reused against a host outside the provider's
+        preset hosts.  Repointing the endpoint to a foreign host therefore
+        requires an explicit ``api_key`` for that host."""
         provider_id = self._provider_id(payload.get("provider_id"))
         clear_key = payload.get("clear_key") is True
         with self._lock:
@@ -317,6 +330,17 @@ class LLMProviderStore:
             base_url = self._base_url(payload.get("base_url", current["base_url"]))
             model = self._model(payload.get("model", current["model"]))
             saved = self._stored_settings_locked(provider_id)
+            api_key_supplied = bool(str(payload.get("api_key") or "").strip())
+            new_host = self._host_of(base_url)
+            old_host = self._host_of(current["base_url"])
+            if (not api_key_supplied and not clear_key
+                    and new_host != old_host
+                    and new_host not in _preset_hosts(provider_id)):
+                raise ValueError(
+                    "changing the endpoint host requires an explicit api_key "
+                    "for the new host; stored keys are never silently reused "
+                    "outside the provider's trusted hosts",
+                )
             saved["base_url"] = base_url
             saved["model"] = model
             if "api_key" in payload and str(payload.get("api_key") or "").strip():

@@ -21,10 +21,34 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse, urlunparse
 
 _GIT_REMOTE_CACHE_TTL_S = 60.0
 _git_remote_cache: dict[str, tuple[float, str]] = {}
 _base_commit_cache: dict[str, tuple[float, str | None]] = {}
+
+
+def redact_remote_url(url: str) -> str:
+    """Strip ``userinfo`` (``https://user:token@host/...``) from a git remote.
+
+    CI tokens embedded in remotes must never reach persisted reports, the
+    LLM prompt, the UI or the canonical identity.  SSH ``git@host`` forms
+    carry no secret and are left untouched.
+    """
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return raw
+    if parsed.scheme not in ("http", "https") or not parsed.username:
+        return raw
+    hostname = parsed.hostname or ""
+    netloc = hostname
+    if parsed.port is not None:
+        netloc = f"{hostname}:{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 def _run_git(args: list[str], cwd: Path, timeout: float = 2.0) -> str:
@@ -54,7 +78,7 @@ def _git_remote(abs_path: Path) -> str:
     cached = _git_remote_cache.get(key)
     if cached is not None and now - cached[0] < _GIT_REMOTE_CACHE_TTL_S:
         return cached[1]
-    remote = _run_git(["remote", "get-url", "origin"], abs_path)
+    remote = redact_remote_url(_run_git(["remote", "get-url", "origin"], abs_path))
     _git_remote_cache[key] = (now, remote)
     return remote
 

@@ -24,6 +24,7 @@ from agent_runtime.orchestrator import Orchestrator
 from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
 from daemon.drive import browse_project, detect_test_command, run_drive, run_test_probe, scan_static
 from daemon.llm_summary import build_drive_prompt, generate_drive_summary
+from _helpers import start_server
 from daemon.server import CodeCCTVServer
 from daemon.store import StateStore
 
@@ -381,15 +382,13 @@ class DriveRunStoreTests(unittest.TestCase):
 
 
 class DriveEndpointTests(unittest.TestCase):
-    def _start_server(self, store, runner=None):
-        token = secrets.token_hex(16)
-        server = CodeCCTVServer(
-            ("127.0.0.1", 0), token, store, drive_runner=runner or (
+    def _start_server(self, store, runner=None, inject_stub=True):
+        drive_runner = runner
+        if drive_runner is None and inject_stub:
+            drive_runner = (
                 lambda store, workspace, run_id=None, publish=None: {"status": "complete"}
-            ))
-        t = threading.Thread(target=server.serve_forever, daemon=True)
-        t.start()
-        return server, f"http://127.0.0.1:{server.server_address[1]}", token
+            )
+        return start_server(store, drive_runner=drive_runner)
 
     def _post_drive(self, base, token, workspace):
         enc = workspace.replace("/", "%2F")
@@ -405,6 +404,36 @@ class DriveEndpointTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as ctx:
                     urlopen(self._post_drive(base, "", directory), timeout=3)
                 self.assertEqual(ctx.exception.code, 401)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_post_drive_unregistered_workspace_forbidden(self) -> None:
+        """The built-in driver must refuse unregistered directories: it reads
+        the tree, executes tests and may ship content to an LLM provider."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            # No drive_runner injection → built-in path, registration enforced.
+            server, base, token = self._start_server(store, inject_stub=False)
+            try:
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urlopen(self._post_drive(base, token, directory), timeout=3)
+                self.assertEqual(ctx.exception.code, 403)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_post_drive_registered_workspace_accepted(self) -> None:
+        """A registered monitored project may be driven on the built-in path."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            store.register_monitored_project({
+                "workspace": directory, "kind": "process", "name": "tmp-project",
+            })
+            server, base, token = self._start_server(store, inject_stub=False)
+            try:
+                with urlopen(self._post_drive(base, token, directory), timeout=3) as resp:
+                    body = json.loads(resp.read())
+                self.assertEqual(resp.status, 202)
+                self.assertTrue(body["ok"])
             finally:
                 server.shutdown(); server.server_close(); store.close()
 

@@ -23,6 +23,7 @@ from daemon.llm_summary import (
     generate_project_assistant_reply,
     normalize_project_assistant_history,
 )
+from _helpers import start_server
 from daemon.server import CodeCCTVServer
 from daemon.store import StateStore
 
@@ -162,14 +163,7 @@ class ProjectAssistantEndpointTests(unittest.TestCase):
     def _start_server(
         self, store: StateStore, assistant_fn: object | None = None,
     ) -> tuple[CodeCCTVServer, str, str]:
-        token = secrets.token_hex(16)
-        server = CodeCCTVServer(
-            ("127.0.0.1", 0), token, store,
-            llm_chat_fn=assistant_fn,
-        )
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        return server, f"http://127.0.0.1:{server.server_address[1]}", token
+        return start_server(store, llm_chat_fn=assistant_fn)
 
     @staticmethod
     def _request(

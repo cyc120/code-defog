@@ -63,9 +63,26 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _state_dir() -> Path:
+    """Per-user state directory with restrictive permissions.
+
+    The watcher state contains full workspace paths and file metadata, so
+    it must not live in world-readable /tmp.  Mirrors the daemon's per-user
+    data-dir posture (daemon/paths.py)."""
+    override = os.environ.get("CODE_DEFOG_STATE_DIR")
+    base = Path(override).expanduser() if override else Path.home() / ".local" / "share" / "code-defog"
+    if sys.platform != "win32":
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            base.chmod(0o700)
+        except OSError:
+            pass
+    return base
+
+
 def default_state_file(workspace: Path, worklog_name: str) -> Path:
     digest = hashlib.sha256(f"{workspace}:{worklog_name}".encode("utf-8")).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / "code-defog" / f"{digest}.json"
+    return _state_dir() / f"{digest}.json"
 
 
 def load_state(path: Path) -> dict[str, dict[str, int]]:
@@ -88,32 +105,56 @@ def save_state(path: Path, workspace: Path, files: dict[str, dict[str, int]]) ->
         "workspace": str(workspace),
         "files": files,
     }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    body = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    # Atomic write: a crash mid-write must never corrupt the state file;
+    # a corrupt state file would be silently treated as a fresh baseline,
+    # suppressing real pending changes.
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            handle.write(body)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        if sys.platform != "win32":
+            try:
+                path.chmod(0o600)
+            except OSError:
+                pass
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def should_skip_dir(dirname: str) -> bool:
     return dirname in SKIP_DIRS
 
 
-def should_skip_file(path: Path, workspace: Path, worklog_name: str, state_file: Path) -> bool:
+def should_skip_file(path: Path, workspace: Path, worklog_name: str, state_file: Path | None) -> bool:
     if path.name in SKIP_FILES:
         return True
     # update_worklog's atomic writer creates .{worklog}.*.tmp in the workspace
     # root; they are transient and must not be reported as file changes.
     if worklog_name and path.name.startswith(f".{worklog_name}.") and path.name.endswith(".tmp"):
         return True
-    try:
-        resolved = path.resolve()
-    except OSError:
+    # Hot path: compare names (not resolved paths) so the per-file resolve()
+    # syscall storm disappears.  The worklog/state files live at the workspace
+    # root, so restrict the name match to root files.
+    if worklog_name and path.parent == workspace and path.name == worklog_name:
         return True
-    if resolved == (workspace / worklog_name).resolve():
-        return True
-    if resolved == state_file.resolve():
+    if (state_file is not None and state_file.name not in ("null", os.devnull)
+            and path.parent == state_file.parent and path.name == state_file.name):
         return True
     return False
 
 
-def snapshot(workspace: Path, worklog_name: str, state_file: Path) -> dict[str, dict[str, int]]:
+def snapshot(workspace: Path, worklog_name: str, state_file: Path | None) -> dict[str, dict[str, int]]:
+    """Collect per-file signatures under *workspace* (add/modify/delete).
+
+    Uses ``os.walk`` + one ``stat`` per file with NO per-file ``resolve()``
+    (previously ~7 syscalls per file on the daemon's 5-second poll loop)."""
     files: dict[str, dict[str, int]] = {}
     for root, dirnames, filenames in os.walk(workspace):
         dirnames[:] = [dirname for dirname in dirnames if not should_skip_dir(dirname)]
@@ -129,7 +170,9 @@ def snapshot(workspace: Path, worklog_name: str, state_file: Path) -> dict[str, 
                 continue
             files[relative] = {
                 "mtime_ns": stat.st_mtime_ns,
+                "ctime_ns": stat.st_ctime_ns,
                 "size": stat.st_size,
+                "ino": stat.st_ino,
             }
     return files
 
@@ -243,9 +286,8 @@ def run_once(args: argparse.Namespace, workspace: Path, state_file: Path) -> int
         print_status(args.quiet, f"Baseline created: {state_file}")
         return 0
     changes = diff_snapshots(previous, current)
-    save_state(state_file, workspace, current)
     if changes:
-        update_worklog_safe(
+        updated = update_worklog_safe(
             args.quiet,
             workspace,
             args.file,
@@ -256,8 +298,15 @@ def run_once(args: argparse.Namespace, workspace: Path, state_file: Path) -> int
             changes,
             args.max_files_per_note,
         )
-        print_status(args.quiet, f"Updated worklog with {len(changes)} file change(s).")
+        if updated:
+            # Advance the snapshot only after the change reached the worklog;
+            # otherwise a failed update would lose the change forever.
+            save_state(state_file, workspace, current)
+            print_status(args.quiet, f"Updated worklog with {len(changes)} file change(s).")
+        else:
+            print_status(args.quiet, "Worklog update failed; snapshot kept for retry.")
     else:
+        save_state(state_file, workspace, current)
         print_status(args.quiet, "No file changes detected.")
     return 0
 
@@ -286,8 +335,7 @@ def run_forever(args: argparse.Namespace, workspace: Path, state_file: Path) -> 
         if not changes:
             previous = current
             continue
-        save_state(state_file, workspace, current)
-        update_worklog_safe(
+        updated = update_worklog_safe(
             args.quiet,
             workspace,
             args.file,
@@ -298,8 +346,13 @@ def run_forever(args: argparse.Namespace, workspace: Path, state_file: Path) -> 
             changes,
             args.max_files_per_note,
         )
-        print_status(args.quiet, f"Updated worklog with {len(changes)} file change(s).")
-        previous = current
+        if updated:
+            # Persist the snapshot only after the worklog accepted the change.
+            save_state(state_file, workspace, current)
+            print_status(args.quiet, f"Updated worklog with {len(changes)} file change(s).")
+            previous = current
+        else:
+            print_status(args.quiet, "Worklog update failed; will retry next poll.")
 
 
 def main() -> None:

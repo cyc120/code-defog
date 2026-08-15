@@ -19,6 +19,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import signal
 import re
 import shlex
 import subprocess
@@ -70,7 +71,9 @@ def _git_browse(workspace: Path) -> dict[str, Any]:
     if not (workspace / ".git").exists():
         return {"is_git": False, "remote": "", "branch": "", "head": "",
                 "dirty_count": 0, "recent_commits": []}
-    remote = _run_git(["remote", "get-url", "origin"], workspace)
+    from .repo_identity import redact_remote_url
+
+    remote = redact_remote_url(_run_git(["remote", "get-url", "origin"], workspace))
     branch = _run_git(["branch", "--show-current"], workspace)
     head = _run_git(["rev-parse", "--short", "HEAD"], workspace)
     status = _run_git(["status", "--porcelain"], workspace)
@@ -214,8 +217,16 @@ def run_test_probe(workspace: str, test_cmd: dict[str, Any], timeout: float = 60
     command = test_cmd["command"]
     try:
         result = subprocess.run(
-            shlex.split(command), cwd=ws, capture_output=True, text=True, timeout=timeout, check=False)
+            shlex.split(command), cwd=ws, capture_output=True, text=True, timeout=timeout,
+            check=False, start_new_session=True,
+        )
     except subprocess.TimeoutExpired as exc:
+        # The direct child timed out, but anything it spawned (pytest fixture
+        # servers, npm lifecycle scripts) survives unless we kill the group.
+        try:
+            os.killpg(os.getpgid(exc.process.pid), signal.SIGKILL)
+        except (OSError, AttributeError, ProcessLookupError):
+            pass
         return {"detected": True, "ran": True, "timed_out": True, "passed": False,
                 "exit_code": None, "output_summary": "测试超时（超过 %ds）" % timeout,
                 "stdout_tail": _output_tail(exc.stdout),
@@ -653,11 +664,24 @@ def run_drive(
             publish({"type": "drive_status", "run": run})
         return {"run_id": run_id, "status": "complete", "browse": browse, "llm": llm}
     except Exception as exc:  # pragma: no cover - defensive
+        # Report the failure without ever letting the reporter itself raise:
+        # this handler runs on daemon/monitor threads, so an escaping
+        # exception (e.g. the store already closed during shutdown) would be
+        # invisible to the operator and would mask the original error.
         duration = round(time.monotonic() - started, 2)
-        _update_review_task(store, publish, run_id, "summary", "error", failure_reason=str(exc))
-        store.finish_review_run(run_id, "error", duration, None, None, [], str(exc))
+        error_run_id = run_id or ""
+        try:
+            if error_run_id:
+                _update_review_task(store, publish, error_run_id, "summary", "error",
+                                    failure_reason=str(exc))
+                store.finish_review_run(error_run_id, "error", duration, None, None, [], str(exc))
+        except Exception:
+            pass
         if publish:
-            run = store.get_review_run(run_id)
-            publish({"type": "review_status", "run": run})
-            publish({"type": "drive_status", "run": run})
-        return {"run_id": run_id, "status": "error", "error": str(exc)}
+            try:
+                run = store.get_review_run(error_run_id) if error_run_id else None
+                publish({"type": "review_status", "run": run, "error": str(exc)})
+                publish({"type": "drive_status", "run": run, "error": str(exc)})
+            except Exception:
+                pass
+        return {"run_id": error_run_id, "status": "error", "error": str(exc)}

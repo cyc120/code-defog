@@ -19,6 +19,7 @@ Design constraints:
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
@@ -110,6 +111,12 @@ class ProjectMonitor:
 
         try:
             baseline = self._snapshot_abs(abs_path)
+            if len(baseline) > 20_000:
+                import logging
+                logging.getLogger("code-defog.monitor").warning(
+                    "project %s has %d tracked files; consider excluding build/venv dirs",
+                    workspace, len(baseline),
+                )
             self._save_scan_state(workspace, baseline)
             previous = baseline
         except OSError as exc:
@@ -148,7 +155,7 @@ class ProjectMonitor:
         """Snapshot wrapper that tolerates a missing watch_worklog import."""
         if _snapshot is None:
             return {}
-        return _snapshot(abs_path, ".code-defog-monitor", Path("/dev/null"))
+        return _snapshot(abs_path, ".code-defog-monitor", Path(os.devnull))
 
     def _save_scan_state(self, workspace: str, state: dict[str, dict[str, int]]) -> None:
         try:
@@ -169,7 +176,13 @@ class ProjectMonitor:
         try:
             self.store.ingest(payload)
             return True
-        except Exception:
+        except Exception as exc:
+            # Event loss must be visible in the daemon log.
+            import logging
+            logging.getLogger("code-defog.monitor").error(
+                "monitored-project event lost (workspace %s): %s",
+                payload.get("workspace"), exc,
+            )
             return False
 
     def _notify_project_change(self, workspace: str) -> None:

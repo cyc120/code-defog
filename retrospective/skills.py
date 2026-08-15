@@ -165,9 +165,9 @@ def case_summarizer(evidence: dict[str, Any]) -> str:
         for run in tool_runs:
             lines.append(
                 "| {0} | {1} | {2} | {3} | {4} | {5} |".format(
-                    run.get("chain_sequence", "-"),
+                    _clean_text(run.get("chain_sequence"), 20),
                     _clean_text(run.get("tool_name"), 40),
-                    run.get("exit_code", "-"),
+                    _clean_text(run.get("exit_code"), 20),
                     _short(run.get("input_sha256")),
                     _short(run.get("output_sha256")),
                     _short(run.get("chain_hash")),
@@ -309,7 +309,7 @@ def knowledge_extractor(
             )
         # Verification gate result
         gate = output.get("quality_gate_passed")
-        if gate is not None:
+        if isinstance(gate, bool):
             passed = "passed" if gate else "failed"
             add(
                 f"Quality gate {passed}",
@@ -454,12 +454,14 @@ def evidence_indexer(case_id: str, evidence: dict[str, Any]) -> dict[str, Any]:
     evidence_tree = [
         {
             "node": name,
-            "items": [
-                _item(row)
-                for row in (
-                    (case.items() if name == "case" else (evidence.get(name) or []))
-                )
-            ],
+            "items": (
+                # The case node is a dict, not a row list: keep every
+                # field as a key/value object (stringified tuples would
+                # leak Python reprs into the audit index).
+                [{_clean_text(k, 60): _clean_text(v, 400)} for k, v in case.items()]
+                if name == "case"
+                else [_item(row) for row in (evidence.get(name) or [])]
+            ),
         }
         for name in sections
     ]

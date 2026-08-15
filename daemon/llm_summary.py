@@ -145,7 +145,15 @@ def _post_chat(api_key: str, prompt: str, timeout: float = 30.0,
         context = ssl.create_default_context(cafile=certifi.where())
     with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
         payload = json.loads(response.read().decode("utf-8"))
-    return payload["choices"][0]["message"]["content"]
+    # A 200 with a wrong shape (empty choices, missing message/content)
+    # must fail closed as a caught error, not crash the request thread.
+    try:
+        content = payload["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise ValueError(f"malformed chat/completions response: {exc}") from exc
+    if not isinstance(content, str):
+        raise ValueError("chat/completions response content must be a string")
+    return content
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
@@ -298,7 +306,7 @@ def generate_project_summary(
             if provider_store is not None else _post_chat(str(provider["api_key"]), prompt)
         )
     except (urllib.error.HTTPError, urllib.error.URLError, OSError,
-            socket.timeout, json.JSONDecodeError) as exc:
+            socket.timeout, json.JSONDecodeError, ValueError) as exc:
         return {"status": "error", "reason": f"LLM 调用失败：{exc}"}
     raw = _extract_json(content)
     if raw is None:
@@ -628,7 +636,7 @@ def generate_drive_summary(
             )
         )
     except (urllib.error.HTTPError, urllib.error.URLError, OSError,
-            socket.timeout, json.JSONDecodeError) as exc:
+            socket.timeout, json.JSONDecodeError, ValueError) as exc:
         return {"status": "error", "reason": f"LLM 调用失败：{exc}"}
     raw = _extract_json(content)
     if raw is None:

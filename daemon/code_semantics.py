@@ -180,7 +180,8 @@ def interpret_code_dossier(
             str(provider["api_key"]), prompt, system_prompt=SYSTEM_PROMPT,
             provider=provider,
         )
-    except (urllib.error.HTTPError, urllib.error.URLError, OSError, socket.timeout, json.JSONDecodeError) as error:
+    except (urllib.error.HTTPError, urllib.error.URLError, OSError, socket.timeout,
+            json.JSONDecodeError, ValueError) as error:
         return {"status": "error", "reason": f"代码解读 Agent 调用失败：{error}"}
     raw = _extract_json(content)
     reply = _normalize_reply(raw, dossier) if isinstance(raw, dict) else None

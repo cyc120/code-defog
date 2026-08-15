@@ -1031,6 +1031,76 @@ class DevLoopEvidenceTests(unittest.TestCase):
             self.assertNotEqual(evidence["tool_runs"][0]["chain_hash"], "")
             store.close()
 
+    def test_tool_chain_verifies_and_detects_tampering(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "test-chain",
+                "client_nonce": "nonce-chain-1", "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"], "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            for i in range(3):
+                store.record_tool_run({
+                    "case_id": case_id, "agent_id": "repair",
+                    "tool_name": f"tool_{i}", "command_template": f"cmd {i}",
+                    "actual_argv": f"argv {i}", "working_directory": "/tmp",
+                    "policy_version": "v1", "input_sha256": "in",
+                    "output_sha256": "out", "exit_code": 0,
+                })
+            verified = store.verify_tool_chain(case_id)
+            self.assertTrue(verified["ok"], verified)
+            self.assertEqual(verified["checked"], 3)
+            # Tamper with the middle record → verification must fail.
+            with store.lock:
+                store.connection.execute(
+                    "UPDATE tool_runs SET actual_argv = 'tampered' WHERE case_id = ? AND chain_sequence = 2",
+                    (case_id,),
+                )
+                store.connection.commit()
+            broken = store.verify_tool_chain(case_id)
+            self.assertFalse(broken["ok"])
+            self.assertEqual(broken["first_bad_sequence"], 2)
+            # Rewriting the tail (and its anchor) is also detected: anchor
+            # lives on the cases row, outside tool_runs.
+            with store.lock:
+                store.connection.execute(
+                    "UPDATE tool_runs SET chain_hash = '0' * 64 WHERE case_id = ? AND chain_sequence = 3",
+                    (case_id,),
+                )
+                store.connection.commit()
+            tail_broken = store.verify_tool_chain(case_id)
+            self.assertFalse(tail_broken["ok"])
+            store.close()
+
+    def test_tool_chain_exit_code_none_hashes_like_minus_one(self) -> None:
+        """exit_code=None must be normalized so the hash matches the row."""
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "state.sqlite3")
+            result = store.create_or_find_case({
+                "source_type": "issue", "source_uri": "test-exit",
+                "client_nonce": "nonce-exit-1", "raw_content": "test",
+                "repository_ref": "/test",
+                "extracted_signals": {
+                    "exception_type": "KeyError", "message_pattern": "test",
+                    "key_frames": ["src/test.py:1"], "keywords": ["test"],
+                    "repository_ref": "/test",
+                },
+            })
+            case_id = result["case_id"]
+            store.record_tool_run({"case_id": case_id, "agent_id": "a",
+                                  "tool_name": "t", "actual_argv": "x",
+                                  "working_directory": "/tmp", "exit_code": None})
+            verified = store.verify_tool_chain(case_id)
+            self.assertTrue(verified["ok"], verified)
+            self.assertEqual(store.get_case_evidence(case_id)["tool_runs"][0]["exit_code"], -1)
+            store.close()
+
     def test_artifact_content_is_persisted_and_hash_checked(self) -> None:
         """Artifact bytes must be readable from the URI recorded in SQLite."""
         with tempfile.TemporaryDirectory() as directory:
@@ -1456,7 +1526,10 @@ class ControlledRepairWorkflowTests(unittest.TestCase):
             orchestrator = Orchestrator(store, AgentTeamsAdapter(store))
             self._approve_plan(store, case_id, orchestrator)
 
-            sandbox = Path(directory) / "wrong-patch-sandbox"
+            # The quality gate only executes Store-controlled sandboxes; place
+            # the test sandbox under the store sandbox root exactly as
+            # tools/controlled_repair.apply_case_a_patch does.
+            sandbox = Path(directory) / "sandboxes" / "wrong-patch-sandbox"
             shutil.copytree(self.demo_target, sandbox, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             wrong_cli = sandbox / "cli.py"
             wrong_text = wrong_cli.read_text(encoding="utf-8")
@@ -1828,6 +1901,7 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
                 server.shutdown()
+                server.server_close()
 
     def test_service_token_cannot_approve(self) -> None:
         """service_token with type=service must be rejected for grant actions."""
@@ -1871,6 +1945,7 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
                 server.shutdown()
+                server.server_close()
 
     def test_reject_plan_uses_same_grant_model_as_approve(self) -> None:
         """reject_plan consumes an approval Grant, same auth model as approve_plan."""
@@ -1926,6 +2001,7 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
                 server.shutdown()
+                server.server_close()
 
     def test_expired_grant_rejected_by_http(self) -> None:
         """An expired approval Grant must be rejected even via HTTP."""
@@ -1981,6 +2057,7 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
             finally:
                 store.close()
                 server.shutdown()
+                server.server_close()
 
     def test_case_creation_pushes_sse(self) -> None:
         """Creating a Case should push an SSE event of type 'case_created'."""
@@ -1992,6 +2069,8 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
                 import threading, urllib.request
 
                 sse_events: list[dict] = []
+                sse_connected = threading.Event()
+                sse_created = threading.Event()
 
                 def sse_listener():
                     try:
@@ -2000,18 +2079,22 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
                             headers={"X-Code-CCTV-Token": token},
                         )
                         with urllib.request.urlopen(req, timeout=3) as resp:
+                            sse_connected.set()
                             for line in resp:
                                 line = line.decode("utf-8").strip()
                                 if line.startswith("data: "):
-                                    sse_events.append(json.loads(line[6:]))
+                                    event = json.loads(line[6:])
+                                    sse_events.append(event)
+                                    if event.get("type") == "case_created":
+                                        sse_created.set()
                     except Exception:
                         pass
 
                 sse_thread = threading.Thread(target=sse_listener, daemon=True)
                 sse_thread.start()
 
-                # Give SSE connection time to establish
-                time.sleep(0.3)
+                # Wait for the SSE connection to establish (no fixed sleep).
+                self.assertTrue(sse_connected.wait(timeout=3), "SSE subscription did not connect")
 
                 # Create a Case
                 store.create_or_find_case({
@@ -2027,15 +2110,15 @@ class DevLoopHTTPIntegrationTests(unittest.TestCase):
                     },
                 })
 
-                time.sleep(0.3)
-
-                # Should have received a case_created event via SSE
+                # Wait for the case_created event specifically (no fixed sleep).
+                self.assertTrue(sse_created.wait(timeout=3), "no case_created SSE event")
                 case_events = [e for e in sse_events if e.get("type") == "case_created"]
                 self.assertGreaterEqual(len(case_events), 1,
                                          "SSE should emit case_created when a Case is created")
             finally:
                 store.close()
                 server.shutdown()
+                server.server_close()
 
     def test_pending_observation_promoted_on_timeout(self) -> None:
         """resolve_pending_sources should create a Case for expired pending observations."""

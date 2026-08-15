@@ -62,8 +62,25 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         self.wfile.write(body)
 
+    _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+    def _host_allowed(self) -> bool:
+        host_header = (self.headers.get("Host") or "").strip()
+        if not host_header:
+            return False
+        try:
+            # urlparse handles IPv6 brackets and ports correctly.
+            parsed = urlparse(f"//{host_header}")
+        except ValueError:
+            return False
+        host = (parsed.hostname or "").lower().rstrip(".")
+        return host in self._LOOPBACK_HOSTS
+
     def do_GET(self) -> None:
         route = urlparse(self.path).path
+        if not self._host_allowed():
+            self.send_json({"error": "invalid Host header"}, HTTPStatus.BAD_REQUEST)
+            return
         if route in ("/", "/ui", "/ui/"):
             self.serve_ui()
             return

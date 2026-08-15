@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from _helpers import seed_case, start_server
 from daemon.server import CodeCCTVServer
 from daemon.store import StateStore
 
@@ -39,16 +40,10 @@ _TEST_APPROVAL_KEY = "test-human-approval-key"
 def _start_server(
     store: StateStore, orchestrator: object | None = None,
 ) -> tuple[CodeCCTVServer, str, str]:
-    """Start the daemon on a random port and return (server, base_url, token)."""
-    token = secrets.token_hex(16)
-    server = CodeCCTVServer(
-        ("127.0.0.1", 0), token, store, orchestrator,
-        approval_secret=_TEST_APPROVAL_KEY,
-    )
-    actual_port = server.server_address[1]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, f"http://127.0.0.1:{actual_port}", token
+    """Start the daemon on a random port (shared helper; keeps the local
+    name so existing call sites stay untouched)."""
+    return start_server(store, orchestrator=orchestrator,
+                        approval_secret=_TEST_APPROVAL_KEY)
 
 
 def _minimal_evidence() -> dict:
@@ -202,9 +197,14 @@ class DevLoopKnowledgeStoreTests(unittest.TestCase):
         # `with tempfile.TemporaryDirectory() as tmp` yields a str path
         return StateStore(Path(tmp) / "state.sqlite3")
 
+    def _seed_case(self, store, case_id):
+        """Create a real cases row (shared helper)."""
+        return seed_case(store, case_id)
+
     def test_record_knowledge_records_defaults_pending_review(self) -> None:
         with self._make_store() as tmp:
             store = self._store_in(tmp)
+            self._seed_case(store, "case-1")
             records = store.record_knowledge_records("case-1", "art-manifest", [
                 {"title": "t1", "category": "c1", "content": "x", "confidence": 0.9,
                  "tags": ["a", "b"]},
@@ -218,6 +218,8 @@ class DevLoopKnowledgeStoreTests(unittest.TestCase):
     def test_list_knowledge_records_filters_by_case_and_status(self) -> None:
         with self._make_store() as tmp:
             store = self._store_in(tmp)
+            self._seed_case(store, "case-1")
+            self._seed_case(store, "case-2")
             store.record_knowledge_records("case-1", "m1#", [{"title": "t", "category": "c",
                                                               "content": "x", "confidence": 0.5,
                                                               "tags": []}])
@@ -232,6 +234,7 @@ class DevLoopKnowledgeStoreTests(unittest.TestCase):
     def test_review_knowledge_record_verified(self) -> None:
         with self._make_store() as tmp:
             store = self._store_in(tmp)
+            self._seed_case(store, "case-1")
             records = store.record_knowledge_records("case-1", "m#", [{"title": "t", "category": "c",
                                                                        "content": "x", "confidence": 0.5,
                                                                        "tags": []}])
@@ -244,9 +247,34 @@ class DevLoopKnowledgeStoreTests(unittest.TestCase):
             self.assertEqual(stored["status"], "verified")
             store.close()
 
+    def test_retrospective_partial_failure_is_recoverable(self) -> None:
+        """If knowledge writes fail after the report artifact persisted, the
+        next generate call must regenerate instead of short-circuiting."""
+        from unittest.mock import patch
+        from retrospective.retrospective import generate_retrospective
+        with self._make_store() as tmp:
+            store = self._store_in(tmp)
+            self._seed_case(store, "case-r-1")
+            store.connection.execute(
+                "UPDATE cases SET status = 'CLOSED' WHERE case_id = 'case-r-1'",
+            )
+            store.connection.commit()
+            with patch.object(
+                store, "record_knowledge_records", side_effect=RuntimeError("boom"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    generate_retrospective(store, "case-r-1")
+            # Artifacts were rolled back, so a retry regenerates cleanly.
+            result = generate_retrospective(store, "case-r-1")
+            self.assertEqual(result.get("status"), "CLOSED")
+            self.assertTrue(result.get("regenerated"))
+            self.assertGreaterEqual(len(result.get("knowledge_entries") or []), 0)
+            store.close()
+
     def test_review_knowledge_record_rejected(self) -> None:
         with self._make_store() as tmp:
             store = self._store_in(tmp)
+            self._seed_case(store, "case-1")
             records = store.record_knowledge_records("case-1", "m#", [{"title": "t", "category": "c",
                                                                        "content": "x", "confidence": 0.5,
                                                                        "tags": []}])
@@ -270,6 +298,7 @@ class DevLoopKnowledgeStoreTests(unittest.TestCase):
     def test_clear_all_clears_knowledge_records(self) -> None:
         with self._make_store() as tmp:
             store = self._store_in(tmp)
+            self._seed_case(store, "case-1")
             store.record_knowledge_records("case-1", "m#", [{"title": "t", "category": "c",
                                                              "content": "x", "confidence": 0.5,
                                                              "tags": []}])

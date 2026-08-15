@@ -19,7 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from daemon.project_discovery import LocalProjectDiscoveryAgent
 from daemon.project_monitor import ProjectMonitor
-from daemon.repo_identity import canonical_repo_identity, clear_caches, resolve_base_commit
+from daemon.repo_identity import (
+    canonical_repo_identity, clear_caches, redact_remote_url, resolve_base_commit,
+)
 from daemon.store import StateStore
 
 
@@ -238,6 +240,52 @@ class ProjectMonitorTests(unittest.TestCase):
             mon._emit_git_commits(str(repo), stale_project)
             self.assertEqual(sum(1 for e in events if e.get("event_type") == "git_commit"), 1)
             store.close()
+
+
+class RemoteRedactionTests(unittest.TestCase):
+    """Git remote credentials must never survive into identity/reports."""
+
+    def test_https_token_remote_is_redacted(self) -> None:
+        self.assertEqual(
+            redact_remote_url("https://x-access-token:ghp_secret@github.com/org/repo.git"),
+            "https://github.com/org/repo.git",
+        )
+
+    def test_https_userinfo_remote_is_redacted(self) -> None:
+        self.assertEqual(
+            redact_remote_url("https://alice@example.invalid/private.git"),
+            "https://example.invalid/private.git",
+        )
+
+    def test_ssh_remote_keeps_username(self) -> None:
+        # git@host is a routing user, not a secret; keep the URL usable.
+        self.assertEqual(
+            redact_remote_url("git@github.com:org/repo.git"),
+            "git@github.com:org/repo.git",
+        )
+
+    def test_plain_remote_unchanged_and_empty_safe(self) -> None:
+        self.assertEqual(redact_remote_url("https://github.com/org/repo.git"),
+                         "https://github.com/org/repo.git")
+        self.assertEqual(redact_remote_url(""), "")
+        self.assertEqual(redact_remote_url(None), "")
+
+    def test_canonical_identity_uses_redacted_remote(self) -> None:
+        import subprocess as _sp
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "proj"
+            repo.mkdir()
+            _sp.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True, capture_output=True)
+            _sp.run(["git", "config", "user.email", "t@t"], cwd=repo, check=True, capture_output=True)
+            _sp.run(["git", "config", "user.name", "t"], cwd=repo, check=True, capture_output=True)
+            _sp.run(["git", "remote", "add", "origin",
+                     "https://x-access-token:ghp_secret@github.com/org/repo.git"],
+                    cwd=repo, check=True, capture_output=True)
+            clear_caches()
+            identity = canonical_repo_identity(str(repo))
+            self.assertEqual(identity["git_remote"], "https://github.com/org/repo.git")
+            self.assertNotIn("ghp_secret", identity["canonical_ref"])
+            self.assertNotIn("x-access-token", identity["canonical_ref"])
 
 
 if __name__ == "__main__":

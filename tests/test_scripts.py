@@ -9,7 +9,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import event_client  # noqa: E402
+import scan_code_map  # noqa: E402
 import update_worklog  # noqa: E402
+import watch_worklog  # noqa: E402
 
 
 class WorklogTests(unittest.TestCase):
@@ -135,6 +137,116 @@ class WorklogTests(unittest.TestCase):
         ):
             with patch.object(event_client, "urlopen", side_effect=OSError("connection refused")):
                 self.assertFalse(event_client.post_event({"workspace": "/tmp/x"}))
+
+
+class WatchWorklogEngineTests(unittest.TestCase):
+    """The change-detection engine used by daemon/project_monitor — it had
+    zero tests despite being production code."""
+
+    def _worktree(self):
+        directory = tempfile.TemporaryDirectory()
+        root = Path(directory.name)
+        (root / "a.txt").write_text("one", encoding="utf-8")
+        (root / "b.txt").write_text("two", encoding="utf-8")
+        return directory, root
+
+    def test_snapshot_and_diff_detect_add_modify_delete(self) -> None:
+        directory, root = self._worktree()
+        try:
+            state_file = Path(directory.name) / "state.json"
+            first = watch_worklog.snapshot(root, "AI_WORKLOG.md", state_file)
+            self.assertEqual(set(first), {"a.txt", "b.txt"})
+
+            # add + modify + delete
+            (root / "c.txt").write_text("three", encoding="utf-8")
+            (root / "a.txt").write_text("one-v2", encoding="utf-8")
+            (root / "b.txt").unlink()
+            second = watch_worklog.snapshot(root, "AI_WORKLOG.md", state_file)
+            changes = watch_worklog.diff_snapshots(first, second)
+            states = {c.path: c.state for c in changes}
+            self.assertEqual(states["c.txt"], "已新增")
+            self.assertEqual(states["a.txt"], "已修改")
+            self.assertEqual(states["b.txt"], "已删除")
+        finally:
+            directory.cleanup()
+
+    def test_size_and_mtime_preserving_rewrite_is_detected(self) -> None:
+        """Same-size rewrite with restored mtime must still register via
+        ctime/inode (previously invisible with mtime+size only)."""
+        import os as _os
+        import time as _time
+        directory, root = self._worktree()
+        try:
+            state_file = Path(directory.name) / "state.json"
+            target = root / "a.txt"
+            before = target.stat()
+            first = watch_worklog.snapshot(root, "AI_WORKLOG.md", state_file)
+            # Same bytes, same size; restore the mtime to hide the rewrite.
+            _os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+            target.write_text("one", encoding="utf-8")
+            _os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+            second = watch_worklog.snapshot(root, "AI_WORKLOG.md", state_file)
+            changes = watch_worklog.diff_snapshots(first, second)
+            # ctime_ns always advances on write even when mtime is restored.
+            self.assertIn("a.txt", [c.path for c in changes])
+        finally:
+            directory.cleanup()
+
+    def test_save_state_is_atomic_and_readable(self) -> None:
+        directory, root = self._worktree()
+        try:
+            state_file = Path(directory.name) / "state.json"
+            snapshot = watch_worklog.snapshot(root, "AI_WORKLOG.md", state_file)
+            watch_worklog.save_state(state_file, root, snapshot)
+            loaded = watch_worklog.load_state(state_file)
+            self.assertEqual(loaded, snapshot)
+            # No temp litter left behind.
+            self.assertEqual([p.name for p in Path(directory.name).glob("*.tmp")], [])
+        finally:
+            directory.cleanup()
+
+    def test_run_once_keeps_snapshot_when_update_fails(self) -> None:
+        """A failed worklog update must NOT advance the snapshot: the change
+        has to be retried, not lost (watch_worklog.py:246 regression)."""
+        directory, root = self._worktree()
+        try:
+            state_file = Path(directory.name) / "state.json"
+            from argparse import Namespace
+            args = Namespace(
+                workspace=str(root), once=True, quiet=True,
+                file=watch_worklog.DEFAULT_WORKLOG,
+                language=watch_worklog.DEFAULT_LANGUAGE,
+                interval=watch_worklog.DEFAULT_INTERVAL,
+                no_start_note=True,
+                max_files_per_note=watch_worklog.DEFAULT_MAX_FILES_PER_NOTE,
+                state_file=None,
+            )
+            # Baseline first.
+            watch_worklog.run_once(args, root, state_file)
+            (root / "a.txt").write_text("one-v2", encoding="utf-8")
+            with patch.object(watch_worklog, "update_worklog_safe", return_value=False):
+                watch_worklog.run_once(args, root, state_file)
+            # Snapshot must still describe the ORIGINAL tree.
+            state = watch_worklog.load_state(state_file)
+            self.assertEqual(state["a.txt"]["size"], 3, "a.txt is now 5 bytes but snapshot advanced")
+        finally:
+            directory.cleanup()
+
+
+class ScanCodeMapTests(unittest.TestCase):
+    def test_workspace_under_skip_named_dir_is_not_skipped(self) -> None:
+        """SKIP_DIRS matches relative path parts only; a workspace itself
+        living under build/ or dist/ must still be scanned."""
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory) / "build"
+            build.mkdir()
+            (build / "app.py").write_text("def f():\n    pass\n", encoding="utf-8")
+            (build / "node_modules").mkdir()
+            (build / "node_modules" / "pkg.js").write_text("x", encoding="utf-8")
+            files = scan_code_map.iter_files([str(build)], {".py"})
+            names = [f.name for f in files]
+            self.assertIn("app.py", names)
+            self.assertNotIn("pkg.js", names)
 
 
 if __name__ == "__main__":

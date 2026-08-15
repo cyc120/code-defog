@@ -1,0 +1,17 @@
+# Code Defog — project tooling configuration.
+# Minimal by design: the runtime stays dependency-light and single-process.
+
+[tool.pytest.ini_options]
+# Let `pytest` work from the repository root without `python -m pytest`
+# (the daemon package is not installed, it is imported from the tree).
+pythonpath = ["."]
+testpaths = ["tests", "demo_target"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

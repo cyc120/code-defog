@@ -190,6 +190,9 @@ class AgentEntrypoint(Protocol):
     def __call__(self, case_context: dict[str, Any]) -> dict[str, Any]: ...
 
 
+AGENTSCOPE_DISPATCH_TIMEOUT_S = 120.0
+
+
 class AgentScopeExecutionAdapter:
     """AgentScope SDK wrapper with a local mock fallback.
 
@@ -469,7 +472,11 @@ class AgentScopeExecutionAdapter:
                         # Final message (Msg) when yield_final_msg=True
                         final_message = evt
 
-            asyncio.run(_run_with_events())
+            # Hard timeout: a hung upstream must not block the request thread
+            # forever.  asyncio.wait_for also cancels the in-flight stream.
+            asyncio.run(
+                asyncio.wait_for(_run_with_events(), timeout=AGENTSCOPE_DISPATCH_TIMEOUT_S)
+            )
 
             # Extract text from final message
             raw_text = ""

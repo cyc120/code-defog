@@ -48,6 +48,7 @@ PROVIDER_PRESETS: dict[str, dict[str, Any]] = {
         "base_url": "http://127.0.0.1:11434/v1",
         "model": "llama3.2",
         "json_mode": False,
+        "requires_api_key": False,
         "hosts": ("127.0.0.1", "localhost", "::1"),
     },
     "custom": {
@@ -83,6 +84,16 @@ def _preset_hosts(provider_id: str) -> set[str]:
 def _legacy_deepseek_key() -> str:
     """Read the legacy project setting only when no saved key exists."""
     return get_key("DEEPSEEK_API_KEY", "")
+
+
+def provider_is_ready(provider: dict[str, Any]) -> bool:
+    """Return whether a resolved provider can make a request.
+
+    Cloud and custom providers require an API key.  A loopback Ollama
+    endpoint is intentionally exempt because its OpenAI-compatible endpoint
+    is commonly configured without authentication.
+    """
+    return bool(provider.get("api_key")) or not bool(provider.get("requires_api_key", True))
 
 
 class LLMProviderStore:
@@ -210,6 +221,7 @@ class LLMProviderStore:
         resolved_model = self._model(
             model if model is not None else stored.get("model", preset["model"])
         )
+        requires_api_key = bool(preset.get("requires_api_key", True))
         stored_key = stored.get("api_key") if isinstance(stored.get("api_key"), str) else ""
         if api_key_supplied:
             resolved_key = self._api_key(api_key)
@@ -222,13 +234,14 @@ class LLMProviderStore:
             key_source = "environment" if resolved_key else "none"
         else:
             resolved_key = ""
-            key_source = "none"
+            key_source = "not_required" if not requires_api_key else "none"
         return {
             "id": provider_id,
             "name": preset["name"],
             "base_url": resolved_base,
             "model": resolved_model,
             "json_mode": bool(preset.get("json_mode")),
+            "requires_api_key": requires_api_key,
             "api_key": resolved_key,
             "key_source": key_source,
         }
@@ -239,6 +252,7 @@ class LLMProviderStore:
             "local": "本地受限配置",
             "environment": "环境变量兼容回退",
             "request": "本次输入",
+            "not_required": "本机免密",
             "none": "未配置",
         }
         return {
@@ -247,7 +261,7 @@ class LLMProviderStore:
             "base_url": selection["base_url"],
             "model": selection["model"],
             "active": active,
-            "configured": bool(selection["api_key"]),
+            "configured": provider_is_ready(selection),
             "key_source": source_labels.get(selection["key_source"], "未配置"),
         }
 

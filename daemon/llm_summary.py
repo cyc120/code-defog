@@ -32,7 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .llm_providers import LLMProviderStore
+from .llm_providers import LLMProviderStore, provider_is_ready
 
 try:
     import certifi
@@ -103,7 +103,8 @@ def _read_worklog_context(limit: int = 4000) -> str:
 
 
 def _post_chat(api_key: str, prompt: str, timeout: float = 30.0,
-               system_prompt: str | None = None, *, provider: dict[str, Any] | None = None) -> str:
+               system_prompt: str | None = None, *, provider: dict[str, Any] | None = None,
+               max_tokens: int | None = None) -> str:
     """POST to a selected OpenAI-compatible chat/completions endpoint.
 
     *system_prompt* overrides the default when provided (used by the drive
@@ -123,19 +124,25 @@ def _post_chat(api_key: str, prompt: str, timeout: float = 30.0,
         ],
         "temperature": 0.2,
     }
+    if max_tokens is not None:
+        if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 4096:
+            raise ValueError("max_tokens must be an integer between 1 and 4096")
+        payload["max_tokens"] = max_tokens
     # Some OpenAI-compatible local servers reject response_format.  The prompt
     # still requires JSON and _extract_json remains defensive in that case.
     if selected.get("json_mode", True):
         payload["response_format"] = {"type": "json_object"}
     body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     request = urllib.request.Request(
         endpoint,
         data=body,
         method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
+        headers=headers,
     )
     # Prefer certifi's CA bundle so HTTPS verification succeeds even when the
     # local Python openssl default path is missing (common on some macOS Python
@@ -292,7 +299,7 @@ def generate_project_summary(
 ) -> dict[str, Any]:
     """Fail-closed LLM summary over the deterministic *stats*."""
     provider = _selected_provider(provider_store)
-    if not provider.get("api_key"):
+    if not provider_is_ready(provider):
         return {
             "status": "unavailable",
             "reason": _unavailable_reason(provider, "LLM 总结"),
@@ -549,7 +556,7 @@ def generate_project_assistant_reply(
     if len(question) > ASSISTANT_MAX_QUESTION_CHARS:
         return {"status": "error", "reason": "问题不能超过 1000 个字符。"}
     provider = _selected_provider(provider_store)
-    if not provider.get("api_key"):
+    if not provider_is_ready(provider):
         return {
             "status": "unavailable",
             "reason": _unavailable_reason(provider, "项目助手"),
@@ -620,7 +627,7 @@ def generate_drive_summary(
 ) -> dict[str, Any]:
     """Fail-closed LLM summary for a project drive (no zero-case short-circuit)."""
     provider = _selected_provider(provider_store)
-    if not provider.get("api_key"):
+    if not provider_is_ready(provider):
         return {
             "status": "unavailable",
             "reason": _unavailable_reason(provider, "LLM 总结"),
@@ -657,7 +664,7 @@ def test_llm_provider(provider: dict[str, Any]) -> dict[str, Any]:
     shape.  The response is deliberately discarded so connection testing
     cannot become a prompt or data-exfiltration surface.
     """
-    if not provider.get("api_key"):
+    if not provider_is_ready(provider):
         return {"status": "unavailable", "reason": _unavailable_reason(provider, "连接测试")}
     try:
         content = _post_chat(

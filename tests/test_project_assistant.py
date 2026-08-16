@@ -310,7 +310,11 @@ class ProjectAssistantConsoleTests(unittest.TestCase):
         console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
             encoding="utf-8"
         )
-        self.assertIn('option.addEventListener("click", () => { box.checked = !box.checked; });', console)
+        # A label makes the complete row activate its native checkbox without
+        # nesting an interactive input inside a button.
+        self.assertIn('const option = create("label", "proj-option");', console)
+        self.assertIn('box.type = "checkbox";', console)
+        self.assertIn('option.append(box, copy);', console)
 
 
 if __name__ == "__main__":

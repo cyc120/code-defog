@@ -2,23 +2,37 @@
 
 定位你的 AI 编程：从「看见过程」到「受控闭环」。
 
-**Code Defog** 是面向软件研发审查的本地多 Agent 工作台：它将本机项目监控、结构化 Case、审批门禁、证据索引、代码关系图与受限 LLM 解读集中到一条可复核链路中。内部的 **DevLoop** 状态机负责既有 Case 生命周期兼容，面向 GOAI Agent Infra 方向三「软件研发全流程协同」。项目框架与赛题映射见 [GOAI_Direction3_Project_Framework.md](GOAI_Direction3_Project_Framework.md)。
+**Code Defog** 是面向软件研发审查的本地多 Agent 工作台，将项目监控、结构化 Case、审批门禁、证据索引、代码地图与受限 LLM 解读串成一条可复核链路。
+
+## 系统架构
+
+![Code Defog 多 Agent 系统架构](docs/images/multi-agent-architecture.png)
+
+## 一条命令启动
+
+安装依赖后，直接运行：
+
+```bash
+python3 -m daemon.serve
+```
+
+服务只监听本机回环地址，会自动选择端口并打开已连接的控制台。无图形环境可追加 `--no-open`。
 
 ## 核心特点
 
 - **受控闭环，而非黑箱生成。** 事件进入后走一条完整、可复核的状态机：`分诊 → 诊断 → 计划审批 → 修复 → 验证 → 放行审批 → 发布/回滚 → 复盘`。每一步都是显式状态转移，不把「模型输出」当作「执行结果」。
-- **确定性优先，模型叙述只是参考。** 控制台里所有图表与计数都来自 SQLite 的确定性聚合；LLM 只负责生成叙述性总结和受证据约束的代码解读。未配置任何厂商密钥时，总结、项目助手与代码解读 Agent 会明确返回「不可用」，绝不伪造一个看似合理的结果。
+- **确定性优先，模型叙述只作参考。** 图表与计数均来自 SQLite 的确定性聚合；LLM 仅生成项目总结和受证据约束的代码解读。未启用可用模型时，系统会明确显示「不可用」，绝不伪造结果。
 - **Agent 不能自己批准自己。** 审批采用三层凭证隔离：`service_token`（服务页面/脚本）、人工审批密钥（`X-Code-Defog-Approval-Key`）、一次性 `approval_token`。持有服务令牌的 Agent 无法经 HTTP 签发或消费审批，修复与放行必须过人工门禁。
 - **全程可审计的证据链。** 工具调用按 Case 形成哈希链（`chain_hash`），制品写入与读取都做 SHA-256 校验并防路径逃逸，审批 Grant 只存哈希、审批/工具/制品/知识/复盘全部落库可追溯。
 - **项目优先的一体化控制台。** 自动发现本机 git 仓库与运行中进程的工作目录，只读监控文件变化与提交增量；全项目 Review Run 把「结构审查 + 测试探测 + 静态扫描 + 总结 + Case 判定」聚合成可刷新、可经 SSE 观察的任务图。
-- **诚实的接入边界。** 明确区分本地 Mock / AgentScope 实验路径与真实 AgentTeams 接入，不冒名、不把本地生成物当作赛事运行凭据（详见「AgentTeams 接入状态」）。
+- **诚实的接入边界。** 明确区分本地 Mock / AgentScope 实验路径与真实 AgentTeams 接入，不将本地生成物误作真实运行凭据（详见「AgentTeams 接入边界」）。
 
 ## 快速开始
 
 ### 前置条件
 
 - Python 3.10+
-- 可选：`DEEPSEEK_API_KEY`，作为首次运行 DeepSeek 的兼容回退；也可在 Web 控制台的「LLM 设置」中切换厂商、模型与密钥。未配置任何密钥时，LLM 能力明确显示不可用，确定性统计与审计功能仍可用。
+- 可选：`DEEPSEEK_API_KEY`，作为 DeepSeek 的首次运行兼容回退；也可在 Web 控制台的「LLM 设置」中切换厂商、模型与密钥。本机 Ollama 可免密使用；未启用可用模型时，确定性统计与审计功能仍可正常运行。
 - 人工审批使用独立的 `CODE_DEFOG_APPROVAL_KEY`。
 
 ### 安装与验证
@@ -43,13 +57,21 @@ export CODE_DEFOG_APPROVAL_KEY='replace-with-a-private-local-secret'
 python3 -m daemon.serve
 ```
 
-服务默认仅监听 `127.0.0.1`，并自动选择可用端口。端口、服务令牌和状态库路径写入当前平台数据目录的 `service.json`：
+服务默认仅监听 `127.0.0.1`，自动选择可用端口，并在启动完成后自动打开已连接的本机控制台；无需填写端口或服务令牌。若在 CI 或无图形环境运行，使用 `--no-open`：
+
+```bash
+python3 -m daemon.serve --no-open
+```
+
+在 macOS 上，也可以直接双击 [`scripts/open-code-defog.command`](scripts/open-code-defog.command)。它会在项目目录启动同一条服务命令，并由服务自动打开已连接的控制台。
+
+端口、服务令牌和状态库路径仍写入当前平台数据目录的 `service.json`：
 
 ```bash
 python3 -c "from daemon.paths import config_path; print(config_path())"
 ```
 
-读取其中的 `port` 后，在浏览器打开 `http://127.0.0.1:<port>/ui`。同源 Web 页面读取服务令牌连接本机服务；人工审批密钥不会出现在 `/ui/config`、`service.json` 或服务发现记录中。选中一个已监控项目后，可从顶栏的项目助手入口询问进度、风险与下一步。
+控制台由服务自身的同源页面读取服务令牌并连接；人工审批密钥不会出现在 `/ui/config`、`service.json` 或服务发现记录中。选中一个已监控项目后，可从顶栏的项目助手入口询问进度、风险与下一步。
 
 ### 本机服务发现
 
@@ -59,7 +81,7 @@ python3 -c "from daemon.paths import config_path; print(config_path())"
 python3 -m daemon.dashboard --open
 ```
 
-发现器只读取并验证回环服务的地址、端口与健康状态，然后跳转至选中实例自己的 `/ui`。令牌与人工审批密钥均不写入发现描述符。
+发现器只读取并验证回环服务的地址、端口与健康状态；唯一健康实例会自动跳转至自己的 `/ui`，多个实例才要求选择。令牌与人工审批密钥均不写入发现描述符。
 
 ## 核心闭环
 
@@ -106,7 +128,7 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 
 - **项目选择窗口**：自动检索本机 git 仓库与运行中进程工作目录，勾选要监控的项目；支持手动添加路径。
 - **项目审查视图**：首屏为自助化驱动。范围使用完整/快速分段控件，检查项可分别启用测试、静态风险和 Git；随后显示 Harness 运行模式、阶段任务图、确定性发现、关联 Case 和审查历史。聚合统计与 LLM 信息金字塔下移到结果之后。
-- **代码地图**：只解析当前已登记的被监控项目，不默认解析 Code Defog 自身。以目录、文件、符号和导入关系绘制 2D 地图；关系标记为 `static`、`unresolved` 等证据等级。点击文件或符号先显示路径、行号和一跳关系等确定事实，再可显式调用 Code Interpreter Agent 解读其职责、协作、流程、风险与局限。模型结论始终标为“非执行证据”，且每条结论只能引用当前 dossier 的节点或边证据。
+- **代码地图**：只解析当前已登记的被监控项目，不默认解析 Code Defog 自身。全宽画布以目录、文件、符号和导入关系绘制 2D 地图；关系标记为 `static`、`unresolved` 等证据等级。画布支持滚轮缩放、空白区域拖拽平移和大小复位。点击文件或符号后，画布内可拖动的悬浮机器人会自动调用当前已启用的 LLM，给出节点职责与一跳关系流的简要说明；请求固定只发送结构元数据和一跳关系，不发送源码。模型结论始终标为“非执行证据”，且只能引用当前 dossier 的节点或边证据。
 - **Case 审计**：Case 队列、详情与来源、Agent 运行、工具、审批、制品、知识与复盘证据页签。
 - **Harness 调度**：从只读 `/api/harness` 清单展示当前任务图、各 Agent 边界和实际运行记录；审批状态不会被派发给 Agent。
 - **项目助手**：顶栏打开当前项目的只读问答抽屉，可询问进度、风险和下一步；每次请求仅携带最近 6 条浏览器内存对话，不落库，切换项目或刷新页面即清空。重复请求在同一项目状态下短时复用结果，生成中可随时停止。
@@ -114,15 +136,15 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 - **监控项目**：已监控项目列表、运行状态与停止监控。
 - SSE 自动刷新、主题切换、人工审批密钥输入。
 
-首次运行无监控项目时，会自动弹出项目选择窗口引导。直接打开 HTML 文件需要手动填写本机 Host、Port 和服务令牌；通过服务端 `/ui` 打开时则使用同源连接配置。
+首次运行无监控项目时，会自动弹出项目选择窗口引导。正式入口是服务启动后自动打开的 `/ui`，它使用同源连接配置，不要求填写 Host、Port 或服务令牌。直接打开 `web/index.html` 仅用于开发预览：它会安全复用最近验证过的本机服务；若没有可复用服务，会显示一键复制的启动命令，而不是默认展开连接配置。浏览器本身不能安全读取本机令牌或启动 Python 服务，因此冷启动仍需运行上述命令（或双击 macOS 启动器）。
 
 ### LLM 厂商与密钥
 
-首选在控制台顶栏的「LLM 设置」保存并启用一个厂商。当前实现使用 OpenAI 兼容的 `/chat/completions` 协议，内置 DeepSeek、OpenAI、Ollama 和自定义兼容端点预设。自定义远程端点必须使用 HTTPS；`http://` 仅允许本机 `localhost`/回环地址，以支持 Ollama。
+首选在控制台顶栏的「LLM 设置」保存并启用一个厂商。当前实现使用 OpenAI 兼容的 `/chat/completions` 协议，内置 DeepSeek、OpenAI、Ollama 和自定义兼容端点预设。DeepSeek、OpenAI 与远程自定义端点需要 API 密钥；本机 Ollama 可免密直接调用。自定义远程端点必须使用 HTTPS；`http://` 仅允许本机 `localhost`/回环地址，以支持 Ollama。
 
 密钥保存在当前用户应用数据目录的 `llm_providers.json`，目录权限 `0700`、文件权限 `0600`。它不进入 git 工作区、SQLite、SSE、工作日志、浏览器 `localStorage` 或任何 API 响应。页面只显示是否已配置和来源类型，不显示密钥或其片段。保存的 DeepSeek 密钥优先于环境变量；尚未保存时，才兼容读取 `DEEPSEEK_API_KEY`。
 
-代码地图的图数据默认只返回相对路径、符号、行号、关系证据与内容指纹，不返回源码或绝对工作区路径。用户点击「查看本地代码」时，浏览器才请求当前文件/符号的有限行范围预览；这只在本机服务和页面之间传输。点击「让 Agent 解读」时，默认只向当前 LLM 厂商发送元数据、签名和一跳关系。只有勾选单次授权后，当前选区的有限代码片段才会被发送给该厂商；此授权不持久化。需要频繁解读源码片段时，应优先选择本机 Ollama。
+代码地图仅返回相对路径、符号、行号、关系证据与内容指纹，不返回源码或绝对工作区路径。点击文件或符号后，悬浮机器人会自动向当前 LLM 厂商发送受限的节点元数据与一跳关系，并在画布内展示职责摘要；页面不会发送源码。
 
 连接测试会向选中模型发起一次有界请求，以验证端点、密钥、模型和 TLS 信任链，不会关闭 HTTPS 校验。为防密钥外泄，连接测试在复用已保存/环境密钥时，只允许指向该厂商的官方端点或已保存的自定义端点；对陌生端点必须显式提供一次性密钥。存在企业 HTTPS 代理时，应将组织根证书加入服务 Python 的可信 CA bundle。
 
@@ -158,7 +180,7 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 | `GET` | `/api/projects/{workspace}/reviews` | `service_token` | 最近的 Review Run 及任务历史 |
 | `POST` | `/api/projects/{workspace}/assistant` | `service_token` | 基于该已监控项目的聚合统计、最新浏览报告和有界浏览器内存上下文进行只读问答 |
 | `GET` | `/api/projects/{workspace}/code-graph` | `service_token` | 当前已登记项目的有界、脱敏代码关系图（无源码、无绝对路径） |
-| `POST` | `/api/projects/{workspace}/code-graph/interpret` | `service_token` | 构建一个受限节点/选区 dossier；仅显式请求时调度只读 Code Interpreter Agent |
+| `POST` | `/api/projects/{workspace}/code-graph/interpret` | `service_token` | 构建受限节点 dossier，并调度只读 Code Interpreter Agent |
 | `GET` | `/api/llm/providers` | `service_token` | 厂商、端点、模型和密钥配置状态（不含密钥） |
 | `POST` | `/api/llm/providers` | `service_token` | 保存并启用厂商、模型、端点和可选密钥；切换后清空叙述缓存 |
 | `POST` | `/api/llm/providers/test` | `service_token` | 对当前保存配置或一次性输入密钥执行连接测试；不保存一次性密钥 |
@@ -191,14 +213,14 @@ Web 审批流程为：人工输入审批密钥，服务端验证服务令牌和�
 
 这是一项防止持有 `service_token` 的 Agent 经 HTTP API 自行审批的边界，不是同一操作系统用户下对恶意本地进程的强隔离。
 
-## AgentTeams 接入状态
+## AgentTeams 接入边界
 
-赛题要求以真实 AgentTeams 协同为基点，但这一接入尚未完成。当前 `agent_runtime/harness.py` 的 `DevLoopHarness` 已统一本地任务图与所有业务 Agent 派发，`agent_runtime/teams_adapter.py` 的公开实现为 `AgentScopeExecutionAdapter`；两者组成的是本地 Mock/AgentScope 实验路径，并不等同于外部 AgentTeams 控制面、TeamHarness 或 Matrix 工作流。
+真实 AgentTeams 接入尚未完成。当前 `agent_runtime/harness.py` 的 `DevLoopHarness` 已统一本地任务图与所有业务 Agent 派发，`agent_runtime/teams_adapter.py` 的公开实现为 `AgentScopeExecutionAdapter`；两者组成的是本地 Mock/AgentScope 实验路径，并不等同于外部 AgentTeams 控制面、TeamHarness 或 Matrix 工作流。
 
 在真实接入完成前：
 
 - 不将 AgentScope 的 Agent、模型调用事件或 `--runtime-mode agentscope`（以及旧别名 `production`）称为已部署 AgentTeams。
-- 不将 `evidence/*.json` 作为已验证的赛事运行凭据提交；这些都是本地生成物，已被忽略规则排除。
+- 不将 `evidence/*.json` 作为已验证的真实 AgentTeams 运行凭据；这些都是本地生成物，已被忽略规则排除。
 
 `--runtime-mode agentteams` 会在前置检查未满足或 Workflow Bridge 未配置时失败关闭，不会回退伪装为 AgentScope。真实接入需要单独配置官方 AgentTeams 控制面、身份凭证、Team/Task/Handoff 工作流和可导出的 Trace，再用两条演练案例完成可复核验收。
 
@@ -236,7 +258,9 @@ code-defog/
 ├── retrospective/           # 异步复盘
 ├── demo_target/             # 隔离故障演练仓库
 ├── tests/                   # 单元与 HTTP 集成测试
-└── docs/                    # 赛题与设计材料
+└── docs/                    # 架构图与项目展示资源
+    ├── images/              # README 使用的架构图
+    └── screenshots/         # 项目展示图
 ```
 
 ## 数据与提交边界

@@ -12,9 +12,34 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from unittest.mock import patch
 
+from daemon import serve
 from daemon.server import CodeCCTVServer, CodeDefogServer
 from daemon.store import StateStore
+
+
+class ServeConsoleLaunchTests(unittest.TestCase):
+    def test_local_console_url_and_default_open_policy(self) -> None:
+        self.assertEqual(serve.ui_url("127.0.0.1", 43125), "http://127.0.0.1:43125/ui")
+        self.assertEqual(serve.ui_url("::1", 43125), "http://[::1]:43125/ui")
+        with patch.object(serve.sys, "argv", ["serve.py"]):
+            self.assertTrue(serve.parse_args().open_ui)
+        with patch.object(serve.sys, "argv", ["serve.py", "--no-open"]):
+            self.assertFalse(serve.parse_args().open_ui)
+
+    def test_open_console_uses_the_default_browser_without_affecting_headless_mode(self) -> None:
+        url = "http://127.0.0.1:43125/ui"
+        with patch("daemon.serve.webbrowser.open", return_value=True) as open_browser:
+            self.assertTrue(serve.open_console(url))
+        open_browser.assert_called_once_with(url, new=2)
+
+    def test_macos_finder_launcher_starts_the_standard_auto_open_path(self) -> None:
+        launcher = Path(__file__).resolve().parents[1] / "scripts" / "open-code-defog.command"
+        text = launcher.read_text(encoding="utf-8")
+        self.assertTrue(launcher.stat().st_mode & 0o111)
+        self.assertIn("#!/bin/zsh", text)
+        self.assertIn("exec /usr/bin/env python3 -m daemon.serve", text)
 
 
 class StateStoreTests(unittest.TestCase):

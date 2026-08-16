@@ -1,9 +1,9 @@
 """Evidence-grounded, read-only explanations for code graph nodes.
 
-The model is asked to interpret a small deterministic dossier.  It never gets
-repository credentials, Git remotes, environment variables, an arbitrary file
-path, or the whole project.  Source context is included only for an explicit
-single-request opt-in made by the user in the UI.
+The model receives a bounded deterministic dossier, never repository
+credentials, Git remotes, environment variables, arbitrary paths, or the
+whole project.  The code-map UI sends structural metadata only; source context
+is available solely to explicit API clients that request it.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import urllib.error
 from datetime import datetime, timezone
 from typing import Any
 
-from .llm_providers import LLMProviderStore
+from .llm_providers import LLMProviderStore, provider_is_ready
 from .llm_summary import _extract_json, _post_chat, _selected_provider, _unavailable_reason
 
 
@@ -103,23 +103,16 @@ def _safe_dossier_context(dossier: dict[str, Any], *, include_source: bool) -> d
 
 
 def build_code_interpreter_prompt(dossier: dict[str, Any], *, include_source: bool = False) -> str:
-    """Create a bounded prompt whose source-exposure mode is explicit."""
+    """Create a compact, evidence-bounded prompt for the map robot."""
     context = _safe_dossier_context(dossier, include_source=include_source)
+    context["neighbors"] = context["neighbors"][:8]
+    context["evidence_refs"] = context["evidence_refs"][:8]
     return (
-        "请解读以下代码节点。要求：\n"
-        "- 中文；每项结论必须引用 evidence_refs 中的 E 编号；\n"
-        "- confirmed 只用于 AST 节点或 static 关系直接支持的内容；\n"
-        "- inferred 只能表示合理推断；无法确认的动态调用、运行时行为和业务语义必须为 pending_confirmation；\n"
-        "- 不得声称已经运行测试、访问仓库、读取未提供代码，或发现未在证据包中的问题；\n"
-        "- `collaborators` 的 node_id 只能使用 neighbors 中提供的 node_id；\n"
-        "- 不超过 5 项职责、协作者和风险。\n\n"
-        f"【节点证据包】\n{json.dumps(context, ensure_ascii=False)[:30000]}\n\n"
-        "只输出如下 JSON：\n"
-        '{"role":"一句话角色","certainty":"confirmed|inferred|pending_confirmation",'
-        '"responsibilities":["职责"],"inputs_outputs":["输入或输出"],'
-        '"collaborators":[{"node_id":"节点ID","relationship":"关系","evidence_refs":["E1"]}],'
-        '"flow":["数据或控制流说明"],"risks":["风险或待确认项"],'
-        '"evidence_refs":["E1"],"limitations":["不能由当前证据确认的内容"]}'
+        "只根据下面节点证据，用中文说明它在项目中的作用。不得猜测未提供的代码体、"
+        "运行结果或业务语义。只输出一个 JSON 对象，且只包含 role、certainty、flow、"
+        "evidence_refs 四个字段：role 为一句话；certainty 只能为 confirmed、inferred 或 "
+        "pending_confirmation；flow 最多 1 项；evidence_refs 只能使用证据包中的 ref_id。\n"
+        f"【节点证据包】\n{json.dumps(context, ensure_ascii=False)[:9000]}"
     )
 
 
@@ -172,13 +165,13 @@ def interpret_code_dossier(
 ) -> dict[str, Any]:
     """Ask the selected model to interpret a prepared dossier, fail closed."""
     provider = _selected_provider(provider_store)
-    if not provider.get("api_key"):
+    if not provider_is_ready(provider):
         return {"status": "unavailable", "reason": _unavailable_reason(provider, "代码解读 Agent")}
     prompt = build_code_interpreter_prompt(dossier, include_source=include_source)
     try:
         content = _post_chat(
             str(provider["api_key"]), prompt, system_prompt=SYSTEM_PROMPT,
-            provider=provider,
+            provider=provider, timeout=25.0, max_tokens=1024,
         )
     except (urllib.error.HTTPError, urllib.error.URLError, OSError, socket.timeout,
             json.JSONDecodeError, ValueError) as error:

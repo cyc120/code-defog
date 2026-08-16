@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import uuid
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,6 +60,21 @@ DEFAULT_CONFIG = paths.config_path()
 DEFAULT_STATE = paths.state_path()
 
 
+def ui_url(host: str, port: int) -> str:
+    """Return the browser-safe local UI URL, including IPv6 brackets."""
+    address = f"[{host}]" if ":" in host else host
+    return f"http://{address}:{port}/ui"
+
+
+def open_console(url: str) -> bool:
+    """Best-effort browser launch; headless use still has the printed URL."""
+    try:
+        return bool(webbrowser.open(url, new=2))
+    except Exception as exc:
+        print(f"could not open local console automatically: {exc}", file=sys.stderr)
+        return False
+
+
 def write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
@@ -88,6 +104,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--port", type=int, default=0, help="Use 0 to select a free local port.")
+    parser.add_argument(
+        "--open", dest="open_ui", action="store_true", default=True,
+        help="Open the local console automatically after the service starts (default).",
+    )
+    parser.add_argument(
+        "--no-open", dest="open_ui", action="store_false",
+        help="Run headlessly without opening the local console.",
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument(
@@ -216,6 +240,7 @@ def main() -> None:
     )
     server_ref["server"] = server
     address, port = server.server_address
+    console_url = ui_url(address, port)
     descriptor_registered = False
     try:
         if discovery_agent.is_loopback_host(address):
@@ -241,6 +266,9 @@ def main() -> None:
                 "updated_at": started_at,
             },
         )
+        print(f"Code Defog console: {console_url}", flush=True)
+        if args.open_ui:
+            open_console(console_url)
 
         stopping = threading.Event()
 

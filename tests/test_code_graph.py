@@ -95,8 +95,10 @@ class CodeGraphBuilderTests(unittest.TestCase):
             greet = next(node for node in graph["nodes"] if node.get("label") == "greet")
             metadata_dossier = build_node_dossier(root, graph, greet["id"])
             source_dossier = build_node_dossier(root, graph, greet["id"], include_source=True)
-            self.assertNotIn("return normalize", build_code_interpreter_prompt(metadata_dossier))
+            metadata_prompt = build_code_interpreter_prompt(metadata_dossier)
+            self.assertNotIn("return normalize", metadata_prompt)
             self.assertIn("return normalize", build_code_interpreter_prompt(source_dossier, include_source=True))
+            self.assertIn('只包含 role、certainty、flow、evidence_refs 四个字段', metadata_prompt)
 
 
 class CodeInterpreterTests(unittest.TestCase):
@@ -141,6 +143,44 @@ class CodeInterpreterTests(unittest.TestCase):
         self.assertEqual(response["model"], "gpt-4o-mini")
         self.assertEqual(seen["api_key"], "shared-provider-test-key")
         self.assertEqual((seen["provider"] or {})["base_url"], "https://api.openai.com/v1")
+
+    def test_interpreter_uses_keyless_local_ollama(self) -> None:
+        """The map robot can use a local Ollama endpoint without a dummy key."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = _project(Path(directory) / "target")
+            graph = build_code_graph(root)
+            greet = next(node for node in graph["nodes"] if node.get("label") == "greet")
+            dossier = build_node_dossier(root, graph, greet["id"])
+            providers = LLMProviderStore(
+                Path(directory) / "providers.json", legacy_key_loader=lambda: "",
+            )
+            providers.save_and_activate({
+                "provider_id": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "llama3.2",
+            })
+            from daemon import code_semantics
+
+            seen: dict[str, object] = {}
+            original_post = code_semantics._post_chat
+            try:
+                def fake_post(api_key: str, _prompt: str, **kwargs: object) -> str:
+                    seen["api_key"] = api_key
+                    return json.dumps({
+                        "role": "名称格式化函数", "certainty": "confirmed",
+                        "responsibilities": ["清理字符串"], "inputs_outputs": [],
+                        "collaborators": [], "flow": [], "risks": [],
+                        "evidence_refs": ["E1"], "limitations": [],
+                    })
+
+                code_semantics._post_chat = fake_post
+                response = interpret_code_dossier(dossier, provider_store=providers)
+            finally:
+                code_semantics._post_chat = original_post
+
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["provider"], "ollama")
+        self.assertEqual(seen["api_key"], "")
 
     def test_normalizer_rejects_unknown_neighbor_and_evidence_refs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -294,12 +334,13 @@ class CodeGraphEndpointTests(unittest.TestCase):
             finally:
                 server.shutdown(); server.server_close(); store.close()
 
-    def test_console_has_opt_in_code_map_and_agent_action(self) -> None:
+    def test_console_has_full_width_code_map_with_automatic_llm_action(self) -> None:
         console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(encoding="utf-8")
         self.assertIn('data-view="code-map"', console)
-        self.assertIn('code-map-source-consent', console)
-        self.assertIn("让 Agent 解读", console)
-        self.assertIn('interpret: options.interpret !== false', console)
+        self.assertNotIn('code-map-inspector', console)
+        self.assertNotIn('code-map-source-consent', console)
+        self.assertIn('include_preview: false, include_source: false, interpret: true', console)
+        self.assertIn('await loadCodeMapDossier();', console)
         self.assertIn("/code-graph/interpret", console)
 
     def test_harness_is_the_default_interpreter_dispatch_path(self) -> None:

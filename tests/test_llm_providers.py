@@ -42,6 +42,19 @@ class LLMProviderStoreTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
             self.assertEqual(store.resolve_active()["api_key"], "saved-test-key")
 
+    def test_ollama_is_usable_without_an_api_key(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = LLMProviderStore(Path(directory) / "providers.json", legacy_key_loader=lambda: "")
+            public = store.save_and_activate({
+                "provider_id": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "llama3.2",
+            })
+            ollama = next(item for item in public["providers"] if item["id"] == "ollama")
+            self.assertTrue(ollama["configured"])
+            self.assertEqual(ollama["key_source"], "本机免密")
+            self.assertEqual(store.resolve_active()["api_key"], "")
+
     def test_candidate_never_persists_one_time_key_and_rejects_remote_http(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = LLMProviderStore(Path(directory) / "providers.json", legacy_key_loader=lambda: "")
@@ -188,6 +201,32 @@ class LLMProviderTransportTests(unittest.TestCase):
             self.assertEqual(seen["key"], "transport-test-key")
             self.assertEqual((seen["provider"] or {})["base_url"], "https://gateway.example.test/v1")
 
+    def test_ollama_without_key_uses_the_real_generation_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = LLMProviderStore(Path(directory) / "providers.json", legacy_key_loader=lambda: "")
+            store.save_and_activate({
+                "provider_id": "ollama",
+                "base_url": "http://127.0.0.1:11434/v1",
+                "model": "llama3.2",
+            })
+            original = llm_summary._post_chat
+            seen: dict[str, object] = {}
+            try:
+                def fake_post(key: str, _prompt: str, **kwargs: object) -> str:
+                    seen.update({"key": key, "provider": kwargs.get("provider")})
+                    return json.dumps({"overall_status": "本机模型可用", "top_priorities": []})
+
+                llm_summary._post_chat = fake_post
+                result = llm_summary.generate_project_summary(
+                    {"totals": {"cases": 1}}, provider_store=store,
+                )
+            finally:
+                llm_summary._post_chat = original
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["provider"], "ollama")
+            self.assertEqual(seen["key"], "")
+            self.assertEqual((seen["provider"] or {})["base_url"], "http://127.0.0.1:11434/v1")
+
 
 class LLMProviderPostChatWireTests(unittest.TestCase):
     """Exercise the real _post_chat transport against a loopback HTTP server.
@@ -254,6 +293,37 @@ class LLMProviderPostChatWireTests(unittest.TestCase):
             self.assertEqual(body["messages"][1]["role"], "user")
             self.assertEqual(body["messages"][1]["content"], "hello")
             self.assertEqual(body["response_format"], {"type": "json_object"})
+            self.assertNotIn("max_tokens", body)
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_post_chat_includes_an_explicit_output_limit(self) -> None:
+        import http.server
+
+        captured: dict[str, object] = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length", "0"))
+                captured["body"] = json.loads(self.rfile.read(length))
+                payload = b'{"choices": [{"message": {"content": "{\\"ok\\":true}"}}]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args: object) -> None:
+                return
+
+        server, base = self._serve(Handler)
+        try:
+            content = llm_summary._post_chat(
+                "", "hi", max_tokens=480,
+                provider={"id": "ollama", "base_url": base, "model": "llama", "json_mode": False},
+            )
+            self.assertEqual(content, '{"ok":true}')
+            self.assertEqual(captured["body"]["max_tokens"], 480)
         finally:
             server.shutdown(); server.server_close()
 
@@ -284,6 +354,35 @@ class LLMProviderPostChatWireTests(unittest.TestCase):
             )
             self.assertEqual(content, "plain text")
             self.assertNotIn("response_format", captured["body"])
+        finally:
+            server.shutdown(); server.server_close()
+
+    def test_post_chat_omits_authorization_for_a_local_keyless_provider(self) -> None:
+        import http.server
+
+        captured: dict[str, object] = {}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                captured["auth"] = self.headers.get("Authorization")
+                payload = b'{"choices": [{"message": {"content": "{\\"ok\\":true}"}}]}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args: object) -> None:
+                return
+
+        server, base = self._serve(Handler)
+        try:
+            content = llm_summary._post_chat(
+                "", "hi", provider={"id": "ollama", "base_url": base,
+                                    "model": "llama", "json_mode": False, "api_key": ""},
+            )
+            self.assertEqual(content, '{"ok":true}')
+            self.assertIsNone(captured["auth"])
         finally:
             server.shutdown(); server.server_close()
 

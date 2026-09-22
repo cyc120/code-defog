@@ -30,6 +30,14 @@ from .harness import DevLoopHarness
 class Orchestrator:
     """Thin coordinator — delegates to an execution adapter and StateStore."""
 
+    # Both values mean "the patch was materialised inside a Store-controlled
+    # sandbox by a reviewed tool path": demo_sandbox via
+    # tools/controlled_repair, cli_sandbox via the local CLI adapter.  Neither
+    # trusts model output by itself — the release still requires the
+    # deterministic quality gate plus a human approval, and the sandbox path
+    # must pass _sandbox_ref_allowed below.
+    TRUSTED_SANDBOX_MODES = frozenset({"demo_sandbox", "cli_sandbox"})
+
     def __init__(self, store: Any, teams_adapter: Any) -> None:
         self.store = store
         # Serialises Agent dispatch per Case so two concurrent intake/approval
@@ -211,7 +219,7 @@ class Orchestrator:
             # sandbox_repository_ref; an LLM-claimed repair must never
             # anchor a later release grant.
             if target_state == "REPAIRING" and completed:
-                repair_trusted = ctx_dict.get("repair_mode") == "demo_sandbox"
+                repair_trusted = ctx_dict.get("repair_mode") in self.TRUSTED_SANDBOX_MODES
                 patch_ref = agent_result.get("patch_ref", "") if repair_trusted else ""
                 sandbox_ref = agent_result.get("sandbox_repository_ref", "") if repair_trusted else ""
                 if repair_trusted and sandbox_ref and not self._sandbox_ref_allowed(sandbox_ref):

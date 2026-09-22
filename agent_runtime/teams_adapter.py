@@ -688,3 +688,13 @@ class AgentScopeExecutionAdapter:
 # correctly.  This alias is local AgentScope execution only, never an
 # AgentTeams control-plane integration.
 AgentTeamsAdapter = AgentScopeExecutionAdapter
+
+
+# Public re-exports of the shared prompt / structured-output contract so
+# sibling adapters (e.g. the local CLI adapter in cli_teams_adapter.py)
+# reuse exactly one implementation instead of forking it.
+build_task_prompt = AgentScopeExecutionAdapter._build_task_prompt
+extract_json_block = _extract_json_block
+validate_structured = _validate_structured
+promoted_fields = _TOP_LEVEL_FIELDS
+harness_metadata = _harness_metadata

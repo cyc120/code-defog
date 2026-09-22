@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import secrets
+import shlex
 import signal
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_runtime.agentteams_preflight import inspect_agentteams_preflight
+from agent_runtime.cli_teams_preflight import inspect_cli_teams_preflight
 from agent_runtime.harness import DevLoopHarness
 from agent_runtime.orchestrator import Orchestrator
 from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
@@ -92,6 +94,13 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
             pass
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the Code Defog local background service.")
     parser.add_argument("--host", default="127.0.0.1")
@@ -115,17 +124,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--state", type=Path, default=DEFAULT_STATE)
     parser.add_argument(
-        "--runtime-mode", choices=("mock", "agentscope", "agentteams", "production"),
+        "--runtime-mode", choices=("mock", "agentscope", "agentteams", "cli", "production"),
         default=os.environ.get("CODE_DEFOG_RUNTIME_MODE") or os.environ.get("CODE_CCTV_RUNTIME_MODE", "mock"),
         help=(
-            "Use agentscope for the local AgentScope runtime. agentteams is fail-closed "
-            "until an external AgentTeams workflow bridge is configured. "
-            "production is a legacy alias for agentscope."
+            "Use agentscope for the local AgentScope runtime. cli dispatches Case tasks to a "
+            "local CLI coding agent (codex/claude) inside Store-controlled sandboxes. "
+            "agentteams is fail-closed until an external AgentTeams workflow bridge is "
+            "configured. production is a legacy alias for agentscope."
         ),
     )
     parser.add_argument(
         "--agentteams-preflight", action="store_true",
         help="Inspect local AgentTeams prerequisites without starting a service or deployment.",
+    )
+    parser.add_argument(
+        "--cli-provider", default=os.environ.get("CODE_DEFOG_CLI_PROVIDER", "codex"),
+        help="Local CLI agent for --runtime-mode cli: codex, claude, or custom.",
+    )
+    parser.add_argument(
+        "--cli-command", default=os.environ.get("CODE_DEFOG_CLI_COMMAND", ""),
+        help="Full command template for --cli-provider custom (e.g. 'my-agent run').",
+    )
+    parser.add_argument(
+        "--cli-model", default=os.environ.get("CODE_DEFOG_CLI_MODEL", ""),
+        help="Model passed to the CLI provider when the provider supports a model flag.",
+    )
+    parser.add_argument(
+        "--cli-timeout", type=float, default=_env_float("CODE_DEFOG_CLI_TIMEOUT", 300.0),
+        help="Hard per-dispatch timeout in seconds for the local CLI agent.",
+    )
+    parser.add_argument(
+        "--cli-extra-args", default=os.environ.get("CODE_DEFOG_CLI_EXTRA_ARGS", ""),
+        help="Extra arguments appended verbatim to the CLI invocation (shlex-split).",
     )
     parser.add_argument(
         "--approval-key", default=os.environ.get("CODE_DEFOG_APPROVAL_KEY") or os.environ.get("CODE_CCTV_APPROVAL_KEY", ""),
@@ -184,14 +214,33 @@ def main() -> None:
         )
         raise SystemExit(2)
 
+    if args.runtime_mode == "cli":
+        report = inspect_cli_teams_preflight(
+            provider=args.cli_provider, command=args.cli_command, environment=os.environ,
+        )
+        print(report.format_text(), file=sys.stderr)
+        if not report.ready:
+            raise SystemExit(2)
+
     _setup_logging()
     token = secrets.token_urlsafe(32)
     instance_id = uuid.uuid4().hex
     started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     store = StateStore(args.state)
-    teams = AgentScopeExecutionAdapter(store)
-    if args.runtime_mode in ("agentscope", "production"):
-        teams.set_mode(args.runtime_mode)
+    if args.runtime_mode == "cli":
+        from agent_runtime.cli_teams_adapter import CLITeamsAdapter, CLITeamsConfig
+
+        teams = CLITeamsAdapter(store, CLITeamsConfig(
+            provider=args.cli_provider,
+            command=args.cli_command,
+            model=args.cli_model,
+            timeout_s=args.cli_timeout,
+            extra_args=tuple(shlex.split(args.cli_extra_args)) if args.cli_extra_args else (),
+        ))
+    else:
+        teams = AgentScopeExecutionAdapter(store)
+        if args.runtime_mode in ("agentscope", "production"):
+            teams.set_mode(args.runtime_mode)
     harness = DevLoopHarness(teams)
     orchestrator = Orchestrator(store, harness)
     # Crash recovery: any Case left in an Agent-active state by a previous

@@ -232,6 +232,27 @@ python3 -m daemon.serve --agentteams-preflight
 
 该检查只观察 `agt`、Docker CLI 和本地 Docker socket；即使通过，也不表示已部署 AgentTeams、已有 TeamHarness 工作流或已产生官方 Trace。
 
+## 本地 CLI Agent 接入（实验路径）
+
+`--runtime-mode cli` 把 DevLoop 的 Case 任务派发给**本机真实的 CLI 编程 Agent**（Codex CLI `codex exec`、Claude Code `claude -p`，或自定义命令模板），由 `agent_runtime/cli_teams_adapter.py` 的 `CLITeamsAdapter` 执行。这是与 Mock/AgentScope 并列的第三条**本地实验路径**，不是 AgentTeams 接入。
+
+```bash
+# 需要本机已安装并登录对应 CLI；启动前做只读前置检查，缺失即失败关闭
+python3 -m daemon.serve --runtime-mode cli --cli-provider codex
+python3 -m daemon.serve --runtime-mode cli --cli-provider claude
+python3 -m daemon.serve --runtime-mode cli --cli-provider custom --cli-command "my-agent run"
+```
+
+安全模型与 demo 修复路径同构，一条都不少：
+
+- **沙箱副本**：每次派发把目标仓库复制到 `<数据目录>/sandboxes/<case>/cli-<id>`，CLI 只作用于副本；原仓库一个字节都不会改。
+- **模型输出是证据，不是权威**：修复结果只有在 Case 携带 `repair_mode=cli_sandbox` 且沙箱路径通过 Store 包含性校验时才被持久化；随后必须过确定性质量门禁，再经人工批准放行。没有真实 diff 时补丁引用为空，Case 升级人工。
+- **证据链**：每次 CLI 调用落一条不可变的 `tool_runs` 哈希链记录（argv、退出码、prompt/输出 SHA-256）加一份有界 transcript 制品；`verify_tool_chain` 可随时重算校验。
+- **验证保持确定性**：`VERIFYING` 仍由既有验证 Agent 执行 `quality_gate.py`，不采纳模型自评。
+- **失败必须升级**：CLI 退出非零、超时（进程组杀死）、输出无法解析、审查/代码解读任务未接入——全部转为 `failed` 并 `ESCALATED` 转人工，不静默停放，不回退 Mock。
+
+诚实的边界：CLI 子进程以调用用户身份运行，拥有该用户全部本地权限；沙箱保护的是**原仓库不被修改**，不是**机器不被 CLI 读取**。`--sandbox workspace-write` / `--permission-mode acceptEdits` 等默认权限参数只是第一道防线。相关配置：`CODE_DEFOG_CLI_PROVIDER`、`CODE_DEFOG_CLI_COMMAND`、`CODE_DEFOG_CLI_MODEL`、`CODE_DEFOG_CLI_TIMEOUT`、`CODE_DEFOG_CLI_EXTRA_ARGS`（或同名 `--cli-*` 参数）。
+
 ## 目录结构
 
 ```text
@@ -250,7 +271,7 @@ code-defog/
 │   ├── code_graph.py        # 被监控项目的有界文件/符号/导入关系图
 │   └── code_semantics.py     # Node/Selection Dossier 与受证据约束的 LLM 解读
 ├── web/                     # 唯一 Web 管理界面（项目优先导航）
-├── agent_runtime/           # 状态机、Case/Review Context、Harness 和 AgentScope 实验适配
+├── agent_runtime/           # 状态机、Case/Review Context、Harness、AgentScope 与本地 CLI 适配
 ├── agents/                  # 分诊、诊断、修复、验证、项目审查与代码解读角色
 ├── connectors/              # 外部输入规范化（占位）
 ├── tools/                   # 受控工具接口

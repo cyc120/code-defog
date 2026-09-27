@@ -21,7 +21,7 @@ from urllib.parse import urlparse
 
 from .code_graph import CodeGraphError, build_code_graph, build_node_dossier
 from .code_semantics import interpret_code_dossier
-from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text
+from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text, utc_now
 from .llm_providers import LLMProviderStore
 from .llm_summary import (
     get_llm_summary,
@@ -582,6 +582,12 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         if route == "/api/projects/discover":
             self.projects_discover()
             return
+        if route.startswith("/api/projects/") and route.endswith("/reviews/export"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/reviews/export")])
+            self.get_project_reviews_export(workspace)
+            return
         if route.startswith("/api/projects/") and route.endswith("/reviews"):
             from urllib.parse import unquote
 
@@ -826,6 +832,18 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                 return
             from urllib.parse import unquote
 
+            if route.endswith("/reviews"):
+                workspace = unquote(route[len("/api/projects/"):-len("/reviews")])
+                if not workspace:
+                    self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    deleted = self.server.store.delete_review_history(workspace)
+                except RuntimeError as error:
+                    self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
+                    return
+                self.send_json({"ok": True, "deleted": deleted})
+                return
             workspace = unquote(route[len("/api/projects/"):])
             if not workspace:
                 self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
@@ -1251,6 +1269,20 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         runs = self.server.store.list_review_runs(workspace)
         feedback = self.server.store.list_review_finding_feedback(workspace)
         self.send_json({"ok": True, "runs": runs, "count": len(runs), "feedback": feedback})
+
+    def get_project_reviews_export(self, workspace: str) -> None:
+        """Return all retained review records for a project as exportable JSON."""
+        if not workspace:
+            self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+            return
+        runs = self.server.store.list_review_runs(workspace, limit=200)
+        feedback = self.server.store.list_review_finding_feedback(workspace)
+        self.send_json({
+            "format": "code-defog-review-history-v1",
+            "exported_at": utc_now(),
+            "runs": runs,
+            "feedback": feedback,
+        })
 
     def get_case(self, case_id: str) -> None:
         case = self.server.store.get_case(case_id)

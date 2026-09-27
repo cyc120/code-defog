@@ -572,6 +572,52 @@ class DriveEndpointTests(unittest.TestCase):
             finally:
                 server.shutdown(); server.server_close(); store.close()
 
+    def test_review_history_export_and_clear_are_project_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            run_id = store.begin_review_run(directory, {"mode": "full"}, [{
+                "task_key": "prepare", "title": "准备", "stage": "prepare", "order": 1,
+            }])
+            store.finish_review_run(run_id, "complete", 0.1, {"file_count": 1}, None, [], None)
+            store.set_review_finding_feedback(directory, "问题", "证据", "fixed")
+            other_run = store.begin_review_run(other)
+            store.finish_review_run(other_run, "complete", 0.1, None, None, [], None)
+            server, base, token = self._start_server(store)
+            encoded = directory.replace("/", "%2F")
+            try:
+                headers = {"X-Code-CCTV-Token": token}
+                with urlopen(Request(f"{base}/api/projects/{encoded}/reviews/export", headers=headers), timeout=3) as resp:
+                    exported = json.loads(resp.read())
+                self.assertEqual(exported["format"], "code-defog-review-history-v1")
+                self.assertEqual([run["run_id"] for run in exported["runs"]], [run_id])
+                self.assertEqual(len(exported["feedback"]), 1)
+
+                request = Request(f"{base}/api/projects/{encoded}/reviews", headers=headers, method="DELETE")
+                with urlopen(request, timeout=3) as resp:
+                    deleted = json.loads(resp.read())["deleted"]
+                self.assertEqual(deleted, {"runs": 1, "tasks": 1, "feedback": 1})
+                self.assertEqual(store.list_review_runs(directory), [])
+                self.assertEqual(len(store.list_review_runs(other)), 1)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_clear_review_history_refuses_running_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            run_id = store.begin_review_run(directory)
+            server, base, token = self._start_server(store)
+            try:
+                request = Request(
+                    f"{base}/api/projects/{directory.replace('/', '%2F')}/reviews",
+                    headers={"X-Code-CCTV-Token": token}, method="DELETE",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urlopen(request, timeout=3)
+                self.assertEqual(error.exception.code, 409)
+                self.assertEqual(store.get_review_run(run_id)["status"], "running")
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
     def test_begin_review_run_if_idle_blocks_concurrent_start(self) -> None:
         """A second idle-guarded start while one is running must return None."""
         with tempfile.TemporaryDirectory() as directory:

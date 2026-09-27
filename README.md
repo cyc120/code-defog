@@ -197,6 +197,8 @@ Windows 的 `ctime` 表示创建时间，因此监控还会计算不超过 1 MiB
 | `POST` | `/api/projects/{workspace}/drive` | `service_token` | 启动全项目 Review Run（202；已在运行则 409；路径名为兼容保留） |
 | `GET` | `/api/projects/{workspace}/drive` | `service_token` | 最近一次 Review Run（兼容路径） |
 | `GET` | `/api/projects/{workspace}/reviews` | `service_token` | 最近的 Review Run、任务历史和人工状态标记 |
+| `GET` | `/api/projects/{workspace}/reviews/export` | `service_token` | 导出该项目保留的审查历史和问题状态为 JSON |
+| `DELETE` | `/api/projects/{workspace}/reviews` | `service_token` | 清空该项目审查历史和问题状态；审查运行中返回 `409` |
 | `POST` | `/api/projects/{workspace}/review-feedback` | `service_token` | 保存或清除单条审查发现的本地状态标记 |
 | `POST` | `/api/projects/{workspace}/assistant` | `service_token` | 基于该已监控项目的聚合统计、最新浏览报告和有界浏览器内存上下文进行只读问答 |
 | `GET` | `/api/projects/{workspace}/code-graph` | `service_token` | 当前已登记项目的有界、脱敏代码关系图（无源码、无绝对路径） |
@@ -206,6 +208,8 @@ Windows 的 `ctime` 表示创建时间，因此监控还会计算不超过 1 MiB
 | `POST` | `/api/llm/providers/test` | `service_token` | 对当前保存配置或一次性输入密钥执行连接测试；不保存一次性密钥 |
 
 项目助手不具备审批、调度、命令执行、代码修改或发布权限。它只接收经过裁剪的项目监控记录、Case 聚合统计、最新项目浏览报告和最近 6 条经服务端裁剪的浏览器内存消息；不会发送 git remote、令牌、源码、完整测试输出或完整聊天记录。未配置当前厂商密钥时，接口会明确返回不可用状态，不会伪造回答。
+
+审查历史在本地数据库按项目保留，最多 200 次审查记录；可在审查面板下载 JSON 备份，或清空当前项目的历史和发现状态。清空前会弹出二次确认，正在执行的审查不会被清理。
 
 ## Case API 与审批
 

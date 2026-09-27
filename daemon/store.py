@@ -1935,13 +1935,46 @@ class StateStore:
 
     def list_review_runs(self, workspace: str, limit: int = 12) -> list[dict[str, Any]]:
         abs_path = str(Path(workspace).expanduser().resolve())
-        safe_limit = max(1, min(int(limit), 100))
+        # Retention is bounded to 200 per project; allow exports to include it all.
+        safe_limit = max(1, min(int(limit), 200))
         with self.lock:
             rows = self.connection.execute(
                 "SELECT * FROM review_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT ?",
                 (abs_path, safe_limit),
             ).fetchall()
             return [self._review_run_dict(row) for row in rows]
+
+    def delete_review_history(self, workspace: str) -> dict[str, int]:
+        """Delete one project's review history and finding feedback atomically."""
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            running = self.connection.execute(
+                "SELECT COUNT(*) FROM review_runs WHERE workspace = ? AND status = 'running'",
+                (abs_path,),
+            ).fetchone()[0]
+            if running:
+                raise RuntimeError("cannot clear review history while a review is running")
+            runs = self.connection.execute(
+                "SELECT run_id FROM review_runs WHERE workspace = ?", (abs_path,),
+            ).fetchall()
+            run_ids = [row["run_id"] for row in runs]
+            task_count = 0
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                task_count = self.connection.execute(
+                    f"SELECT COUNT(*) FROM review_task_runs WHERE review_run_id IN ({placeholders})",
+                    run_ids,
+                ).fetchone()[0]
+                self.connection.execute(
+                    f"DELETE FROM review_task_runs WHERE review_run_id IN ({placeholders})", run_ids,
+                )
+            feedback_count = self.connection.execute(
+                "SELECT COUNT(*) FROM review_finding_feedback WHERE workspace = ?", (abs_path,),
+            ).fetchone()[0]
+            self.connection.execute("DELETE FROM review_runs WHERE workspace = ?", (abs_path,))
+            self.connection.execute("DELETE FROM review_finding_feedback WHERE workspace = ?", (abs_path,))
+            self.connection.commit()
+            return {"runs": len(run_ids), "tasks": task_count, "feedback": feedback_count}
 
     def list_review_finding_feedback(self, workspace: str) -> list[dict[str, Any]]:
         abs_path = str(Path(workspace).expanduser().resolve())

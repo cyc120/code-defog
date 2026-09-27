@@ -1274,7 +1274,7 @@
             </section>
           </div>
           <section class="review-result-section" aria-labelledby="review-history-title">
-            <div class="review-panel-head"><h3 id="review-history-title">最近审查</h3><div><button class="quiet-btn" id="review-compare-btn" type="button">对比最近两次</button> <span class="review-runtime" id="review-runtime-detail"></span></div></div>
+            <div class="review-panel-head"><h3 id="review-history-title">最近审查</h3><div><button class="quiet-btn" id="review-export-btn" type="button">导出 JSON</button> <button class="quiet-btn" id="review-clear-btn" type="button">清空本项目历史</button> <button class="quiet-btn" id="review-compare-btn" type="button">对比最近两次</button> <span class="review-runtime" id="review-runtime-detail"></span></div></div>
             <div class="review-history" id="review-history"><div class="review-empty">尚无历史记录。</div></div>
             <div class="review-history-compare" id="review-history-compare" hidden></div>
           </section>
@@ -3865,6 +3865,38 @@
       if (epoch === dataEpoch) { reviewRuns = []; reviewFeedback = new Map(); renderReviewHistory([]); }
     }
   }
+  $("review-export-btn").addEventListener("click", async () => {
+    if (!selectedProject) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews/export`);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `code-defog-review-history-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast(`已导出 ${payload.runs?.length || 0} 条审查记录`);
+    } catch (error) { toast(error.message); }
+  });
+  $("review-clear-btn").addEventListener("click", async () => {
+    if (!selectedProject) return;
+    const projectName = selectedProject.name || selectedProject.workspace;
+    if (!window.confirm(`确定清空“${projectName}”的全部审查历史和问题状态吗？此操作不可撤销。`)) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`, { method: "DELETE" });
+      reviewRuns = [];
+      reviewFeedback = new Map();
+      reviewRun = null;
+      renderReviewHistory([]);
+      renderReviewTasks(null);
+      renderReviewFindings(null);
+      renderReviewCases(null);
+      $("review-run-meta").textContent = "历史记录已清空";
+      $("review-history-compare").hidden = true;
+      toast(`已清理 ${payload.deleted?.runs || 0} 条审查记录和问题状态`);
+    } catch (error) { toast(error.message); }
+  });
   async function boot() {
     const connection = ++connectionEpoch;
     stopSubscription();

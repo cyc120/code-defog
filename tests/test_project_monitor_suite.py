@@ -72,7 +72,12 @@ class RepoIdentityTests(unittest.TestCase):
             base = Path(directory)
             real = _make_git_repo(base, "real")
             link = base / "link"
-            link.symlink_to(real, target_is_directory=True)
+            try:
+                link.symlink_to(real, target_is_directory=True)
+            except OSError as exc:
+                if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Windows symlink creation requires developer mode or privilege")
+                raise
             ident = canonical_repo_identity(str(link))
             self.assertTrue(ident["is_git"])
             self.assertEqual(ident["abs_path"], str(real.resolve()))

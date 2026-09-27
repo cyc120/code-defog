@@ -1209,7 +1209,7 @@
           <div class="review-command-copy">
             <div class="review-command-kicker"><div class="eyebrow">当前项目 · 只读审查</div><span class="state-badge" id="review-command-state" data-tone="neutral">等待选择项目</span></div>
             <h2 id="review-command-title">开始下一次全项目审查</h2>
-            <p>对当前项目执行只读结构审查、测试探测、静态风险扫描和结果汇总。</p>
+            <p>对当前项目执行只读结构审查、改动风险提示、测试探测、静态扫描和结果汇总。</p>
             <div class="review-project-facts" id="review-project-facts"><span class="review-project-fact">未选择项目</span></div>
           </div>
           <div class="review-controls">
@@ -3468,6 +3468,7 @@
     const browse = run?.browse || {};
     const test = browse.test || {};
     const scan = browse.static_scan || {};
+    const changeReview = browse.change_review || {};
     const reviewTask = (run?.tasks || []).find((task) => task.task_key === "project_review");
     const agentOutput = reviewTask?.output || {};
     const observations = Array.isArray(agentOutput.observations) ? agentOutput.observations : [];
@@ -3478,6 +3479,11 @@
     }
     const gaps = Array.isArray(scan.error_handling_gaps) ? scan.error_handling_gaps : [];
     if (scan.scanned_files != null) appendReviewFinding(target, "静态", `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。`);
+    const hints = Array.isArray(changeReview.hypotheses) ? changeReview.hypotheses : [];
+    if (changeReview.status === "ready") {
+      appendReviewFinding(target, "改动", `相对 HEAD 有 ${changeReview.changed_files} 个变动文件，定位 ${changeReview.functions?.length || 0} 个 Python 函数；以下只是待验证线索。`);
+      hints.slice(0, 5).forEach((hint) => appendReviewFinding(target, "待验证", `${hint.file}:${hint.line} ${hint.function} · ${hint.title}。建议：${hint.probe}`));
+    }
     const git = browse.git || {};
     if (git.branch) appendReviewFinding(target, "Git", `${git.branch} · ${git.dirty_count ?? 0} 个未提交变更`);
     if (!target.childElementCount) target.append(create("div", "review-empty", "审查完成后将在这里汇总确定性发现。"));
@@ -3674,6 +3680,7 @@
     const git = browse.git || {};
     const test = browse.test || {};
     const scan = browse.static_scan || {};
+    const changeReview = browse.change_review || {};
     badge.textContent = run.status === "complete" ? "已完成" : run.status;
     badge.className = "llm-badge " + (run.status === "complete" ? "ok" : "warn");
     const grid = create("div", "drive-report-grid");
@@ -3708,6 +3715,11 @@
       list.append(driveReportItem("风险", `${scan.error_handling_gaps.length} 处错误处理缺口（bare except / 空 catch）`, "warn"));
       scan.error_handling_gaps.slice(0, 5).forEach((gap) =>
         list.append(driveReportItem("gap", `${gap.file}:${gap.line} ${gap.snippet}`)));
+    }
+    if (changeReview.status === "ready") {
+      list.append(driveReportItem("改动", `${changeReview.changed_files} 个文件变动，${changeReview.functions?.length || 0} 个 Python 函数受影响`));
+      (changeReview.hypotheses || []).slice(0, 5).forEach((hint) =>
+        list.append(driveReportItem("待验证", `${hint.file}:${hint.line} ${hint.function} · ${hint.title}；${hint.probe}`, "warn")));
     }
     body.append(list);
   }

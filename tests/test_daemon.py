@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import shutil
 import sqlite3
@@ -37,7 +38,8 @@ class ServeConsoleLaunchTests(unittest.TestCase):
     def test_macos_finder_launcher_starts_the_standard_auto_open_path(self) -> None:
         launcher = Path(__file__).resolve().parents[1] / "scripts" / "open-code-defog.command"
         text = launcher.read_text(encoding="utf-8")
-        self.assertTrue(launcher.stat().st_mode & 0o111)
+        if os.name != "nt":
+            self.assertTrue(launcher.stat().st_mode & 0o111)
         self.assertIn("#!/bin/zsh", text)
         self.assertIn("exec /usr/bin/env python3 -m daemon.serve", text)
 

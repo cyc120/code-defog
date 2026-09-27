@@ -19,9 +19,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import ctypes
 import signal
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -29,6 +31,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from .change_review import review_local_changes
 
 try:
     from scripts.watch_worklog import snapshot as _snapshot
@@ -152,6 +156,9 @@ def browse_project(
         "is_git": False, "remote": "", "branch": "", "head": "",
         "dirty_count": 0, "recent_commits": [], "skipped": True,
     }
+    base["change_review"] = review_local_changes(ws) if include_git else {
+        "status": "disabled", "changed_files": 0, "functions": [], "hypotheses": [],
+    }
     base["test"] = detect_test_command(ws)
     base["static_scan"] = scan_static(ws) if include_static else {}
     return base
@@ -161,7 +168,7 @@ def browse_project(
 
 def detect_test_command(workspace: Path) -> dict[str, Any]:
     """Detect an obvious test command; returns {detected:false} when unsure."""
-    pytest_command = f"{shlex.quote(sys.executable)} -m pytest -q --tb=short"
+    pytest_command = _format_command([sys.executable, "-m", "pytest", "-q", "--tb=short"])
     if (workspace / "pytest.ini").exists() or (workspace / "conftest.py").exists():
         return {"detected": True, "kind": "pytest", "command": pytest_command, "detail": "pytest 配置"}
     if (workspace / "pyproject.toml").exists():
@@ -174,7 +181,7 @@ def detect_test_command(workspace: Path) -> dict[str, Any]:
         return {
             "detected": True,
             "kind": "unittest",
-            "command": f"{shlex.quote(sys.executable)} -m unittest discover -s tests",
+            "command": _format_command([sys.executable, "-m", "unittest", "discover", "-s", "tests"]),
             "detail": "tests 目录（unittest）",
         }
     if test_files:
@@ -186,7 +193,14 @@ def detect_test_command(workspace: Path) -> dict[str, Any]:
             pkg = json.loads((workspace / "package.json").read_text(encoding="utf-8"))
             script = (pkg.get("scripts") or {}).get("test")
             if script:
-                return {"detected": True, "kind": "npm", "command": "npm test -- --runInBand", "detail": f"npm test: {script}"}
+                npm = shutil.which("npm.cmd" if os.name == "nt" else "npm") or (
+                    "npm.cmd" if os.name == "nt" else "npm"
+                )
+                return {
+                    "detected": True, "kind": "npm",
+                    "command": _format_command([npm, "test"]),
+                    "detail": f"npm test: {script}",
+                }
         except (OSError, json.JSONDecodeError):
             pass
     if (workspace / "Makefile").exists() and "test:" in _safe_read(workspace / "Makefile"):
@@ -203,6 +217,43 @@ def _safe_read(path: Path, limit: int = 200_000) -> str:
         return ""
 
 
+def _format_command(args: list[str]) -> str:
+    """Format a direct subprocess command for the host platform."""
+    return subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
+
+
+def _windows_job(process: subprocess.Popen[str]) -> int | None:
+    """Put a test runner and its descendants in one killable Windows job."""
+    if os.name != "nt":
+        return None
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+    kernel.CreateJobObjectW.restype = ctypes.c_void_p
+    kernel.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    kernel.AssignProcessToJobObject.restype = ctypes.c_int
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    job = kernel.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    if not kernel.AssignProcessToJobObject(job, int(process._handle)):
+        kernel.CloseHandle(job)
+        return None
+    return job
+
+
+def _close_windows_job(job: int | None, *, terminate: bool = False) -> bool:
+    if job is None:
+        return False
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    killed = False
+    if terminate:
+        kernel.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        killed = bool(kernel.TerminateJobObject(job, 1))
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.CloseHandle(job)
+    return killed
+
+
 def run_test_probe(workspace: str, test_cmd: dict[str, Any], timeout: float = 60.0) -> dict[str, Any]:
     """Run a detected test command safely; never hangs (hard timeout)."""
     if not test_cmd or not test_cmd.get("detected"):
@@ -215,18 +266,46 @@ def run_test_probe(workspace: str, test_cmd: dict[str, Any], timeout: float = 60
             "output_summary": "pytest 运行器未安装；未执行项目测试。",
         }
     command = test_cmd["command"]
+    job = None
     try:
-        result = subprocess.run(
-            shlex.split(command), cwd=ws, capture_output=True, text=True, timeout=timeout,
-            check=False, start_new_session=True,
+        process = subprocess.Popen(
+            command if os.name == "nt" else shlex.split(command),
+            cwd=ws, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=os.name != "nt",
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
         )
+        job = _windows_job(process)
+        stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        # The direct child timed out, but anything it spawned (pytest fixture
-        # servers, npm lifecycle scripts) survives unless we kill the group.
+        # Terminate descendants as well as the direct test runner.
+        if os.name == "nt":
+            killed = _close_windows_job(job, terminate=True)
+            job = None
+            if not killed:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                        capture_output=True, timeout=5, check=False,
+                    )
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+        if process.poll() is None:
+            process.kill()
         try:
-            os.killpg(os.getpgid(exc.process.pid), signal.SIGKILL)
-        except (OSError, AttributeError, ProcessLookupError):
-            pass
+            process.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # A descendant may still own the pipe after taskkill fails. Do not
+            # let output collection defeat the probe's deadline.
+            if process.stdout:
+                process.stdout.close()
+            if process.stderr:
+                process.stderr.close()
+            process.wait(timeout=5)
         return {"detected": True, "ran": True, "timed_out": True, "passed": False,
                 "exit_code": None, "output_summary": "测试超时（超过 %ds）" % timeout,
                 "stdout_tail": _output_tail(exc.stdout),
@@ -235,12 +314,14 @@ def run_test_probe(workspace: str, test_cmd: dict[str, Any], timeout: float = 60
         return {"detected": True, "ran": True, "timed_out": False, "passed": False,
                 "execution_error": True,
                 "exit_code": None, "output_summary": f"测试无法启动: {exc}"}
-    stdout_tail = _output_tail(result.stdout)
-    stderr_tail = _output_tail(result.stderr)
+    finally:
+        _close_windows_job(job)
+    stdout_tail = _output_tail(stdout)
+    stderr_tail = _output_tail(stderr)
     tail = stdout_tail or stderr_tail
     return {
         "detected": True, "ran": True, "timed_out": False,
-        "passed": result.returncode == 0, "exit_code": result.returncode,
+        "passed": process.returncode == 0, "exit_code": process.returncode,
         "output_summary": tail or "（无输出）",
     }
 

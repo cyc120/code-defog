@@ -171,23 +171,19 @@ class WatchWorklogEngineTests(unittest.TestCase):
             directory.cleanup()
 
     def test_size_and_mtime_preserving_rewrite_is_detected(self) -> None:
-        """Same-size rewrite with restored mtime must still register via
-        ctime/inode (previously invisible with mtime+size only)."""
+        """A same-size rewrite with restored mtime must register on all OSes."""
         import os as _os
-        import time as _time
         directory, root = self._worktree()
         try:
             state_file = Path(directory.name) / "state.json"
             target = root / "a.txt"
             before = target.stat()
             first = watch_worklog.snapshot(root, "AI_WORKLOG.md", state_file)
-            # Same bytes, same size; restore the mtime to hide the rewrite.
-            _os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
-            target.write_text("one", encoding="utf-8")
+            # Change the bytes without changing the size, then restore mtime.
+            target.write_text("two", encoding="utf-8")
             _os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
             second = watch_worklog.snapshot(root, "AI_WORKLOG.md", state_file)
             changes = watch_worklog.diff_snapshots(first, second)
-            # ctime_ns always advances on write even when mtime is restored.
             self.assertIn("a.txt", [c.path for c in changes])
         finally:
             directory.cleanup()

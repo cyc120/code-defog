@@ -6,11 +6,14 @@ test probes use fake commands, and everything runs in temp dirs.
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import shlex
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -27,6 +30,11 @@ from daemon.llm_summary import build_drive_prompt, generate_drive_summary
 from _helpers import start_server
 from daemon.server import CodeCCTVServer
 from daemon.store import StateStore
+
+
+def _python_command(code: str) -> str:
+    args = [sys.executable, "-c", code]
+    return subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
 
 
 def _make_repo(base: Path, name: str = "proj") -> Path:
@@ -97,7 +105,7 @@ class BrowseProjectTests(unittest.TestCase):
             self.assertTrue(cmd["detected"])
             self.assertEqual(cmd["kind"], "pytest")
             self.assertEqual(cmd["detail"], "tests 目录")
-            self.assertTrue(cmd["command"].startswith(sys.executable))
+            self.assertIn(sys.executable, cmd["command"])
 
     def test_detect_test_command_unittest_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -117,22 +125,63 @@ class BrowseProjectTests(unittest.TestCase):
 class TestProbeTests(unittest.TestCase):
     def test_probe_passing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            r = run_test_probe(directory, {"detected": True, "command": "true"}, timeout=5)
+            r = run_test_probe(directory, {"detected": True, "command": _python_command("import sys; sys.exit(0)")}, timeout=5)
             self.assertTrue(r["ran"])
             self.assertTrue(r["passed"])
 
     def test_probe_failing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            r = run_test_probe(directory, {"detected": True, "command": "false"}, timeout=5)
+            r = run_test_probe(directory, {"detected": True, "command": _python_command("import sys; sys.exit(1)")}, timeout=5)
             self.assertTrue(r["ran"])
             self.assertFalse(r["passed"])
 
     def test_probe_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            r = run_test_probe(directory, {"detected": True, "command": "sleep 30"},
+            r = run_test_probe(directory, {"detected": True, "command": _python_command("import time; time.sleep(30)")},
                                timeout=1)
             self.assertTrue(r["timed_out"])
             self.assertFalse(r["passed"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows job object regression")
+    def test_probe_timeout_kills_child_after_parent_exits(self) -> None:
+        """A child inheriting stdout must not defeat the runner deadline."""
+        import ctypes
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_file = root / "child.pid"
+            parent = root / "parent.py"
+            parent.write_text(
+                "import subprocess, sys\n"
+                "from pathlib import Path\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(12)'])\n"
+                "Path(sys.argv[1]).write_text(str(child.pid))\n",
+                encoding="utf-8",
+            )
+            child_pid = None
+            try:
+                command = subprocess.list2cmdline([sys.executable, str(parent), str(pid_file)])
+                started = time.monotonic()
+                result = run_test_probe(directory, {"detected": True, "command": command}, timeout=1)
+                elapsed = time.monotonic() - started
+                child_pid = int(pid_file.read_text())
+                self.assertTrue(result["timed_out"])
+                self.assertLess(elapsed, 5)
+                kernel = ctypes.windll.kernel32
+                handle = kernel.OpenProcess(0x1000, False, child_pid)
+                if handle:
+                    try:
+                        code = ctypes.c_ulong()
+                        self.assertTrue(kernel.GetExitCodeProcess(handle, ctypes.byref(code)))
+                        self.assertNotEqual(code.value, 259)  # STILL_ACTIVE
+                    finally:
+                        kernel.CloseHandle(handle)
+            finally:
+                if child_pid is None and pid_file.exists():
+                    child_pid = int(pid_file.read_text())
+                if child_pid is not None:
+                    subprocess.run(["taskkill", "/PID", str(child_pid), "/T", "/F"],
+                                   capture_output=True, check=False)
 
     def test_probe_missing_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

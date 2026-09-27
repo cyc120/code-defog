@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import stat
 import tempfile
@@ -38,8 +39,9 @@ class LLMProviderStoreTests(unittest.TestCase):
             })
             self.assertEqual(public["active_provider"], "openai")
             self.assertNotIn("saved-test-key", json.dumps(public))
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
             self.assertEqual(store.resolve_active()["api_key"], "saved-test-key")
 
     def test_ollama_is_usable_without_an_api_key(self) -> None:

@@ -29,6 +29,12 @@ python3 -m daemon.serve
 
 ## 快速开始
 
+### 个人审查 skill
+
+仓库内的 [`skills/code-defog-review`](skills/code-defog-review/SKILL.md) 是可独立使用的个人审查入口：在 Codex 中调用 `$code-defog-review`，让它检查本地 Git 改动、提出待验证边界，并在授权测试时记录可复现证据。其 `scripts/collect_changes.py` 只用 Python 标准库，不依赖本服务、API 密钥或数据库。扫描器为常见语言提供变动文件、行号和有限预览，并从项目清单列出尚未运行的构建或类型检查候选命令；Python 另有函数级静态线索。其他语言的语义判断仍需结合完整 diff、上下文和定点复现。已有的 `$code-defog` skill 仍用于实时工作日志；两者可以分别使用。
+
+服务和 Web 工作台继续作为后续多项目监控与跨次审查记录的扩展基础。个人代码审查不要求先启动它们。
+
 ### 前置条件
 
 - Python 3.10+
@@ -64,6 +70,15 @@ python3 -m daemon.serve --no-open
 ```
 
 在 macOS 上，也可以直接双击 [`scripts/open-code-defog.command`](scripts/open-code-defog.command)。它会在项目目录启动同一条服务命令，并由服务自动打开已连接的控制台。
+
+Windows PowerShell 可在仓库目录中使用独立环境启动：
+
+```powershell
+py -3.12 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pytest tests/ demo_target/ -q
+.\.venv\Scripts\python.exe -m daemon.serve
+```
 
 端口、服务令牌和状态库路径仍写入当前平台数据目录的 `service.json`：
 
@@ -153,6 +168,10 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 ### 监控真实项目
 
 对选中的本机项目，服务持续跟踪文件变化（复用 `watch_worklog` 快照/差异引擎）与 git 提交增量，将事件写入本地 SQLite 并显示在总览的活动趋势中。监控是**只读**的，从不修改项目本身。
+
+Windows 的 `ctime` 表示创建时间，因此监控还会计算不超过 1 MiB 的普通文件内容摘要，识别大小和修改时间被恢复的改写。超过 1 MiB 的文件仍按元数据轮询，以控制大型项目的扫描开销。
+
+全项目审查的第一阶段现在会读取本地 Git 改动（相对 `HEAD`，含未跟踪文件），定位变动涉及的 Python 函数，并针对进程、配置与文件操作给出有位置和复现建议的**待验证线索**。它只读、不执行这些建议，也不把线索自动升级为 Case；测试实际失败或超时仍走已有的 Case 处理路径。分析设有文件数、文件大小和时间上限。
 
 ### 全项目 Review Run
 

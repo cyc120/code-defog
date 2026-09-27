@@ -32,7 +32,9 @@ def _get_validator():
 DEFAULT_RETENTION = 2000
 # Bumped when the on-disk layout gains a structural change; migrate_schema
 # uses PRAGMA user_version so future data-conditioned migrations have a hook.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+DEFAULT_REVIEW_RETENTION = 200
+DEFAULT_REVIEW_FEEDBACK_RETENTION = 1000
 DEFAULT_CONVERSATION_ID = "default"
 PRUNE_EVERY_INGESTS = 50
 DEFAULT_IDEMPOTENCY_WINDOW_S = 300
@@ -299,6 +301,18 @@ class StateStore:
             CREATE INDEX IF NOT EXISTS idx_review_task_runs_run
                 ON review_task_runs(review_run_id, task_order);
 
+            CREATE TABLE IF NOT EXISTS review_finding_feedback (
+                workspace TEXT NOT NULL,
+                finding_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (workspace, finding_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_feedback_workspace
+                ON review_finding_feedback(workspace, updated_at DESC);
+
             -- case_sources: case_id is NULL for pending (not-yet-associated) observations
             CREATE TABLE IF NOT EXISTS case_sources (
                 observation_id TEXT PRIMARY KEY,
@@ -420,8 +434,8 @@ class StateStore:
 
     def migrate_schema(self) -> None:
         # user_version gives future migrations a data-conditioned hook.
-        # v1 = probe-based migrations (still idempotent and re-run every
-        #      startup); v2 = current layout incl. cases.chain_anchor.
+        # v1 = probe-based migrations; v2 = cases.chain_anchor; v3 = persisted
+        #      review finding feedback (the table itself is created idempotently).
         current_version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         event_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(events)").fetchall()}
         project_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -613,7 +627,7 @@ class StateStore:
         with self.lock:
             self.connection.execute("DELETE FROM events")
             self.connection.execute("DELETE FROM projects")
-            for tbl in ("review_task_runs", "review_runs", "case_sources", "agent_runs", "tool_runs", "artifacts",
+            for tbl in ("review_task_runs", "review_runs", "review_finding_feedback", "case_sources", "agent_runs", "tool_runs", "artifacts",
                          "approval_grants", "approvals", "knowledge_records", "cases",
                          "drive_runs"):
                 self.connection.execute(f"DELETE FROM {tbl}")
@@ -1771,8 +1785,28 @@ class StateStore:
                     int(spec.get("order") or order),
                 ),
             )
+        self._prune_review_runs_locked(abs_path)
         self.connection.commit()
         return run_id
+
+    def _prune_review_runs_locked(self, workspace: str) -> None:
+        """Keep a bounded local history per project, preserving active runs."""
+        stale = self.connection.execute(
+            """SELECT run_id FROM review_runs
+               WHERE workspace = ? AND status != 'running'
+               ORDER BY started_at DESC LIMIT -1 OFFSET ?""",
+            (workspace, DEFAULT_REVIEW_RETENTION - 1),
+        ).fetchall()
+        run_ids = [row["run_id"] for row in stale]
+        if not run_ids:
+            return
+        placeholders = ",".join("?" for _ in run_ids)
+        self.connection.execute(
+            f"DELETE FROM review_task_runs WHERE review_run_id IN ({placeholders})", run_ids,
+        )
+        self.connection.execute(
+            f"DELETE FROM review_runs WHERE run_id IN ({placeholders})", run_ids,
+        )
 
     def update_review_task(
         self,
@@ -1900,6 +1934,60 @@ class StateStore:
                 (abs_path, safe_limit),
             ).fetchall()
             return [self._review_run_dict(row) for row in rows]
+
+    def list_review_finding_feedback(self, workspace: str) -> list[dict[str, Any]]:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            rows = self.connection.execute(
+                """SELECT label, detail, status, updated_at
+                   FROM review_finding_feedback WHERE workspace = ?
+                   ORDER BY updated_at DESC""",
+                (abs_path,),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def set_review_finding_feedback(
+        self, workspace: str, label: str, detail: str, status: str,
+    ) -> dict[str, Any]:
+        allowed = {"open", "fixed", "false_positive", "accepted"}
+        if status not in allowed:
+            raise ValueError("status must be open, fixed, false_positive, or accepted")
+        abs_path = str(Path(workspace).expanduser().resolve())
+        safe_label = clean_text(label, 120)
+        safe_detail = clean_text(detail, 1200)
+        if not safe_label or not safe_detail:
+            raise ValueError("label and detail are required")
+        finding_key = sha256(f"{safe_label}\0{safe_detail}")
+        updated_at = utc_now()
+        with self.lock:
+            if status == "open":
+                self.connection.execute(
+                    "DELETE FROM review_finding_feedback WHERE workspace = ? AND finding_key = ?",
+                    (abs_path, finding_key),
+                )
+                result = {"label": safe_label, "detail": safe_detail, "status": "open", "updated_at": updated_at}
+            else:
+                self.connection.execute(
+                    """INSERT INTO review_finding_feedback
+                       (workspace, finding_key, label, detail, status, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(workspace, finding_key) DO UPDATE SET
+                           label = excluded.label, detail = excluded.detail,
+                           status = excluded.status, updated_at = excluded.updated_at""",
+                    (abs_path, finding_key, safe_label, safe_detail, status, updated_at),
+                )
+                self.connection.execute(
+                    """DELETE FROM review_finding_feedback
+                       WHERE workspace = ? AND finding_key IN (
+                           SELECT finding_key FROM review_finding_feedback
+                           WHERE workspace = ? ORDER BY updated_at DESC
+                           LIMIT -1 OFFSET ?
+                       )""",
+                    (abs_path, abs_path, DEFAULT_REVIEW_FEEDBACK_RETENTION),
+                )
+                result = {"label": safe_label, "detail": safe_detail, "status": status, "updated_at": updated_at}
+            self.connection.commit()
+        return result
 
     def project_summary(self, workspace: str | None = None, days: int = 14) -> dict[str, Any]:
         """Deterministic, evidence-derived aggregates for the project dashboard.

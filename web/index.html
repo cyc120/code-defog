@@ -677,6 +677,7 @@
   .review-result-section h3 { margin: 0 0 8px; font-size: 12px; font-weight: 500; }
   .review-findings, .review-case-list, .review-history { display: grid; gap: 6px; }
   .review-finding, .review-case, .review-history-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); color: var(--ink-muted); font-size: 11px; line-height: 1.45; }
+  .review-finding { flex-wrap: wrap; }
   .review-finding:first-child, .review-case:first-child, .review-history-row:first-child { border-top: 0; }
   .review-finding-label { flex: 0 0 70px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
   .review-case-link { color: var(--blue); background: transparent; border: 0; padding: 0; font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
@@ -684,6 +685,15 @@
   .review-history-row { min-width: 0; display: grid; gap: 3px; }
   .review-history-id { color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
   .review-history-meta { color: var(--ink-faint); font-size: 10px; }
+  .review-finding-status, .review-finding-save { min-height: 26px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink-muted); font: inherit; font-size: 10px; }
+  .review-finding-status { margin-left: 78px; padding: 3px 6px; }
+  .review-finding-save { padding: 3px 8px; cursor: pointer; }
+  .review-history-compare { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); }
+  .review-history-compare[hidden] { display: none; }
+  .review-compare-summary { margin: 0 0 8px; color: var(--ink-muted); font-size: 10px; }
+  .review-compare-row { padding: 5px 0; border-top: 1px solid var(--line); color: var(--ink-muted); font-size: 10px; line-height: 1.45; }
+  .review-compare-row.added { color: var(--red); }
+  .review-compare-row.missing { color: var(--green); }
   .review-empty { color: var(--ink-faint); font-size: 11px; }
   .review-runtime { color: var(--ink-faint); font-size: 10px; }
   .overview-hero { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
@@ -1264,8 +1274,9 @@
             </section>
           </div>
           <section class="review-result-section" aria-labelledby="review-history-title">
-            <div class="review-panel-head"><h3 id="review-history-title">最近审查</h3><span class="review-runtime" id="review-runtime-detail"></span></div>
+            <div class="review-panel-head"><h3 id="review-history-title">最近审查</h3><div><button class="quiet-btn" id="review-compare-btn" type="button">对比最近两次</button> <span class="review-runtime" id="review-runtime-detail"></span></div></div>
             <div class="review-history" id="review-history"><div class="review-empty">尚无历史记录。</div></div>
+            <div class="review-history-compare" id="review-history-compare" hidden></div>
           </section>
         </section>
       </div>
@@ -1536,6 +1547,7 @@
   let driveStartedAt = 0;          // Date.now() when the current drive started
   let reviewRun = null;            // latest first-class Review Run for the selected project
   let reviewRuns = [];             // short persisted history, newest first
+  let reviewFeedback = new Map();  // per-project human disposition of stable findings
   let harnessInfo = null;          // read-only dispatch manifest from /api/harness
   let assistantMessages = [];      // browser-memory only; raw questions are never persisted
   let assistantBusy = false;
@@ -3456,15 +3468,53 @@
       target.append(card);
     });
   }
+  function reviewFindingIdentity(label, detail) {
+    return `${String(label).replace(/\s+/g, " ").trim().slice(0, 120)}\u0000${String(detail).replace(/\s+/g, " ").trim().slice(0, 1200)}`;
+  }
   function appendReviewFinding(target, label, detail) {
     const row = create("div", "review-finding");
     row.append(create("span", "review-finding-label", label));
-    row.append(create("span", "", detail));
+    const content = create("span", "", detail);
+    content.style.flex = "1 1 220px";
+    row.append(content);
+    const saved = reviewFeedback.get(reviewFindingIdentity(label, detail));
+    const select = document.createElement("select");
+    select.className = "review-finding-status";
+    select.setAttribute("aria-label", `标记${label}发现状态`);
+    [["open", "未标记"], ["fixed", "已修复"], ["false_positive", "误报"], ["accepted", "已知问题"]].forEach(([value, text]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      select.append(option);
+    });
+    select.value = saved?.status || "open";
+    const save = create("button", "review-finding-save", "保存");
+    save.type = "button";
+    save.addEventListener("click", async () => {
+      if (!selectedProject) return;
+      const workspace = selectedProject.workspace;
+      const epoch = dataEpoch;
+      save.disabled = true;
+      select.disabled = true;
+      try {
+        const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/review-feedback`, {
+          method: "POST", body: { label, detail, status: select.value },
+        });
+        if (epoch === dataEpoch && selectedProject?.workspace === workspace) {
+          const feedback = payload.feedback;
+          const identity = reviewFindingIdentity(feedback.label, feedback.detail);
+          if (feedback.status === "open") reviewFeedback.delete(identity);
+          else reviewFeedback.set(identity, feedback);
+          toast("审查状态已保存到本地数据库");
+        }
+      } catch (error) { toast(`保存失败：${error.message}`); }
+      finally { save.disabled = false; select.disabled = false; }
+    });
+    row.append(select, save);
     target.append(row);
   }
-  function renderReviewFindings(run) {
-    const target = $("review-findings");
-    target.replaceChildren();
+  function reviewFindingEntries(run) {
+    const findings = [];
     const browse = run?.browse || {};
     const test = browse.test || {};
     const scan = browse.static_scan || {};
@@ -3472,22 +3522,28 @@
     const reviewTask = (run?.tasks || []).find((task) => task.task_key === "project_review");
     const agentOutput = reviewTask?.output || {};
     const observations = Array.isArray(agentOutput.observations) ? agentOutput.observations : [];
-    observations.slice(0, 3).forEach((observation) => appendReviewFinding(target, "结构", observation));
+    observations.slice(0, 3).forEach((observation) => findings.push({ label: "结构", detail: String(observation) }));
     if (test.detected) {
       const result = test.ran ? (test.timed_out ? "测试超时" : test.execution_error ? "测试无法启动" : test.passed ? "测试通过" : "测试失败") : test.runner_unavailable ? "测试运行器不可用，未执行项目测试" : "已识别测试命令，未执行";
-      appendReviewFinding(target, "测试", result);
+      findings.push({ label: "测试", detail: result });
     }
     const gaps = Array.isArray(scan.error_handling_gaps) ? scan.error_handling_gaps : [];
-    if (scan.scanned_files != null) appendReviewFinding(target, "静态", `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。`);
+    if (scan.scanned_files != null) findings.push({ label: "静态", detail: `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。` });
     const hints = Array.isArray(changeReview.hypotheses) ? changeReview.hypotheses : [];
     if (changeReview.status === "ready") {
-      appendReviewFinding(target, "改动", `相对 HEAD 有 ${changeReview.changed_files} 个变动文件，定位 ${changeReview.functions?.length || 0} 个 Python 函数；以下只是待验证线索。`);
-      hints.slice(0, 5).forEach((hint) => appendReviewFinding(target, "待验证", `${hint.file}:${hint.line} ${hint.function} · ${hint.title}。建议：${hint.probe}`));
+      findings.push({ label: "改动", detail: `相对 HEAD 有 ${changeReview.changed_files} 个变动文件，定位 ${changeReview.functions?.length || 0} 个 Python 函数；以下只是待验证线索。` });
+      hints.slice(0, 5).forEach((hint) => findings.push({ label: "待验证", detail: `${hint.file}:${hint.line} ${hint.function} · ${hint.title}。建议：${hint.probe}` }));
     }
     const git = browse.git || {};
-    if (git.branch) appendReviewFinding(target, "Git", `${git.branch} · ${git.dirty_count ?? 0} 个未提交变更`);
+    if (git.branch) findings.push({ label: "Git", detail: `${git.branch} · ${git.dirty_count ?? 0} 个未提交变更` });
+    return findings;
+  }
+  function renderReviewFindingsInto(target, run) {
+    target.replaceChildren();
+    reviewFindingEntries(run).forEach(({ label, detail }) => appendReviewFinding(target, label, detail));
     if (!target.childElementCount) target.append(create("div", "review-empty", "审查完成后将在这里汇总确定性发现。"));
   }
+  function renderReviewFindings(run) { renderReviewFindingsInto($("review-findings"), run); }
   async function openReviewCase(caseId) {
     if (!caseId) return;
     location.hash = "#/audit";
@@ -3523,6 +3579,8 @@
     target.replaceChildren();
     if (!runs.length) {
       target.append(create("div", "review-empty", "尚无历史记录。"));
+      const compare = $("review-compare-btn");
+      if (compare) compare.disabled = true;
       return;
     }
     runs.slice(0, 6).forEach((run) => {
@@ -3535,7 +3593,41 @@
       row.append(create("span", "review-history-meta", run.duration_s != null ? fmtDuration(run.duration_s) : "—"));
       target.append(row);
     });
+    const compare = $("review-compare-btn");
+    if (compare) compare.disabled = runs.filter((run) => run.status === "complete").length < 2;
   }
+  function compareLatestReviews() {
+    const panel = $("review-history-compare");
+    const completed = reviewRuns.filter((run) => run.status === "complete");
+    panel.hidden = false;
+    panel.replaceChildren();
+    if (completed.length < 2) {
+      panel.append(create("div", "review-empty", "至少需要两次成功完成的审查才能比较。"));
+      return;
+    }
+    const newer = completed[0];
+    const older = completed[1];
+    const before = reviewFindingEntries(older);
+    const after = reviewFindingEntries(newer);
+    const beforeMap = new Map(before.map((item) => [reviewFindingIdentity(item.label, item.detail), item]));
+    const afterMap = new Map(after.map((item) => [reviewFindingIdentity(item.label, item.detail), item]));
+    const added = after.filter((item) => !beforeMap.has(reviewFindingIdentity(item.label, item.detail)));
+    const missing = before.filter((item) => !afterMap.has(reviewFindingIdentity(item.label, item.detail)));
+    const kept = after.length - added.length;
+    panel.append(create("p", "review-compare-summary", `基准 ${shortId(older.run_id)} → 最新 ${shortId(newer.run_id)}：新增 ${added.length} 项，持续 ${kept} 项，本次未见 ${missing.length} 项。未再出现不等同于已确认修复。`));
+    const renderItems = (items, label, tone) => items.forEach((item) => {
+      const row = create("div", `review-compare-row ${tone}`, `${label} · ${item.label}：${item.detail}`);
+      panel.append(row);
+    });
+    renderItems(added, "新增", "added");
+    renderItems(missing, "本次未见", "missing");
+    if (!added.length && !missing.length) panel.append(create("div", "review-compare-row", "两次审查摘要一致。"));
+  }
+  $("review-compare-btn").addEventListener("click", () => {
+    const panel = $("review-history-compare");
+    if (!panel.hidden) { panel.hidden = true; return; }
+    compareLatestReviews();
+  });
   function renderReviewRun(run) {
     if (!run) return;
     reviewRun = run;
@@ -3739,9 +3831,11 @@
       const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`);
       if (epoch !== dataEpoch) return;
       reviewRuns = payload.runs || [];
+      reviewFeedback = new Map((payload.feedback || []).map((item) => [reviewFindingIdentity(item.label, item.detail), item]));
       renderReviewHistory(reviewRuns);
+      if (reviewRun) renderReviewFindings(reviewRun);
     } catch (error) {
-      if (epoch === dataEpoch) renderReviewHistory([]);
+      if (epoch === dataEpoch) { reviewRuns = []; reviewFeedback = new Map(); renderReviewHistory([]); }
     }
   }
   async function boot() {
@@ -3885,6 +3979,9 @@
     stopDriveTimer();
     reviewRun = null;
     reviewRuns = [];
+    reviewFeedback = new Map();
+    const compare = $("review-compare-btn");
+    if (compare) compare.disabled = true;
     reviewStartError = "";
     setReviewStartBusy(false);
     setDriveStatus(false);
@@ -3901,6 +3998,8 @@
     if (casesTarget) casesTarget.replaceChildren(create("div", "review-empty", "仅测试超时或非零退出会进入 Case。"));
     const history = $("review-history");
     if (history) history.replaceChildren(create("div", "review-empty", "尚无历史记录。"));
+    const comparison = $("review-history-compare");
+    if (comparison) { comparison.hidden = true; comparison.replaceChildren(); }
     const meta = $("review-run-meta");
     if (meta) meta.textContent = "尚未启动审查";
     renderReviewRuntime();

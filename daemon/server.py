@@ -747,6 +747,33 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "project": project}, HTTPStatus.CREATED)
             return
 
+        if route.startswith("/api/projects/") and route.endswith("/review-feedback"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/review-feedback")])
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            if (self.server.drive_runner is None
+                    and self.server.store.get_monitored_project(workspace) is None):
+                self.send_json({"error": "workspace is not a registered monitored project"},
+                               HTTPStatus.FORBIDDEN)
+                return
+            try:
+                feedback = self.server.store.set_review_finding_feedback(
+                    workspace,
+                    str(payload.get("label") or ""),
+                    str(payload.get("detail") or ""),
+                    str(payload.get("status") or ""),
+                )
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({"ok": True, "feedback": feedback}, HTTPStatus.OK)
+            return
+
         # ── Project Review Run (legacy /drive name): start read-only review ─
         if route.startswith("/api/projects/") and route.endswith("/drive"):
             if not self.require_service_auth():
@@ -1221,7 +1248,8 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
             return
         runs = self.server.store.list_review_runs(workspace)
-        self.send_json({"ok": True, "runs": runs, "count": len(runs)})
+        feedback = self.server.store.list_review_finding_feedback(workspace)
+        self.send_json({"ok": True, "runs": runs, "count": len(runs), "feedback": feedback})
 
     def get_case(self, case_id: str) -> None:
         case = self.server.store.get_case(case_id)

@@ -74,12 +74,13 @@ def _run_git(args: list[str], cwd: Path, timeout: float = 5.0) -> str:
 def _git_browse(workspace: Path) -> dict[str, Any]:
     if not (workspace / ".git").exists():
         return {"is_git": False, "remote": "", "branch": "", "head": "",
-                "dirty_count": 0, "recent_commits": []}
+                "head_full": "", "dirty_count": 0, "recent_commits": []}
     from .repo_identity import redact_remote_url
 
     remote = redact_remote_url(_run_git(["remote", "get-url", "origin"], workspace))
     branch = _run_git(["branch", "--show-current"], workspace)
-    head = _run_git(["rev-parse", "--short", "HEAD"], workspace)
+    head_full = _run_git(["rev-parse", "HEAD"], workspace)
+    head = head_full[:12]
     status = _run_git(["status", "--porcelain"], workspace)
     commits = _run_git(["log", "-n", "8", "--format=%h %ad %an %s", "--date=short"], workspace)
     return {
@@ -87,6 +88,7 @@ def _git_browse(workspace: Path) -> dict[str, Any]:
         "remote": remote,
         "branch": branch or "detached",
         "head": head,
+        "head_full": head_full,
         "dirty_count": len([ln for ln in status.splitlines() if ln.strip()]) if status else 0,
         "recent_commits": [ln for ln in commits.splitlines() if ln.strip()][:8],
     }
@@ -154,7 +156,7 @@ def browse_project(
     # Git state + test detection + static scan.
     base["git"] = _git_browse(ws) if include_git else {
         "is_git": False, "remote": "", "branch": "", "head": "",
-        "dirty_count": 0, "recent_commits": [], "skipped": True,
+        "head_full": "", "dirty_count": 0, "recent_commits": [], "skipped": True,
     }
     base["change_review"] = review_local_changes(ws) if include_git else {
         "status": "disabled", "changed_files": 0, "functions": [], "hypotheses": [],

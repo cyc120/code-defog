@@ -767,6 +767,7 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                     str(payload.get("label") or ""),
                     str(payload.get("detail") or ""),
                     str(payload.get("status") or ""),
+                    str(payload.get("identity") or "") or None,
                 )
             except ValueError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)

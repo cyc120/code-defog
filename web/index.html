@@ -3469,15 +3469,20 @@
     });
   }
   function reviewFindingIdentity(label, detail) {
-    return `${String(label).replace(/\s+/g, " ").trim().slice(0, 120)}\u0000${String(detail).replace(/\s+/g, " ").trim().slice(0, 1200)}`;
+    const clean = (value, limit) => String(value).replace(/\s+/g, " ").trim().slice(0, limit);
+    return JSON.stringify(["text-v1", clean(label, 120), clean(detail, 1200)]);
   }
-  function appendReviewFinding(target, label, detail) {
+  function codeFindingIdentity(file, line, kind, evidence) {
+    const clean = (value, limit) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+    return JSON.stringify(["code-v1", clean(file, 500), Number(line) || 0, clean(kind, 100), clean(evidence, 1000)]);
+  }
+  function appendReviewFinding(target, label, detail, identity = reviewFindingIdentity(label, detail)) {
     const row = create("div", "review-finding");
     row.append(create("span", "review-finding-label", label));
     const content = create("span", "", detail);
     content.style.flex = "1 1 220px";
     row.append(content);
-    const saved = reviewFeedback.get(reviewFindingIdentity(label, detail));
+    const saved = reviewFeedback.get(identity);
     const select = document.createElement("select");
     select.className = "review-finding-status";
     select.setAttribute("aria-label", `标记${label}发现状态`);
@@ -3498,13 +3503,12 @@
       select.disabled = true;
       try {
         const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/review-feedback`, {
-          method: "POST", body: { label, detail, status: select.value },
+          method: "POST", body: { label, detail, identity, status: select.value },
         });
         if (epoch === dataEpoch && selectedProject?.workspace === workspace) {
           const feedback = payload.feedback;
-          const identity = reviewFindingIdentity(feedback.label, feedback.detail);
-          if (feedback.status === "open") reviewFeedback.delete(identity);
-          else reviewFeedback.set(identity, feedback);
+          if (feedback.status === "open") reviewFeedback.delete(feedback.identity);
+          else reviewFeedback.set(feedback.identity, feedback);
           toast("审查状态已保存到本地数据库");
         }
       } catch (error) { toast(`保存失败：${error.message}`); }
@@ -3515,6 +3519,9 @@
   }
   function reviewFindingEntries(run) {
     const findings = [];
+    const add = (label, detail, identity = reviewFindingIdentity(label, detail)) => {
+      findings.push({ label, detail: String(detail), identity });
+    };
     const browse = run?.browse || {};
     const test = browse.test || {};
     const scan = browse.static_scan || {};
@@ -3522,25 +3529,32 @@
     const reviewTask = (run?.tasks || []).find((task) => task.task_key === "project_review");
     const agentOutput = reviewTask?.output || {};
     const observations = Array.isArray(agentOutput.observations) ? agentOutput.observations : [];
-    observations.slice(0, 3).forEach((observation) => findings.push({ label: "结构", detail: String(observation) }));
+    observations.slice(0, 3).forEach((observation) => add("结构", observation));
     if (test.detected) {
       const result = test.ran ? (test.timed_out ? "测试超时" : test.execution_error ? "测试无法启动" : test.passed ? "测试通过" : "测试失败") : test.runner_unavailable ? "测试运行器不可用，未执行项目测试" : "已识别测试命令，未执行";
-      findings.push({ label: "测试", detail: result });
+      add("测试", result);
     }
     const gaps = Array.isArray(scan.error_handling_gaps) ? scan.error_handling_gaps : [];
-    if (scan.scanned_files != null) findings.push({ label: "静态", detail: `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。` });
+    if (scan.scanned_files != null) add("静态", `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。`);
+    gaps.slice(0, 12).forEach((gap) => {
+      const detail = `${gap.file}:${gap.line} ${gap.snippet || gap.kind || "错误处理风险"}`;
+      add("静态风险", detail, codeFindingIdentity(gap.file, gap.line, gap.kind || "static-risk", gap.snippet || ""));
+    });
     const hints = Array.isArray(changeReview.hypotheses) ? changeReview.hypotheses : [];
     if (changeReview.status === "ready") {
-      findings.push({ label: "改动", detail: `相对 HEAD 有 ${changeReview.changed_files} 个变动文件，定位 ${changeReview.functions?.length || 0} 个 Python 函数；以下只是待验证线索。` });
-      hints.slice(0, 5).forEach((hint) => findings.push({ label: "待验证", detail: `${hint.file}:${hint.line} ${hint.function} · ${hint.title}。建议：${hint.probe}` }));
+      add("改动", `相对 HEAD 有 ${changeReview.changed_files} 个变动文件，定位 ${changeReview.functions?.length || 0} 个 Python 函数；以下只是待验证线索。`);
+      hints.slice(0, 5).forEach((hint) => add(
+        "待验证", `${hint.file}:${hint.line} ${hint.function} · ${hint.title}。建议：${hint.probe}`,
+        codeFindingIdentity(hint.file, hint.line, hint.kind || "change-hypothesis", `${hint.function}|${hint.title}|${hint.probe}`),
+      ));
     }
     const git = browse.git || {};
-    if (git.branch) findings.push({ label: "Git", detail: `${git.branch} · ${git.dirty_count ?? 0} 个未提交变更` });
+    if (git.branch) add("Git", `${git.branch} · ${git.dirty_count ?? 0} 个未提交变更`);
     return findings;
   }
   function renderReviewFindingsInto(target, run) {
     target.replaceChildren();
-    reviewFindingEntries(run).forEach(({ label, detail }) => appendReviewFinding(target, label, detail));
+    reviewFindingEntries(run).forEach(({ label, detail, identity }) => appendReviewFinding(target, label, detail, identity));
     if (!target.childElementCount) target.append(create("div", "review-empty", "审查完成后将在这里汇总确定性发现。"));
   }
   function renderReviewFindings(run) { renderReviewFindingsInto($("review-findings"), run); }
@@ -3591,6 +3605,11 @@
       row.append(create("span", "review-history-id", shortId(run.run_id)));
       row.append(create("span", "review-history-meta", `${run.status === "complete" ? "完成" : run.status === "error" ? "失败" : "运行中"} · ${relativeTime(run.started_at)}`));
       row.append(create("span", "review-history-meta", run.duration_s != null ? fmtDuration(run.duration_s) : "—"));
+      const git = run.browse?.git || {};
+      if (git.branch || git.head_full || git.head) {
+        const commit = git.head_full || git.head;
+        row.append(create("span", "review-history-meta", `${git.branch || "分支未知"} · ${commit ? String(commit).slice(0, 12) : "提交未知"}`));
+      }
       target.append(row);
     });
     const compare = $("review-compare-btn");
@@ -3609,12 +3628,17 @@
     const older = completed[1];
     const before = reviewFindingEntries(older);
     const after = reviewFindingEntries(newer);
-    const beforeMap = new Map(before.map((item) => [reviewFindingIdentity(item.label, item.detail), item]));
-    const afterMap = new Map(after.map((item) => [reviewFindingIdentity(item.label, item.detail), item]));
-    const added = after.filter((item) => !beforeMap.has(reviewFindingIdentity(item.label, item.detail)));
-    const missing = before.filter((item) => !afterMap.has(reviewFindingIdentity(item.label, item.detail)));
+    const beforeMap = new Map(before.map((item) => [item.identity, item]));
+    const afterMap = new Map(after.map((item) => [item.identity, item]));
+    const added = after.filter((item) => !beforeMap.has(item.identity));
+    const missing = before.filter((item) => !afterMap.has(item.identity));
     const kept = after.length - added.length;
-    panel.append(create("p", "review-compare-summary", `基准 ${shortId(older.run_id)} → 最新 ${shortId(newer.run_id)}：新增 ${added.length} 项，持续 ${kept} 项，本次未见 ${missing.length} 项。未再出现不等同于已确认修复。`));
+    const revision = (run) => {
+      const git = run.browse?.git || {};
+      const commit = git.head_full || git.head || "提交未知";
+      return `${git.branch || "分支未知"}@${String(commit).slice(0, 12)}`;
+    };
+    panel.append(create("p", "review-compare-summary", `${revision(older)} → ${revision(newer)}（${shortId(older.run_id)} → ${shortId(newer.run_id)}）：新增 ${added.length} 项，持续 ${kept} 项，本次未见 ${missing.length} 项。未再出现不等同于已确认修复。`));
     const renderItems = (items, label, tone) => items.forEach((item) => {
       const row = create("div", `review-compare-row ${tone}`, `${label} · ${item.label}：${item.detail}`);
       panel.append(row);
@@ -3631,7 +3655,10 @@
   function renderReviewRun(run) {
     if (!run) return;
     reviewRun = run;
-    $("review-run-meta").textContent = `${shortId(run.run_id)} · ${run.status === "complete" ? "已完成" : run.status === "error" ? "失败" : "运行中"}`;
+    const git = run.browse?.git || {};
+    const commit = git.head_full || git.head;
+    const revision = git.branch ? ` · ${git.branch}${commit ? `@${String(commit).slice(0, 12)}` : ""}` : "";
+    $("review-run-meta").textContent = `${shortId(run.run_id)} · ${run.status === "complete" ? "已完成" : run.status === "error" ? "失败" : "运行中"}${revision}`;
     renderReviewTasks(run);
     renderReviewFindings(run);
     renderReviewCases(run);
@@ -3831,7 +3858,7 @@
       const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`);
       if (epoch !== dataEpoch) return;
       reviewRuns = payload.runs || [];
-      reviewFeedback = new Map((payload.feedback || []).map((item) => [reviewFindingIdentity(item.label, item.detail), item]));
+      reviewFeedback = new Map((payload.feedback || []).map((item) => [item.identity || reviewFindingIdentity(item.label, item.detail), item]));
       renderReviewHistory(reviewRuns);
       if (reviewRun) renderReviewFindings(reviewRun);
     } catch (error) {

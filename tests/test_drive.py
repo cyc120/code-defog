@@ -64,6 +64,8 @@ class BrowseProjectTests(unittest.TestCase):
             self.assertTrue(b["git"]["is_git"])
             self.assertTrue(b["git"]["branch"])
             self.assertTrue(b["git"]["head"])
+            self.assertEqual(len(b["git"]["head_full"]), 40)
+            self.assertEqual(b["git"]["head"], b["git"]["head_full"][:12])
             self.assertIn("README.md", b["markers"])
 
     def test_browse_can_skip_git_metadata(self) -> None:
@@ -444,6 +446,40 @@ class DriveEndpointTests(unittest.TestCase):
         return Request(f"{base}/api/projects/{enc}/drive",
                        data=b"{}", method="POST",
                        headers={"X-Code-CCTV-Token": token})
+
+    def test_review_feedback_endpoint_persists_identity_and_returns_it_in_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            store.register_monitored_project({
+                "workspace": directory, "kind": "process", "name": "tmp-project",
+            })
+            server, base, token = self._start_server(store, inject_stub=False)
+            try:
+                encoded_workspace = directory.replace("/", "%2F")
+                identity = '["code-v1","src/api.py",42,"bare-except","except:"]'
+                body = json.dumps({
+                    "label": "静态风险", "detail": "src/api.py:42 except:",
+                    "identity": identity, "status": "fixed",
+                }).encode("utf-8")
+                request = Request(
+                    f"{base}/api/projects/{encoded_workspace}/review-feedback",
+                    data=body, method="POST",
+                    headers={"X-Code-Defog-Token": token, "Content-Type": "application/json"},
+                )
+                with urlopen(request, timeout=3) as response:
+                    saved = json.loads(response.read())
+                self.assertEqual(saved["feedback"]["identity"], identity)
+
+                history_request = Request(
+                    f"{base}/api/projects/{encoded_workspace}/reviews",
+                    headers={"X-Code-Defog-Token": token},
+                )
+                with urlopen(history_request, timeout=3) as response:
+                    history = json.loads(response.read())
+                self.assertEqual(history["feedback"][0]["status"], "fixed")
+                self.assertEqual(history["feedback"][0]["identity"], identity)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
 
     def test_post_requires_auth(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

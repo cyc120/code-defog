@@ -32,7 +32,7 @@ def _get_validator():
 DEFAULT_RETENTION = 2000
 # Bumped when the on-disk layout gains a structural change; migrate_schema
 # uses PRAGMA user_version so future data-conditioned migrations have a hook.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 DEFAULT_REVIEW_RETENTION = 200
 DEFAULT_REVIEW_FEEDBACK_RETENTION = 1000
 DEFAULT_CONVERSATION_ID = "default"
@@ -306,6 +306,7 @@ class StateStore:
                 finding_key TEXT NOT NULL,
                 label TEXT NOT NULL,
                 detail TEXT NOT NULL,
+                identity TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (workspace, finding_key)
@@ -435,7 +436,7 @@ class StateStore:
     def migrate_schema(self) -> None:
         # user_version gives future migrations a data-conditioned hook.
         # v1 = probe-based migrations; v2 = cases.chain_anchor; v3 = persisted
-        #      review finding feedback (the table itself is created idempotently).
+        # review feedback; v4 = stable review finding identities.
         current_version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         event_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(events)").fetchall()}
         project_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -450,6 +451,8 @@ class StateStore:
         needs_chain_sequence = "chain_sequence" not in tool_run_cols if tool_run_cols else False
         knowledge_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(knowledge_records)").fetchall()}
         needs_review_note = "review_note" not in knowledge_cols if knowledge_cols else False
+        feedback_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(review_finding_feedback)").fetchall()}
+        needs_review_identity = "identity" not in feedback_cols if feedback_cols else False
         case_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(cases)").fetchall()}
         needs_chain_anchor = "chain_anchor" not in case_cols if case_cols else False
 
@@ -491,7 +494,8 @@ class StateStore:
         # DevLoop schema migrations — one transaction so a crash mid-sequence
         # cannot leave a partially migrated schema.
         if any((needs_patch_ref, needs_sandbox_ref, needs_repo_abs_path,
-                needs_chain_sequence, needs_review_note, needs_chain_anchor)):
+                needs_chain_sequence, needs_review_note, needs_chain_anchor,
+                needs_review_identity)):
             self.connection.execute("BEGIN IMMEDIATE")
             try:
                 if needs_patch_ref:
@@ -507,6 +511,10 @@ class StateStore:
                     self.connection.execute("ALTER TABLE knowledge_records ADD COLUMN review_note TEXT")
                 if needs_chain_anchor:
                     self.connection.execute("ALTER TABLE cases ADD COLUMN chain_anchor TEXT")
+                if needs_review_identity:
+                    self.connection.execute(
+                        "ALTER TABLE review_finding_feedback ADD COLUMN identity TEXT NOT NULL DEFAULT ''"
+                    )
             except Exception:
                 self.connection.execute("ROLLBACK")
                 raise
@@ -1939,15 +1947,25 @@ class StateStore:
         abs_path = str(Path(workspace).expanduser().resolve())
         with self.lock:
             rows = self.connection.execute(
-                """SELECT label, detail, status, updated_at
+                """SELECT label, detail, identity, status, updated_at
                    FROM review_finding_feedback WHERE workspace = ?
                    ORDER BY updated_at DESC""",
                 (abs_path,),
             ).fetchall()
-            return [dict(row) for row in rows]
+            result = []
+            for row in rows:
+                item = dict(row)
+                if not item["identity"]:
+                    item["identity"] = json.dumps(
+                        ["text-v1", item["label"], item["detail"]],
+                        ensure_ascii=False, separators=(",", ":"),
+                    )
+                result.append(item)
+            return result
 
     def set_review_finding_feedback(
         self, workspace: str, label: str, detail: str, status: str,
+        identity: str | None = None,
     ) -> dict[str, Any]:
         allowed = {"open", "fixed", "false_positive", "accepted"}
         if status not in allowed:
@@ -1957,25 +1975,41 @@ class StateStore:
         safe_detail = clean_text(detail, 1200)
         if not safe_label or not safe_detail:
             raise ValueError("label and detail are required")
-        finding_key = sha256(f"{safe_label}\0{safe_detail}")
+        safe_identity = str(identity or json.dumps(
+            ["text-v1", safe_label, safe_detail], ensure_ascii=False, separators=(",", ":"),
+        )).replace("\0", "")[:4000]
+        finding_key = sha256(safe_identity)
+        legacy_key = sha256(f"{safe_label}\0{safe_detail}")
         updated_at = utc_now()
         with self.lock:
             if status == "open":
                 self.connection.execute(
-                    "DELETE FROM review_finding_feedback WHERE workspace = ? AND finding_key = ?",
-                    (abs_path, finding_key),
+                    "DELETE FROM review_finding_feedback WHERE workspace = ? AND finding_key IN (?, ?)",
+                    (abs_path, finding_key, legacy_key),
                 )
-                result = {"label": safe_label, "detail": safe_detail, "status": "open", "updated_at": updated_at}
+                result = {"label": safe_label, "detail": safe_detail, "identity": safe_identity, "status": "open", "updated_at": updated_at}
             else:
-                self.connection.execute(
-                    """INSERT INTO review_finding_feedback
-                       (workspace, finding_key, label, detail, status, updated_at)
-                       VALUES (?, ?, ?, ?, ?, ?)
-                       ON CONFLICT(workspace, finding_key) DO UPDATE SET
-                           label = excluded.label, detail = excluded.detail,
-                           status = excluded.status, updated_at = excluded.updated_at""",
-                    (abs_path, finding_key, safe_label, safe_detail, status, updated_at),
-                )
+                legacy = self.connection.execute(
+                    "SELECT identity FROM review_finding_feedback WHERE workspace = ? AND finding_key = ?",
+                    (abs_path, legacy_key),
+                ).fetchone()
+                if legacy is not None and not legacy["identity"]:
+                    self.connection.execute(
+                        """UPDATE review_finding_feedback SET identity = ?, status = ?, updated_at = ?
+                           WHERE workspace = ? AND finding_key = ?""",
+                        (safe_identity, status, updated_at, abs_path, legacy_key),
+                    )
+                else:
+                    self.connection.execute(
+                        """INSERT INTO review_finding_feedback
+                           (workspace, finding_key, label, detail, identity, status, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(workspace, finding_key) DO UPDATE SET
+                               label = excluded.label, detail = excluded.detail,
+                               identity = excluded.identity, status = excluded.status,
+                               updated_at = excluded.updated_at""",
+                        (abs_path, finding_key, safe_label, safe_detail, safe_identity, status, updated_at),
+                    )
                 self.connection.execute(
                     """DELETE FROM review_finding_feedback
                        WHERE workspace = ? AND finding_key IN (
@@ -1985,7 +2019,7 @@ class StateStore:
                        )""",
                     (abs_path, abs_path, DEFAULT_REVIEW_FEEDBACK_RETENTION),
                 )
-                result = {"label": safe_label, "detail": safe_detail, "status": status, "updated_at": updated_at}
+                result = {"label": safe_label, "detail": safe_detail, "identity": safe_identity, "status": status, "updated_at": updated_at}
             self.connection.commit()
         return result
 

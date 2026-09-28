@@ -595,7 +595,10 @@ class DriveEndpointTests(unittest.TestCase):
                 request = Request(f"{base}/api/projects/{encoded}/reviews", headers=headers, method="DELETE")
                 with urlopen(request, timeout=3) as resp:
                     deleted = json.loads(resp.read())["deleted"]
-                self.assertEqual(deleted, {"runs": 1, "tasks": 1, "feedback": 1})
+                self.assertEqual(deleted, {
+                    "runs": 1, "tasks": 1, "feedback": 1,
+                    "skill_reports": 0, "ai_reports": 0,
+                })
                 self.assertEqual(store.list_review_runs(directory), [])
                 self.assertEqual(len(store.list_review_runs(other)), 1)
             finally:

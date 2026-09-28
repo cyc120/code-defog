@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import paths
+from .ai_review import changed_paths as git_changed_paths
 
 try:
     from scripts.watch_worklog import snapshot as _snapshot, diff_snapshots as _diff
@@ -51,17 +52,22 @@ class ProjectMonitor:
         store: Any,
         post_event: Callable[[dict[str, Any]], bool] | None = None,
         on_project_change: Callable[[str], None] | None = None,
+        on_auto_review: Callable[[str, list[str]], None] | None = None,
         poll_interval: float = 5.0,
         git_poll_interval: float = 30.0,
+        review_quiet_period: float = 10_800.0,
     ) -> None:
         self.store = store
         self.post_event = post_event or _default_post_event
         self.on_project_change = on_project_change
+        self.on_auto_review = on_auto_review
         self.poll_interval = max(1.0, poll_interval)
         self.git_poll_interval = max(5.0, git_poll_interval)
+        self.review_quiet_period = max(60.0, review_quiet_period)
         self._threads: dict[str, threading.Thread] = {}
         self._stop_events: dict[str, threading.Event] = {}
         self._locks: dict[str, threading.Lock] = {}
+        self._auto_review_error_notified: dict[str, float] = {}
         self._state_dir = paths.monitor_state_dir()
 
     # ── Lifecycle ─────────────────────────────────────────────────────
@@ -119,6 +125,15 @@ class ProjectMonitor:
                 )
             self._save_scan_state(workspace, baseline)
             previous = baseline
+            if project.get("ai_review_enabled"):
+                # Reconcile dirty files after a daemon outage. The quiet window
+                # starts now because their exact last-edit time is unknown.
+                try:
+                    pending_paths = git_changed_paths(workspace)
+                    if pending_paths:
+                        self.store.note_auto_review_changes(workspace, pending_paths, time.time())
+                except (OSError, RuntimeError, ValueError):
+                    pass
         except OSError as exc:
             self.store.update_monitored_project_status(workspace, "error", str(exc))
             return
@@ -131,6 +146,7 @@ class ProjectMonitor:
             if not lock.acquire(blocking=False):
                 continue  # previous poll still running; skip
             try:
+                project = self.store.get_monitored_project(workspace) or project
                 try:
                     current = self._snapshot_abs(abs_path)
                 except OSError as exc:
@@ -140,6 +156,10 @@ class ProjectMonitor:
                 if changes:
                     self._notify_project_change(workspace)
                     self._emit_file_changes(project, changes)
+                    if project.get("ai_review_enabled"):
+                        self.store.note_auto_review_changes(
+                            workspace, [str(change.path) for change in changes], time.time(),
+                        )
                     self._save_scan_state(workspace, current)
                     previous = current
                 self.store.update_monitored_project_status(workspace, "watching")
@@ -150,6 +170,51 @@ class ProjectMonitor:
             if now - last_git_check >= self.git_poll_interval:
                 last_git_check = now
                 self._emit_git_commits(workspace, project)
+            self._start_due_auto_review(workspace)
+
+    def _start_due_auto_review(self, workspace: str) -> None:
+        callback = self.on_auto_review
+        if not callable(callback):
+            return
+        try:
+            batch = self.store.claim_due_auto_review(
+                workspace, quiet_seconds=int(self.review_quiet_period),
+            )
+        except Exception as exc:
+            now = time.monotonic()
+            if now - self._auto_review_error_notified.get(workspace, 0.0) >= 60.0:
+                import logging
+                logging.getLogger("code-defog.monitor").exception(
+                    "could not claim automatic review for %s", workspace,
+                )
+                self._auto_review_error_notified[workspace] = now
+                try:
+                    self.store.set_auto_review_failure(workspace, str(exc))
+                    if callable(self.on_project_change):
+                        self.on_project_change(workspace)
+                except Exception:
+                    logging.getLogger("code-defog.monitor").exception(
+                        "could not persist automatic review error for %s", workspace,
+                    )
+            return
+        if not batch:
+            self._auto_review_error_notified.pop(workspace, None)
+            return
+        try:
+            callback(workspace, list(batch.get("changed_paths") or []))
+        except Exception as exc:
+            import logging
+            logging.getLogger("code-defog.monitor").exception(
+                "could not start automatic review for %s", workspace,
+            )
+            try:
+                self.store.set_auto_review_failure(
+                    workspace, str(exc), list(batch.get("changed_paths") or []),
+                )
+                if callable(self.on_project_change):
+                    self.on_project_change(workspace)
+            except Exception:
+                pass
 
     def _snapshot_abs(self, abs_path: Path) -> dict[str, dict[str, int]]:
         """Snapshot wrapper that tolerates a missing watch_worklog import."""

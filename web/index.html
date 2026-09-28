@@ -473,6 +473,23 @@
 
   dialog { width: min(470px, calc(100% - 28px)); padding: 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); color: var(--ink); box-shadow: 0 20px 55px rgba(0, 0, 0, .25); }
   dialog::backdrop { background: rgba(0, 0, 0, .42); }
+  dialog.review-report-dialog { width: min(1040px, calc(100% - 28px)); max-width: none; max-height: min(88vh, 900px); overflow: auto; }
+  .review-report-top { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--surface); }
+  .review-report-top h2 { margin: 0; font-size: 16px; font-weight: 600; }
+  .review-report-content { padding: 22px 26px 30px; }
+  .report-title { margin: 0; color: var(--ink); font-size: 24px; }
+  .report-subtitle { margin: 4px 0 16px; color: var(--ink-faint); font-size: 12px; overflow-wrap: anywhere; }
+  .report-conclusion { margin: 14px 0 18px; padding: 13px 15px; border-left: 4px solid var(--blue); border-radius: 4px; background: var(--surface-muted); color: var(--ink); }
+  .report-section { margin-top: 22px; }
+  .report-section h3 { margin: 0 0 9px; color: var(--ink); font-size: 15px; }
+  .report-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .report-table th, .report-table td { padding: 8px 10px; border: 1px solid var(--line); text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+  .report-table th { background: var(--surface-muted); color: var(--ink-muted); }
+  .report-finding { padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; margin-top: 7px; }
+  .report-finding strong { display: block; margin-bottom: 4px; color: var(--ink); }
+  .report-finding p, .report-note { margin: 0; color: var(--ink-muted); font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
+  .report-note { margin-top: 8px; color: var(--ink-faint); }
+  @media print { body.review-report-print * { visibility: hidden; } body.review-report-print #review-report-dialog, body.review-report-print #review-report-dialog * { visibility: visible; } body.review-report-print #review-report-dialog { position: fixed; inset: 0; width: 100%; max-height: none; border: 0; box-shadow: none; } body.review-report-print .review-report-top { display: none; } }
   .dialog-body { padding: 20px; }
   .dialog-body h2 { margin: 5px 0 8px; font-size: 18px; font-weight: 500; }
   .dialog-body p { margin: 0; color: var(--ink-muted); font-size: 12px; line-height: 1.55; }
@@ -618,7 +635,7 @@
 
   /* ── 项目进度 · 分控仪表盘（#view-overview）────────────────────── */
   .overview-view { width: min(1440px, 100%); margin: 0 auto; padding: 26px 30px 52px; }
-  .review-workbench { display: grid; gap: 16px; margin-top: 18px; }
+  .review-workbench { display: grid; gap: 14px; margin-top: 16px; }
   [data-overview-content][hidden] { display: none !important; }
   .overview-empty { display: grid; min-height: min(470px, calc(100vh - 210px)); place-items: center; padding: 18px 0; }
   .overview-empty[hidden] { display: none; }
@@ -628,7 +645,7 @@
   .overview-empty-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 22px 0; padding: 0; list-style: none; text-align: left; }
   .overview-empty-steps li { min-height: 50px; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); color: var(--ink-muted); font-size: 11px; line-height: 1.45; }
   .overview-empty-cta { min-width: 168px; }
-  .review-command { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 22px; padding: 22px; border: 1px solid var(--line); border-top: 3px solid var(--status-info-border); border-radius: 8px; background: var(--surface); box-shadow: 0 10px 26px rgba(25, 35, 28, .05); }
+  .review-command { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 380px); gap: 22px; padding: 20px; border: 1px solid var(--line); border-left: 3px solid var(--status-info-border); border-radius: 8px; background: var(--surface); box-shadow: 0 5px 16px rgba(25, 35, 28, .035); }
   .review-command[data-state="running"] { border-top-color: var(--status-info-fg); }
   .review-command[data-state="complete"] { border-top-color: var(--status-success-border); }
   .review-command[data-state="error"] { border-top-color: var(--status-danger-border); }
@@ -658,6 +675,12 @@
   .review-panel-head h2 { margin: 0; font-size: 14px; font-weight: 500; }
   .review-run-meta { color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
   .review-task-graph { display: grid; grid-template-columns: repeat(6, minmax(120px, 1fr)); width: 100%; min-width: 0; max-width: 100%; gap: 0; margin-top: 13px; overflow-x: auto; padding-bottom: 4px; }
+  .review-task-details { margin-top: 10px; }
+  .review-task-details > summary { width: max-content; max-width: 100%; color: var(--ink-muted); cursor: pointer; font-size: 10px; list-style: none; }
+  .review-task-details > summary::-webkit-details-marker { display: none; }
+  .review-task-details > summary::before { content: "＋ "; color: var(--blue); }
+  .review-task-details[open] > summary::before { content: "－ "; }
+  .review-task-details .review-task-graph { margin-top: 8px; }
   .review-task-graph.is-empty { display: block; overflow: visible; padding: 0; }
   .review-task-graph .review-empty { display: grid; min-height: 84px; place-items: center; padding: 14px; border: 1px dashed var(--line-strong); border-radius: 6px; background: var(--surface-muted); text-align: center; }
   .review-task { position: relative; display: grid; min-width: 120px; min-height: 88px; align-content: start; gap: 6px; padding: 10px 11px; border: 1px solid var(--line); background: var(--surface); }
@@ -676,15 +699,26 @@
   .review-result-section { min-width: 0; padding-top: 14px; border-top: 1px solid var(--line); }
   .review-result-section h3 { margin: 0 0 8px; font-size: 12px; font-weight: 500; }
   .review-findings, .review-case-list, .review-history { display: grid; gap: 6px; }
+  .review-risk-details { margin: 8px 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-muted); }
+  .review-risk-details > summary, .review-risk-file > summary { padding: 9px 11px; color: var(--ink-muted); cursor: pointer; font-size: 11px; }
+  .review-risk-details > summary { font-weight: 600; }
+  .review-risk-details[open] > summary, .review-risk-file[open] > summary { border-bottom: 1px solid var(--line); }
+  .review-risk-files { display: grid; gap: 6px; padding: 8px; }
+  .review-risk-file { border: 1px solid var(--line); border-radius: 5px; background: var(--surface); }
+  .review-risk-file > summary { overflow-wrap: anywhere; }
+  .review-risk-file > .review-risk-items { display: grid; gap: 6px; padding: 8px; }
+  .review-static-summary { display: flex; align-items: baseline; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 6px; color: var(--ink-muted); background: var(--surface-muted); font-size: 11px; }
   .review-finding, .review-case, .review-history-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-top: 1px solid var(--line); color: var(--ink-muted); font-size: 11px; line-height: 1.45; }
   .review-finding { flex-wrap: wrap; }
   .review-finding:first-child, .review-case:first-child, .review-history-row:first-child { border-top: 0; }
   .review-finding-label { flex: 0 0 70px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 9px; }
   .review-case-link { color: var(--blue); background: transparent; border: 0; padding: 0; font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
-  .review-history { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
+  .review-history { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; margin-top: 4px; }
   .review-history-row { min-width: 0; display: grid; gap: 3px; }
   .review-history-id { color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 10px; overflow-wrap: anywhere; }
   .review-history-meta { color: var(--ink-faint); font-size: 10px; }
+  .skill-review-history-wrap { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+  .skill-review-history-wrap h4 { margin: 0; color: var(--ink); font-size: 12px; font-weight: 600; }
   .review-finding-status, .review-finding-save { min-height: 26px; border: 1px solid var(--line); border-radius: 5px; background: var(--surface); color: var(--ink-muted); font: inherit; font-size: 10px; }
   .review-finding-status { margin-left: 78px; padding: 3px 6px; }
   .review-finding-save { padding: 3px 8px; cursor: pointer; }
@@ -696,6 +730,44 @@
   .review-compare-row.missing { color: var(--green); }
   .review-empty { color: var(--ink-faint); font-size: 11px; }
   .review-runtime { color: var(--ink-faint); font-size: 10px; }
+  .review-history-head { align-items: center; }
+  .review-history-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+  .review-history-actions > .button { min-height: 32px; }
+  .review-channel-tabs { display: flex; gap: 4px; overflow-x: auto; border-bottom: 1px solid var(--line); }
+  .review-channel-tab { flex: 0 0 auto; min-height: 38px; padding: 0 13px; border: 0; border-bottom: 2px solid transparent; color: var(--ink-muted); background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+  .review-channel-tab[aria-selected="true"] { border-bottom-color: var(--blue); color: var(--ink); font-weight: 600; }
+  .review-channel-panel { min-width: 0; padding: 14px 0 0; }
+  .review-channel-panel[hidden] { display: none !important; }
+  .auto-review-placeholder { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 12px; padding: 18px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-muted); }
+  .auto-review-content { min-width: 0; }
+  .auto-review-placeholder h3 { margin: 0 0 5px; color: var(--ink); font-size: 13px; font-weight: 600; }
+  .auto-review-placeholder p { margin: 0; color: var(--ink-muted); font-size: 11px; line-height: 1.55; }
+  .auto-review-placeholder .state-badge { white-space: nowrap; }
+  .auto-review-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+  .auto-review-toggle { display: inline-flex; align-items: center; gap: 7px; color: var(--ink); font-size: 11px; cursor: pointer; }
+  .auto-review-toggle input { width: 15px; height: 15px; accent-color: var(--blue); }
+  .auto-review-history-section { margin-top: 14px; }
+  .auto-review-runtime-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; margin-top: 12px; }
+  .auto-review-runtime-item { min-width: 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  .auto-review-runtime-label { display: block; margin-bottom: 4px; color: var(--ink-faint); font-size: 9px; }
+  .auto-review-runtime-value { display: block; color: var(--ink-muted); font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+  .auto-review-pending { margin-top: 9px; }
+  .auto-review-pending > summary { color: var(--blue); font-size: 10px; cursor: pointer; }
+  .auto-review-pending-list { margin: 6px 0 0; padding-left: 18px; color: var(--ink-muted); font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; overflow-wrap: anywhere; }
+  .review-more-actions { position: relative; }
+  .review-more-actions > summary { display: inline-flex; min-height: 32px; align-items: center; padding: 0 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink-muted); background: var(--surface); font-size: 11px; cursor: pointer; list-style: none; }
+  .review-more-actions > summary::-webkit-details-marker { display: none; }
+  .review-more-actions[open] > summary { border-color: var(--line-strong); }
+  .review-more-menu { position: absolute; z-index: 5; top: calc(100% + 5px); right: 0; display: grid; min-width: 180px; gap: 3px; padding: 6px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: 0 10px 28px rgba(25, 35, 28, .14); }
+  .review-more-menu button { width: 100%; justify-content: flex-start; text-align: left; }
+  .overview-secondary { margin-top: 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+  .overview-secondary > summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 48px; padding: 0 16px; color: var(--ink); cursor: pointer; list-style: none; font-size: 13px; font-weight: 500; }
+  .overview-secondary > summary::-webkit-details-marker { display: none; }
+  .overview-secondary > summary::after { content: "展开"; color: var(--ink-faint); font-size: 10px; font-weight: 400; }
+  .overview-secondary[open] > summary::after { content: "收起"; }
+  .overview-secondary-body { padding: 0 16px 16px; }
+  .overview-secondary-body > .overview-grid { margin-top: 0; }
+  .overview-secondary-body > .overview-llm { margin-top: 14px; }
   .overview-hero { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
   .overview-hero .metric { min-height: 96px; padding: 14px 16px; }
   .overview-hero .metric-value { font-size: 30px; }
@@ -813,9 +885,13 @@
   .code-map-stage.is-panning { cursor: grabbing; user-select: none; }
   .code-map-svg { display: block; width: 100%; min-width: 0; height: 100%; background: var(--surface-muted); }
   .code-map-scene { transform-origin: 0 0; }
-  .code-map-edge { stroke: var(--line-strong); stroke-width: 1.25; opacity: .76; transition: opacity 140ms ease, stroke-width 140ms ease; }
+  .code-map-edge { fill: none; stroke: var(--line-strong); stroke-width: 1.25; opacity: .72; transition: opacity 140ms ease, stroke-width 140ms ease; }
+  .code-map-edge.relation-imports { stroke: var(--blue); }
+  .code-map-edge.relation-declares { stroke: var(--green); }
   .code-map-edge.unresolved { stroke: var(--yellow); stroke-dasharray: 5 5; }
   .code-map-edge.is-related { stroke-width: 1.8; opacity: .98; }
+  .code-map-edge.is-outgoing { stroke: var(--blue); stroke-width: 2.5; opacity: 1; }
+  .code-map-edge.is-incoming { stroke: var(--green); stroke-width: 2.5; opacity: 1; }
   .code-map-svg[data-has-selection="true"] .code-map-edge:not(.is-related) { opacity: .16; }
   .code-map-node { cursor: pointer; transition: opacity 140ms ease; }
   .code-map-svg[data-has-selection="true"] .code-map-node:not(.is-related) { opacity: .32; }
@@ -837,6 +913,12 @@
   .code-map-key.directory { border-radius: 2px; border-color: var(--blue); background: var(--blue-soft); }
   .code-map-key.file { border-color: var(--green); background: var(--green-soft); }
   .code-map-key.pending { border-color: var(--yellow); background: var(--yellow-soft); }
+  .code-map-edge-key { position: relative; width: 18px; height: 0; border-top: 2px solid var(--line-strong); }
+  .code-map-edge-key.imports { border-color: var(--blue); }
+  .code-map-edge-key.declares { border-color: var(--green); }
+  .code-map-edge-key::after { position: absolute; top: -5px; right: -1px; content: "›"; color: currentColor; font-size: 12px; }
+  .code-map-edge-key.imports::after { color: var(--blue); }
+  .code-map-edge-key.declares::after { color: var(--green); }
   .code-map-robot { position: absolute; z-index: 5; left: 0; top: 0; display: grid; grid-template-columns: 48px minmax(0, 250px); align-items: start; gap: 8px; width: min(310px, calc(100% - 24px)); transition: opacity 140ms ease; }
   .code-map-robot.is-dragging { transition: none; }
   .code-map-robot-handle { display: grid; width: 48px; height: 48px; place-items: center; padding: 0; border: 1px solid var(--blue); border-radius: 50%; background: var(--blue); color: var(--surface); box-shadow: 0 7px 18px rgba(25, 57, 89, .25); cursor: grab; touch-action: none; }
@@ -1244,6 +1326,9 @@
           </div>
         </section>
 
+        <details class="overview-secondary" data-overview-content>
+          <summary>项目核心指标（5 项）</summary>
+          <div class="overview-secondary-body">
         <div class="overview-hero" id="overview-hero" aria-label="项目概览">
           <article class="metric"><div class="metric-label">全部 Case</div><div class="metric-value" id="ov-total">—</div><div class="metric-caption">本地工作队列</div></article>
           <article class="metric"><div class="metric-label">活跃 Case</div><div class="metric-value" id="ov-active">—</div><div class="metric-caption">未关闭/未升级</div></article>
@@ -1251,10 +1336,26 @@
           <article class="metric"><div class="metric-label">工具调用</div><div class="metric-value" id="ov-tool-runs">—</div><div class="metric-caption">受控工具记录</div></article>
           <article class="metric"><div class="metric-label">监控活动</div><div class="metric-value" id="ov-events">—</div><div class="metric-caption">近 14 天事件</div></article>
         </div>
+        </div>
+      </details>
 
+        <div class="review-channel-tabs" role="tablist" aria-label="审查来源">
+          <button class="review-channel-tab" id="review-tab-auto" type="button" role="tab" aria-selected="false" aria-controls="review-panel-auto" tabindex="-1">Code Defog 自动审查</button>
+          <button class="review-channel-tab" id="review-tab-local" type="button" role="tab" aria-selected="true" aria-controls="review-panel-local" tabindex="0">本地检查</button>
+          <button class="review-channel-tab" id="review-tab-skill" type="button" role="tab" aria-selected="false" aria-controls="review-panel-skill" tabindex="-1">Skill 报告</button>
+        </div>
+
+        <section class="review-channel-panel" id="review-panel-auto" role="tabpanel" aria-labelledby="review-tab-auto" data-overview-content hidden>
+          <div class="auto-review-placeholder">
+            <span class="state-badge" id="auto-review-badge" data-tone="neutral">自动审查关闭</span>
+            <div class="auto-review-content"><h3>Code Defog 自动 AI 审查</h3><p id="auto-review-help">启用后，本地变更连续 3 小时没有新改动时，会把变更文件发送给当前模型提供方进行只读审查。</p><div class="auto-review-actions"><label class="auto-review-toggle"><input id="auto-review-enabled" type="checkbox"><span>对此项目启用自动审查</span></label><button class="button" id="ai-review-now-btn" type="button">立即审查当前改动</button></div><p class="review-runtime" id="auto-review-provider-note">自动审查默认关闭；云端模型会收到选中变更文件的文本，本地 Ollama 模型仅在本机处理。</p><div class="auto-review-runtime-grid" id="auto-review-runtime-grid" aria-live="polite"></div><details class="auto-review-pending" id="auto-review-pending" hidden><summary id="auto-review-pending-summary">查看待审查文件</summary><ul class="auto-review-pending-list" id="auto-review-pending-list"></ul></details><section class="review-result-section auto-review-history-section"><h3>自动审查历史</h3><div class="review-history" id="code-review-history"><div class="review-empty">尚无自动审查记录。</div></div></section></div>
+          </div>
+        </section>
+
+        <section class="review-channel-panel" id="review-panel-local" role="tabpanel" aria-labelledby="review-tab-local" data-overview-content>
         <section class="review-execution" aria-labelledby="review-execution-title">
           <div class="review-panel-head">
-            <h2 id="review-execution-title">自动化驱动</h2>
+            <h2 id="review-execution-title">本地审查与检查</h2>
             <span class="review-run-meta" id="review-run-meta">尚未启动审查</span>
           </div>
           <div class="review-status" id="ov-drive-status" hidden>
@@ -1262,7 +1363,7 @@
             <span class="drive-timer" id="ov-drive-timer">00:00</span>
             <span class="drive-note" id="ov-drive-note">正在准备审查…</span>
           </div>
-          <div class="review-task-graph is-empty" id="review-task-graph"><div class="review-empty">启动审查后显示阶段和任务记录。</div></div>
+          <details class="review-task-details"><summary>查看审查步骤与执行状态</summary><div class="review-task-graph is-empty" id="review-task-graph"><div class="review-empty">启动审查后显示阶段和任务记录。</div></div></details>
           <div class="review-result-grid">
             <section class="review-result-section" aria-labelledby="review-findings-title">
               <h3 id="review-findings-title">审查发现</h3>
@@ -1274,13 +1375,22 @@
             </section>
           </div>
           <section class="review-result-section" aria-labelledby="review-history-title">
-            <div class="review-panel-head"><h3 id="review-history-title">最近审查</h3><div><button class="quiet-btn" id="review-export-btn" type="button">导出 JSON</button> <button class="quiet-btn" id="review-clear-btn" type="button">清空本项目历史</button> <button class="quiet-btn" id="review-compare-btn" type="button">对比最近两次</button> <span class="review-runtime" id="review-runtime-detail"></span></div></div>
+            <div class="review-panel-head review-history-head"><h3 id="review-history-title">本地检查历史</h3><div class="review-history-actions"><button class="button" id="review-report-open-btn" type="button" disabled>查看最近报告</button><details class="review-more-actions"><summary>更多操作</summary><div class="review-more-menu"><button class="quiet-btn" id="review-compare-btn" type="button">对比最近两次</button><button class="quiet-btn" id="review-export-btn" type="button">导出审查历史 JSON</button><button class="quiet-btn" id="review-clear-btn" type="button">清空全部审查历史</button></div></details><span class="review-runtime" id="review-runtime-detail"></span></div></div>
             <div class="review-history" id="review-history"><div class="review-empty">尚无历史记录。</div></div>
             <div class="review-history-compare" id="review-history-compare" hidden></div>
           </section>
         </section>
+        </section>
+
+        <section class="review-channel-panel" id="review-panel-skill" role="tabpanel" aria-labelledby="review-tab-skill" data-overview-content hidden>
+          <div class="review-panel-head review-history-head"><div><h2>Skill 审查报告</h2><p class="review-runtime">手动导入作为补录入口；未来可保留旧报告或导入独立运行的 Skill 结果。</p></div><div class="review-history-actions"><button class="button" id="skill-report-import-btn" type="button">导入已有报告</button><input id="skill-report-file" type="file" accept="application/json,.json" hidden></div></div>
+          <div class="skill-review-history-wrap"><p class="review-runtime">选择 Skill 生成的 review.json（schema 1.0）；报告仅保存在本机数据库，不会发送到云端。</p><div class="review-history" id="skill-review-history"><div class="review-empty">尚未导入 Skill 报告。</div></div></div>
+        </section>
       </div>
 
+      <details class="overview-secondary" data-overview-content>
+        <summary>项目运营概览与模型总结</summary>
+        <div class="overview-secondary-body">
       <div class="overview-grid" data-overview-content>
         <article class="overview-card">
           <h3>Case 状态分布</h3>
@@ -1338,6 +1448,8 @@
         </div>
         <div id="ov-drive-report-body"><div class="empty-data">尚未运行自动化驱动。</div></div>
       </div>
+        </div>
+      </details>
     </section>
 
     <section id="view-code-map" class="code-map-view" hidden aria-labelledby="code-map-title">
@@ -1359,6 +1471,8 @@
               <strong id="code-map-canvas-title" class="section-note">结构关系</strong>
               <input class="code-map-filter" id="code-map-filter" type="search" maxlength="120" placeholder="筛选路径或符号" aria-label="筛选代码地图节点">
               <label class="review-components"><input id="code-map-show-symbols" type="checkbox">显示符号</label>
+              <label class="review-components"><input id="code-map-show-unresolved" type="checkbox">显示待确认引用</label>
+              <label class="review-components" for="code-map-scope">关系范围</label><select class="code-map-filter" id="code-map-scope" aria-label="代码地图关系范围"><option value="all">全部节点</option><option value="1">所选节点一跳</option><option value="2">所选节点两跳</option></select>
               <button class="button" id="code-map-clear-selection" type="button" hidden>清除选择</button>
               <div class="code-map-view-controls" role="group" aria-label="代码地图画布视图">
                 <button class="icon-button" id="code-map-zoom-out" type="button" aria-label="缩小地图画布" data-tooltip="缩小"><i data-lucide="minus" aria-hidden="true">−</i></button>
@@ -1370,7 +1484,7 @@
             <span class="code-map-meta" id="code-map-meta">—</span>
           </div>
           <div class="code-map-stage" id="code-map-stage"><div class="code-map-empty">选择一个已监控项目后加载代码地图。</div></div>
-          <div class="code-map-legend"><span><i class="code-map-key directory"></i>目录</span><span><i class="code-map-key file"></i>文件</span><span><i class="code-map-key"></i>符号</span><span><i class="code-map-key pending"></i>未解析引用</span></div>
+          <div class="code-map-legend"><span><i class="code-map-key directory"></i>目录</span><span><i class="code-map-key file"></i>文件</span><span><i class="code-map-key"></i>符号</span><span><i class="code-map-key pending"></i>待确认引用（默认隐藏；解析器未能定位目标，不代表代码有错）</span><span><i class="code-map-edge-key imports"></i>导入关系</span><span><i class="code-map-edge-key declares"></i>声明关系</span><span>网格按节点类别排列；箭头指向关系目标</span></div>
         </section>
       </div>
     </section>
@@ -1483,6 +1597,7 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <dialog id="approval-dialog" aria-labelledby="dialog-title"><form method="dialog" class="dialog-body"><div class="eyebrow">人工审批</div><h2 id="dialog-title">确认决策</h2><p id="dialog-copy">确认后会签发并立即消费一次性审批授权。</p><div class="dialog-facts"><div class="dialog-fact"><span>动作</span><strong id="dialog-action">—</strong></div><div class="dialog-fact"><span>目标引用</span><strong class="mono" id="dialog-target">—</strong></div><div class="dialog-fact"><span>审批人</span><strong id="dialog-approver">—</strong></div></div><label class="dialog-secret" for="dialog-approval-key"><span>人工审批密钥</span><input id="dialog-approval-key" type="password" autocomplete="off" spellcheck="false"></label><div class="dialog-actions"><button class="button" id="dialog-cancel" type="button">返回</button><button class="button primary" id="dialog-confirm" type="button">确认并继续</button></div></form></dialog>
+  <dialog id="review-report-dialog" class="review-report-dialog" aria-labelledby="review-report-dialog-title"><div class="review-report-top"><h2 id="review-report-dialog-title">项目审查报告</h2><div><button class="quiet-btn" id="review-report-print-btn" type="button">导出为 PDF</button> <button class="quiet-btn" id="review-report-close-btn" type="button">关闭</button></div></div><article class="review-report-content" id="review-report-content"></article></dialog>
 
   <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js" defer></script>
   <script>
@@ -1547,6 +1662,9 @@
   let driveStartedAt = 0;          // Date.now() when the current drive started
   let reviewRun = null;            // latest first-class Review Run for the selected project
   let reviewRuns = [];             // short persisted history, newest first
+  let skillReviewReports = [];      // imported local Skill audit records for the selected project
+  let codeReviewReports = [];       // Code Defog model reviews, separate from Skill imports
+  let autoReviewState = { enabled: false, status: "disabled", quiet_seconds: 10800 };
   let reviewFeedback = new Map();  // per-project human disposition of stable findings
   let harnessInfo = null;          // read-only dispatch manifest from /api/harness
   let assistantMessages = [];      // browser-memory only; raw questions are never persisted
@@ -1562,6 +1680,7 @@
   let codeMapInterpreter = null;
   let codeMapBusy = false;
   let codeMapRequestId = 0;
+  let codeMapPendingLocation = null;
   let codeMapView = { zoom: 1.25, panX: 0, panY: 0, width: 0, height: 0, pointer: null };
   let codeMapRobotPosition = { x: 14, y: 14, pointer: null };
   let projectPickerBusy = false;
@@ -3054,11 +3173,27 @@
     const query = $("code-map-filter").value.trim().toLowerCase();
     const all = Array.isArray(codeGraph?.nodes) ? codeGraph.nodes : [];
     const showSymbols = $("code-map-show-symbols").checked;
-    return all.filter((node) => {
+    const showUnresolved = $("code-map-show-unresolved").checked;
+    const matching = all.filter((node) => {
       const matches = !query || [node.label, node.path, node.type, node.symbol_kind]
         .filter(Boolean).join(" ").toLowerCase().includes(query);
-      return matches && (showSymbols || query || node.type !== "symbol");
+      return matches && (showSymbols || query || node.type !== "symbol")
+        && (showUnresolved || (node.type !== "unresolved" && node.type !== "parse_error"));
     });
+    const depth = Number($("code-map-scope")?.value || 0);
+    if (!codeMapSelectedNodeId || !depth) return matching;
+    const allowed = new Set([codeMapSelectedNodeId]);
+    let frontier = new Set(allowed);
+    for (let level = 0; level < depth; level += 1) {
+      const next = new Set();
+      (codeGraph.edges || []).forEach((edge) => {
+        if (frontier.has(edge.source) && !allowed.has(edge.target)) next.add(edge.target);
+        if (frontier.has(edge.target) && !allowed.has(edge.source)) next.add(edge.source);
+      });
+      next.forEach((id) => allowed.add(id));
+      frontier = next;
+    }
+    return matching.filter((node) => allowed.has(node.id));
   }
   function renderCodeMap() {
     const stage = $("code-map-stage");
@@ -3121,15 +3256,17 @@
     visibleEdges.forEach((edge) => {
       const source = positions.get(edge.source); const target = positions.get(edge.target);
       if (!source || !target) return;
-      const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
       const isRelated = !selectedNodeId || edge.source === selectedNodeId || edge.target === selectedNodeId;
-      line.setAttribute("class", `code-map-edge ${edge.evidence === "unresolved" ? "unresolved" : ""}${isRelated ? " is-related" : ""}`);
-      line.setAttribute("x1", source.x); line.setAttribute("y1", source.y); line.setAttribute("x2", target.x); line.setAttribute("y2", target.y);
-      line.setAttribute("marker-end", "url(#code-map-arrow)");
-      line.style.color = edge.evidence === "unresolved" ? "var(--yellow)" : "var(--line-strong)";
+      const relation = String(edge.relation || "").replace(/[^a-z0-9_-]/gi, "");
+      const direction = selectedNodeId && edge.source === selectedNodeId ? " is-outgoing" : selectedNodeId && edge.target === selectedNodeId ? " is-incoming" : "";
+      path.setAttribute("class", `code-map-edge relation-${relation}${edge.evidence === "unresolved" ? " unresolved" : ""}${isRelated ? " is-related" : ""}${direction}`);
+      path.setAttribute("d", `M ${source.x} ${source.y} L ${target.x} ${target.y}`);
+      path.setAttribute("marker-end", "url(#code-map-arrow)");
+      path.style.color = edge.evidence === "unresolved" ? "var(--yellow)" : edge.relation === "imports" ? "var(--blue)" : edge.relation === "declares" ? "var(--green)" : "var(--line-strong)";
       const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
       title.textContent = `${edge.relation} · ${codeMapEvidenceLabel(edge.evidence)}${edge.line ? ` · ${edge.line} 行` : ""}`;
-      line.append(title); scene.append(line);
+      path.append(title); scene.append(path);
     });
     ordered.forEach((node) => {
       const position = positions.get(node.id); if (!position) return;
@@ -3157,7 +3294,14 @@
     if (viewportChanged) resetCodeMapViewport(width, height);
     else updateCodeMapViewport();
     renderCodeMapRobot();
-    $("code-map-meta").textContent = `${visibleNodes.length}/${codeGraph.counts?.nodes || 0} 节点 · ${visibleEdges.length} 关系`;
+    const totalNodes = codeGraph.counts?.nodes || 0;
+    const totalEdges = codeGraph.counts?.edges || 0;
+    const totalUnresolved = (codeGraph.nodes || []).filter((node) => node.type === "unresolved" || node.type === "parse_error").length;
+    const scopeLabel = $("code-map-scope")?.value === "1" ? " · 一跳视图" : $("code-map-scope")?.value === "2" ? " · 两跳视图" : "";
+    const outgoing = selectedNodeId ? (codeGraph.edges || []).filter((edge) => edge.source === selectedNodeId).length : 0;
+    const incoming = selectedNodeId ? (codeGraph.edges || []).filter((edge) => edge.target === selectedNodeId).length : 0;
+    const directionLabel = selectedNodeId ? ` · 它指向 ${outgoing} 个节点 · 有 ${incoming} 个节点指向它` : "";
+    $("code-map-meta").textContent = `展示 ${visibleNodes.length}/${totalNodes} 节点 · ${visibleEdges.length}/${totalEdges} 关系 · ${totalUnresolved} 个待确认引用${scopeLabel}${directionLabel}`;
   }
   async function loadCodeMapDossier() {
     const node = codeMapNodeById(codeMapSelectedNodeId);
@@ -3187,20 +3331,20 @@
       renderCodeMapRobot();
     }
   }
-  async function selectCodeMapNode(nodeId) {
+  async function selectCodeMapNode(nodeId, interpret = true) {
     const node = codeMapNodeById(nodeId);
     if (!node) return;
     codeMapRequestId += 1;
     codeMapSelectedNodeId = nodeId; codeMapDossier = null; codeMapInterpreter = null; codeMapBusy = false;
     renderCodeMap();
     requestAnimationFrame(() => $("code-map-stage")?.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.focus({ preventScroll: true }));
-    if (node.type !== "file" && node.type !== "symbol") return;
+    if (!interpret || (node.type !== "file" && node.type !== "symbol")) return;
     // Node clicks send only structure metadata and one-hop relationships to the LLM.
     await loadCodeMapDossier();
   }
   async function loadCodeMap(force = false, epoch = dataEpoch) {
     if (!selectedProject) { resetCodeMap(); return; }
-    if (!force && codeGraph && codeGraphWorkspace === selectedProject.workspace) { renderCodeMap(); return; }
+    if (!force && codeGraph && codeGraphWorkspace === selectedProject.workspace) { renderCodeMap(); focusPendingCodeMapLocation(); return; }
     const workspace = selectedProject.workspace; clearCodeMapSelection(); codeGraph = null; codeGraphWorkspace = workspace;
     $("code-map-status").textContent = "加载结构关系…"; renderCodeMap();
     try {
@@ -3211,6 +3355,7 @@
       $("code-map-status").textContent = codeGraph?.truncated ? "已加载（节点预算已截断）" : "已加载确定性结构";
       $("code-map-meta").textContent = `${counts.nodes || 0} 节点 · ${counts.edges || 0} 关系`;
       renderCodeMap();
+      focusPendingCodeMapLocation();
     } catch (error) {
       if (epoch !== dataEpoch) return;
       codeGraph = null; $("code-map-status").textContent = "地图不可用";
@@ -3243,6 +3388,8 @@
   }
   $("code-map-filter").addEventListener("input", handleCodeMapFilter);
   $("code-map-show-symbols").addEventListener("change", handleCodeMapFilter);
+  $("code-map-show-unresolved").addEventListener("change", handleCodeMapFilter);
+  $("code-map-scope").addEventListener("change", handleCodeMapFilter);
   $("code-map-clear-selection").addEventListener("click", () => {
     clearCodeMapSelection();
     renderCodeMap();
@@ -3472,6 +3619,24 @@
     const clean = (value, limit) => String(value).replace(/\s+/g, " ").trim().slice(0, limit);
     return JSON.stringify(["text-v1", clean(label, 120), clean(detail, 1200)]);
   }
+  function focusPendingCodeMapLocation() {
+    const pending = codeMapPendingLocation;
+    if (!pending || !codeGraph) return;
+    codeMapPendingLocation = null;
+    const normalize = (value) => String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+    const candidates = (codeGraph.nodes || []).filter((node) => normalize(node.path) === normalize(pending.path));
+    const target = candidates.find((node) => node.type === "symbol" && Number(node.line_start) <= pending.line && Number(node.line_end || node.line_start) >= pending.line)
+      || candidates.find((node) => node.type === "file")
+      || candidates[0];
+    if (!target) {
+      toast(`代码地图中未找到 ${pending.path}:${pending.line}，可能尚未被当前解析器收录`);
+      return;
+    }
+    $("code-map-show-unresolved").checked = true;
+    $("code-map-show-symbols").checked = true;
+    $("code-map-scope").value = "1";
+    selectCodeMapNode(target.id, false);
+  }
   function codeFindingIdentity(file, line, kind, evidence) {
     const clean = (value, limit) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
     return JSON.stringify(["code-v1", clean(file, 500), Number(line) || 0, clean(kind, 100), clean(evidence, 1000)]);
@@ -3482,6 +3647,17 @@
     const content = create("span", "", detail);
     content.style.flex = "1 1 220px";
     row.append(content);
+    const sourceLocation = String(detail).match(/^(.+?):(\d+)\s/);
+    if (sourceLocation) {
+      const jump = create("button", "review-finding-save", "在代码地图定位");
+      jump.type = "button";
+      jump.addEventListener("click", () => {
+        codeMapPendingLocation = { path: sourceLocation[1], line: Number(sourceLocation[2]) };
+        if (currentView === "code-map") refreshActiveView().catch((error) => toast(error.message || "代码地图加载失败"));
+        else location.hash = "#/code-map";
+      });
+      row.append(jump);
+    }
     const saved = reviewFeedback.get(identity);
     const select = document.createElement("select");
     select.className = "review-finding-status";
@@ -3536,7 +3712,7 @@
     }
     const gaps = Array.isArray(scan.error_handling_gaps) ? scan.error_handling_gaps : [];
     if (scan.scanned_files != null) add("静态", `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。`);
-    gaps.slice(0, 12).forEach((gap) => {
+    gaps.slice(0, 30).forEach((gap) => {
       const detail = `${gap.file}:${gap.line} ${gap.snippet || gap.kind || "错误处理风险"}`;
       add("静态风险", detail, codeFindingIdentity(gap.file, gap.line, gap.kind || "static-risk", gap.snippet || ""));
     });
@@ -3554,7 +3730,39 @@
   }
   function renderReviewFindingsInto(target, run) {
     target.replaceChildren();
-    reviewFindingEntries(run).forEach(({ label, detail, identity }) => appendReviewFinding(target, label, detail, identity));
+    const entries = reviewFindingEntries(run);
+    const staticSummary = entries.find((item) => item.label === "静态");
+    const staticRisks = entries.filter((item) => item.label === "静态风险");
+    const otherFindings = entries.filter((item) => item.label !== "静态风险" && item.label !== "静态");
+    otherFindings.forEach(({ label, detail, identity }) => appendReviewFinding(target, label, detail, identity));
+    if (staticSummary) {
+      const summary = create("div", "review-static-summary");
+      summary.append(create("span", "finding-label", "静态扫描"));
+      summary.append(create("span", "", staticSummary.detail));
+      target.append(summary);
+    }
+    if (staticRisks.length) {
+      const risks = create("details", "review-risk-details");
+      const groups = new Map();
+      staticRisks.forEach((item) => {
+        const match = item.detail.match(/^(.*):(\d+)\s+(.*)$/);
+        const file = match?.[1] || "其他文件";
+        if (!groups.has(file)) groups.set(file, []);
+        groups.get(file).push(item);
+      });
+      risks.append(create("summary", "", `静态风险线索 · ${staticRisks.length} 条 · ${groups.size} 个文件（待人工判断）`));
+      const fileList = create("div", "review-risk-files");
+      groups.forEach((items, file) => {
+        const group = create("details", "review-risk-file");
+        group.append(create("summary", "", `${file} · ${items.length} 条`));
+        const rows = create("div", "review-risk-items");
+        items.forEach(({ label, detail, identity }) => appendReviewFinding(rows, label, detail, identity));
+        group.append(rows);
+        fileList.append(group);
+      });
+      risks.append(fileList);
+      target.append(risks);
+    }
     if (!target.childElementCount) target.append(create("div", "review-empty", "审查完成后将在这里汇总确定性发现。"));
   }
   function renderReviewFindings(run) { renderReviewFindingsInto($("review-findings"), run); }
@@ -3615,6 +3823,130 @@
     const compare = $("review-compare-btn");
     if (compare) compare.disabled = runs.filter((run) => run.status === "complete").length < 2;
   }
+  function renderSkillReviewHistory(reports = skillReviewReports) {
+    const target = $("skill-review-history");
+    if (!target) return;
+    target.replaceChildren();
+    if (!reports.length) {
+      target.append(create("div", "review-empty", "尚未导入 Skill 报告。"));
+      return;
+    }
+    reports.slice(0, 8).forEach((report) => {
+      const row = create("button", "review-history-row");
+      row.type = "button";
+      row.title = "在网页内查看此 Skill 审查报告";
+      row.append(create("span", "review-history-id", report.repository_name || "Skill 审查报告"));
+      row.append(create("span", "review-history-meta", `${report.review_mode === "repository_audit" ? "全仓审查" : "改动审查"} · ${relativeTime(report.imported_at)}`));
+      row.append(create("span", "review-history-meta", `版本 ${report.revision_head || "未知"}`));
+      row.addEventListener("click", () => openSkillReviewReport(report.report_id));
+      target.append(row);
+    });
+  }
+  function renderAutoReviewState(state = autoReviewState) {
+    autoReviewState = { ...autoReviewState, ...(state || {}) };
+    const checkbox = $("auto-review-enabled");
+    const badge = $("auto-review-badge");
+    const help = $("auto-review-help");
+    if (!checkbox || !badge || !help) return;
+    checkbox.checked = !!autoReviewState.enabled;
+    const metadata = {
+      disabled: ["自动审查关闭", "neutral"],
+      watching: ["等待改动", "info"],
+      waiting: ["等待 3 小时安静期", "warning"],
+      running: ["正在审查", "info"],
+      complete: ["最近审查完成", "success"],
+      error: ["最近审查失败", "danger"],
+    };
+    const [label, tone] = metadata[autoReviewState.status] || metadata.disabled;
+    badge.textContent = autoReviewState.enabled ? label : "自动审查关闭";
+    badge.dataset.tone = autoReviewState.enabled ? tone : "neutral";
+    const quietSeconds = Math.max(0, Number(autoReviewState.quiet_seconds) || 10800);
+    if (autoReviewState.error && autoReviewState.status === "waiting" && autoReviewState.pending_files?.length) {
+      const remain = Math.max(0, quietSeconds - (Date.now() / 1000 - Number(autoReviewState.last_change || 0)));
+      const hours = Math.floor(remain / 3600);
+      const minutes = Math.ceil((remain % 3600) / 60);
+      help.textContent = `上次自动审查失败；${autoReviewState.pending_files.length} 个变更文件已保留，将在安静等待 ${hours} 小时 ${minutes} 分钟后重试。原因：${autoReviewState.error}`;
+    }
+    else if (autoReviewState.error) help.textContent = `最近一次审查失败：${autoReviewState.error}`;
+    else if (!autoReviewState.enabled) help.textContent = "自动审查默认关闭。启用后，本地变更连续 3 小时没有新改动时，会对累计变更做只读审查。";
+    else if (autoReviewState.status === "waiting" && autoReviewState.last_change) {
+      const remain = Math.max(0, quietSeconds - (Date.now() / 1000 - Number(autoReviewState.last_change)));
+      const hours = Math.floor(remain / 3600);
+      const minutes = Math.ceil((remain % 3600) / 60);
+      help.textContent = `已发现 ${autoReviewState.pending_files?.length || 0} 个变更文件；预计还需等待 ${hours} 小时 ${minutes} 分钟无新改动后开始审查。`;
+    } else if (autoReviewState.status === "running") help.textContent = "正在只读审查本地变更；不会自动修改代码或运行项目命令。";
+    else help.textContent = "自动审查已启用。每次新改动都会重置 3 小时安静计时；连续修改会合并成一份报告。";
+    const provider = llmProviderById(llmProviderConfig?.active_provider);
+    const providerNote = $("auto-review-provider-note");
+    if (providerNote && provider) {
+      providerNote.textContent = provider.id === "ollama"
+        ? `数据去向：本机 · ${provider.name} / ${provider.model}。源码仅发送到本机模型端点。`
+        : `数据去向：远程端点 · ${provider.name} / ${provider.model}。审查会发送选中变更文件文本；更换模型或端点后自动审查会暂停，需重新确认。`;
+    }
+    const grid = $("auto-review-runtime-grid");
+    if (grid) {
+      grid.replaceChildren();
+      const latest = codeReviewReports[0];
+      const lastChange = Number(autoReviewState.last_change || 0);
+      const dateText = (value) => value ? new Date(value).toLocaleString() : "暂无";
+      const lastChangeText = lastChange ? new Date(lastChange * 1000).toLocaleString() : "暂无待处理变更";
+      const reportText = latest
+        ? `${latest.status === "complete" ? "完成" : latest.status === "running" ? "运行中" : "失败"} · ${dateText(latest.finished_at || latest.started_at)}${latest.provider ? ` · ${latest.provider}${latest.model ? ` / ${latest.model}` : ""}` : ""}`
+        : "尚无自动审查任务";
+      const errorText = autoReviewState.error || latest?.error || "无";
+      const entries = [["监听状态", autoReviewState.enabled ? (autoReviewState.status === "watching" ? "已启用，等待文件变化" : label) : "已关闭"], ["最近变更", lastChangeText], ["待审查文件", `${autoReviewState.pending_files?.length || 0} 个`], ["最近任务", reportText], ["最近错误", errorText]];
+      entries.forEach(([title, value]) => {
+        const item = create("div", "auto-review-runtime-item");
+        item.append(create("span", "auto-review-runtime-label", title), create("span", "auto-review-runtime-value", value));
+        grid.append(item);
+      });
+    }
+    const pending = Array.isArray(autoReviewState.pending_files) ? autoReviewState.pending_files : [];
+    const pendingDetails = $("auto-review-pending");
+    const pendingSummary = $("auto-review-pending-summary");
+    const pendingList = $("auto-review-pending-list");
+    if (pendingDetails && pendingSummary && pendingList) {
+      pendingDetails.hidden = pending.length === 0;
+      pendingSummary.textContent = `查看待审查文件（${pending.length}）`;
+      pendingList.replaceChildren();
+      pending.slice(0, 200).forEach((path) => pendingList.append(create("li", "", path)));
+    }
+  }
+  function renderAutoReviewHistory(reports = codeReviewReports) {
+    const target = $("code-review-history");
+    if (!target) return;
+    target.replaceChildren();
+    if (!reports.length) {
+      target.append(create("div", "review-empty", "尚无 Code Defog 自动审查记录。"));
+      return;
+    }
+    reports.slice(0, 10).forEach((item) => {
+      const row = create("button", "review-history-row");
+      row.type = "button";
+      row.title = item.status === "complete" ? "查看 Code Defog 自动审查报告" : item.error || "查看任务状态";
+      const state = item.status === "complete" ? "完成" : item.status === "running" ? "运行中" : "失败";
+      row.append(create("span", "review-history-id", `${state} · ${item.trigger === "automatic" ? "自动" : "手动"}`));
+      row.append(create("span", "review-history-meta", `${relativeTime(item.started_at)} · ${item.changed_paths?.length || 0} 个文件`));
+      row.append(create("span", "review-history-meta", `${item.provider || "未完成"}${item.model ? ` / ${item.model}` : ""}`));
+      if (item.revision_head) row.append(create("span", "review-history-meta", `提交 ${String(item.revision_head).slice(0, 12)}`));
+      row.addEventListener("click", () => openCodeReviewReport(item.run_id));
+      target.append(row);
+    });
+  }
+  async function openCodeReviewReport(runId) {
+    if (!selectedProject || !runId) return;
+    try {
+      const workspace = encodeURIComponent(selectedProject.workspace);
+      const run = encodeURIComponent(runId);
+      const payload = await api(`/api/projects/${workspace}/code-reviews/${run}`);
+      if (payload.status !== "complete" || !payload.report) {
+        toast(payload.error || "审查任务尚未生成报告");
+        return;
+      }
+      renderSkillReviewReport({ ...payload, report: payload.report }, "Code Defog 自动审查");
+      $("review-report-dialog").showModal();
+    } catch (error) { toast(`读取自动审查报告失败：${error.message}`); }
+  }
   function compareLatestReviews() {
     const panel = $("review-history-compare");
     const completed = reviewRuns.filter((run) => run.status === "complete");
@@ -3652,9 +3984,86 @@
     if (!panel.hidden) { panel.hidden = true; return; }
     compareLatestReviews();
   });
+  const reviewChannelTabs = [
+    ["auto", $("review-tab-auto"), $("review-panel-auto")],
+    ["local", $("review-tab-local"), $("review-panel-local")],
+    ["skill", $("review-tab-skill"), $("review-panel-skill")],
+  ];
+  function selectReviewChannel(name, focusTab = false) {
+    for (const [key, tab, panel] of reviewChannelTabs) {
+      const selected = key === name;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      panel.hidden = !selected;
+      if (selected && focusTab) tab.focus();
+    }
+  }
+  reviewChannelTabs.forEach(([name, tab], index) => {
+    tab.addEventListener("click", () => selectReviewChannel(name));
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? reviewChannelTabs.length - 1
+        : (index + (event.key === "ArrowRight" ? 1 : -1) + reviewChannelTabs.length) % reviewChannelTabs.length;
+      selectReviewChannel(reviewChannelTabs[next][0], true);
+    });
+  });
+  async function currentLLMProvider() {
+    if (!llmProviderConfig) await loadLLMProviderConfig();
+    return llmProviderById(llmProviderConfig?.active_provider);
+  }
+  function providerIsLocal(provider) {
+    if (!provider) return false;
+    try { return ["localhost", "127.0.0.1", "::1"].includes(new URL(provider.base_url).hostname); }
+    catch { return provider.id === "ollama"; }
+  }
+  $("auto-review-enabled").addEventListener("change", async (event) => {
+    const checkbox = event.currentTarget;
+    if (!selectedProject) { checkbox.checked = false; toast("请先选择一个监控项目"); return; }
+    const enabled = checkbox.checked;
+    let provider;
+    if (enabled) {
+      try { provider = await currentLLMProvider(); }
+      catch (error) { checkbox.checked = false; toast(`无法读取模型设置：${error.message}`); return; }
+      if (!provider?.configured) { checkbox.checked = false; toast("请先配置可用的模型提供方"); return; }
+      const destination = providerIsLocal(provider) ? "本机模型端点" : `${provider.name}（${provider.base_url}）`;
+      const message = `启用后，项目变更会在连续 3 小时无新改动后自动发送给 ${destination} 进行只读审查。变更文件文本会离开本机（本机模型除外）；系统不会自动修改代码或运行项目命令。确定启用？`;
+      if (!window.confirm(message)) { checkbox.checked = false; return; }
+    }
+    checkbox.disabled = true;
+    try {
+      await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/ai-review-settings`, {
+        method: "POST", body: { enabled },
+      });
+      await loadReviewHistory(dataEpoch);
+      toast(enabled ? "已启用该项目的 3 小时安静窗口自动审查" : "已关闭该项目的自动审查");
+    } catch (error) {
+      checkbox.checked = !enabled;
+      toast(`更新自动审查设置失败：${error.message}`);
+    } finally { checkbox.disabled = false; }
+  });
+  $("ai-review-now-btn").addEventListener("click", async () => {
+    if (!selectedProject) { toast("请先选择一个监控项目"); return; }
+    let provider;
+    try { provider = await currentLLMProvider(); }
+    catch (error) { toast(`无法读取模型设置：${error.message}`); return; }
+    if (!provider?.configured) { toast("请先配置可用的模型提供方"); return; }
+    const destination = providerIsLocal(provider) ? "本机模型端点" : `${provider.name}（${provider.base_url}）`;
+    if (!window.confirm(`立即审查当前 Git 变更。变更文件文本将发送给 ${destination}；系统不会运行测试或修改文件。继续？`)) return;
+    const button = $("ai-review-now-btn");
+    button.disabled = true;
+    try {
+      await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/code-reviews`, { method: "POST", body: {} });
+      await loadReviewHistory(dataEpoch);
+      toast("已开始 Code Defog AI 改动审查");
+    } catch (error) { toast(error.message); }
+    finally { button.disabled = false; }
+  });
   function renderReviewRun(run) {
     if (!run) return;
     reviewRun = run;
+    const reportButton = $("review-report-open-btn");
+    if (reportButton) reportButton.disabled = false;
     const git = run.browse?.git || {};
     const commit = git.head_full || git.head;
     const revision = git.branch ? ` · ${git.branch}${commit ? `@${String(commit).slice(0, 12)}` : ""}` : "";
@@ -3666,6 +4075,192 @@
     renderReviewCommandState();
     if (run.browse || run.llm) renderDriveRun(run);
   }
+  function appendReviewReportSection(target, title) {
+    const section = create("section", "report-section");
+    section.append(create("h3", "", title));
+    target.append(section);
+    return section;
+  }
+  function appendReviewReportTable(section, headers, rows) {
+    const table = create("table", "report-table");
+    const head = document.createElement("thead");
+    const header = document.createElement("tr");
+    headers.forEach((label) => header.append(create("th", "", label)));
+    head.append(header);
+    const body = document.createElement("tbody");
+    rows.forEach((values) => {
+      const row = document.createElement("tr");
+      values.forEach((value) => row.append(create("td", "", value == null ? "—" : String(value))));
+      body.append(row);
+    });
+    table.append(head, body);
+    section.append(table);
+  }
+  function renderReviewReport(run) {
+    const target = $("review-report-content");
+    if (!target || !run) return;
+    $("review-report-dialog-title").textContent = "项目自动审查报告";
+    target.replaceChildren();
+    const git = run.browse?.git || {};
+    const browse = run.browse || {};
+    const test = browse.test || {};
+    const scan = browse.static_scan || {};
+    const summary = run.llm?.summary || {};
+    const project = selectedProject?.name || selectedProject?.workspace || "本机项目";
+    target.append(create("h1", "report-title", `${project} · 审查报告`));
+    const fullCommit = git.head_full || git.head || "提交版本未知";
+    const revision = git.branch ? `${git.branch}@${fullCommit}` : fullCommit;
+    target.append(create("p", "report-subtitle", `${shortId(run.run_id)} · ${run.status === "complete" ? "审查完成" : run.status === "error" ? "审查失败" : "运行中"} · ${run.started_at || "时间未知"} · ${revision}`));
+    const conclusion = create("div", "report-conclusion");
+    conclusion.append(create("strong", "", "审查结论："));
+    conclusion.append(document.createTextNode(summary.overall_status || (run.status === "error" ? run.error || "审查未能完成。" : run.status === "running" ? "审查仍在运行，以下为当前已保存的结果。" : "已完成确定性扫描；当前没有可用的总结文本。")));
+    target.append(conclusion);
+
+    const scopeSection = appendReviewReportSection(target, "审查范围");
+    const scope = run.scope || {};
+    const components = scope.components || {};
+    const enabled = Object.entries(components).filter(([, active]) => active).map(([name]) => ({ structure: "结构", tests: "测试", static: "静态扫描", git: "Git" }[name] || name));
+    appendReviewReportTable(scopeSection, ["模式", "检查项目", "分支 / 版本"], [[scope.mode === "fast" ? "快速" : "完整", enabled.join("、") || "未记录", revision]]);
+
+    const scopeComponents = scope.components || {};
+    const tasksByKey = new Map((run.tasks || []).map((task) => [task.task_key, task]));
+    const checks = [];
+    if (scopeComponents.tests === false) {
+      checks.push(["项目测试", "检查项未启用", "超出本次审查范围", "—", ""]);
+    } else if (test.detected) {
+      const result = !test.ran ? (test.runner_unavailable ? "运行器不可用，未执行" : "已识别但未执行") : test.timed_out ? "超时" : test.execution_error ? "无法启动" : test.passed ? "通过" : "失败";
+      checks.push(["项目测试", test.command || test.runner || "检测到测试", result, test.exit_code == null ? "未提供" : String(test.exit_code), test.output_summary || ""]);
+    } else checks.push(["项目测试", "未检测到测试入口", "未运行", "—", ""]);
+    const staticTaskStatus = tasksByKey.get("static_scan")?.status;
+    const staticStatus = scopeComponents.static === false ? "超出本次审查范围"
+      : scan.error || staticTaskStatus === "error" ? "失败"
+      : staticTaskStatus === "running" ? "进行中"
+      : staticTaskStatus === "pending" ? "尚未开始"
+      : staticTaskStatus === "skipped" ? "未运行"
+      : staticTaskStatus === "complete" ? "已完成"
+      : run.status === "running" ? "未完成"
+      : "无扫描结果";
+    const staticExtent = scopeComponents.static === false ? "未启用静态扫描" : `${scan.scanned_files ?? 0} 个文件`;
+    const staticSummary = scopeComponents.static === false ? ""
+      : `${scan.error_handling_gaps?.length || 0} 处错误处理线索；TODO ${scan.todo_count ?? 0}，FIXME ${scan.fixme_count ?? 0}`;
+    checks.push(["静态扫描", staticExtent, staticStatus, "—", staticSummary]);
+    if (run.error) checks.push(["审查运行", "后台任务", "失败", "—", run.error]);
+    const checkSection = appendReviewReportSection(target, "检查结果");
+    appendReviewReportTable(checkSection, ["检查", "范围 / 命令", "状态", "退出码", "观察"], checks);
+
+    const taskSection = appendReviewReportSection(target, "审查阶段");
+    const tasks = (run.tasks || []).map((task) => [task.title || task.task_key, reviewStatusLabel(task.status), task.failure_reason || task.output?.note || task.output?.status || "—"]);
+    if (tasks.length) appendReviewReportTable(taskSection, ["阶段", "状态", "说明"], tasks);
+    else taskSection.append(create("p", "report-note", "此记录没有阶段明细。"));
+
+    const findingsSection = appendReviewReportSection(target, `发现与待判断线索（${reviewFindingEntries(run).length}）`);
+    findingsSection.append(create("p", "report-note", "下列静态风险和改动提示是审查线索，不自动等同于已确认缺陷；请结合代码与测试验证。LLM 总结也不属于执行证据。"));
+    const findings = reviewFindingEntries(run);
+    if (!findings.length) findingsSection.append(create("p", "report-note", "本次没有记录发现。"));
+    findings.forEach((item) => {
+      const row = create("article", "report-finding");
+      row.append(create("strong", "", `${item.label} · ${item.detail.slice(0, 180)}`));
+      if (item.detail.length > 180) row.append(create("p", "", item.detail));
+      findingsSection.append(row);
+    });
+    if (summary.risks?.length) {
+      const risks = appendReviewReportSection(target, "AI 总结的风险（待确认）");
+      risks.append(create("p", "report-note", "此内容来自模型总结，不是测试或代码执行证据。"));
+      summary.risks.forEach((risk) => risks.append(create("article", "report-finding", risk)));
+    }
+    if (summary.next_steps?.length) {
+      const next = appendReviewReportSection(target, "建议下一步");
+      summary.next_steps.forEach((step, index) => next.append(create("article", "report-finding", `${index + 1}. ${step}`)));
+    }
+  }
+  async function openSkillReviewReport(reportId) {
+    if (!selectedProject || !reportId) return;
+    try {
+      const workspace = encodeURIComponent(selectedProject.workspace);
+      const report = encodeURIComponent(reportId);
+      const payload = await api(`/api/projects/${workspace}/skill-reports/${report}`);
+      renderSkillReviewReport(payload);
+      $("review-report-dialog").showModal();
+    } catch (error) { toast(`读取 Skill 报告失败：${error.message}`); }
+  }
+  function renderSkillReviewReport(record, sourceLabel = "Skill") {
+    const target = $("review-report-content");
+    const report = record?.report;
+    if (!target || !report?.review) return;
+    const review = report.review;
+    const repository = review.repository || {};
+    const revision = review.revision || {};
+    const findings = Array.isArray(report.findings) ? report.findings : [];
+    const confirmed = findings.filter((item) => item.status === "confirmed").length;
+    const unverified = findings.filter((item) => item.status === "unverified").length;
+    const limited = findings.filter((item) => item.status === "environment_limited").length;
+    const labels = {
+      behavior_defect: "行为缺陷", content_rule_inconsistency: "内容/规则不一致",
+      factual_content_error: "事实性错误", regression_check_failure: "回归检查失败",
+      maintenance_gap: "维护缺口", unverified_lead: "待核实", environment_issue: "环境限制",
+    };
+    const statuses = { passed: "通过", failed: "失败", environment_limited: "环境受限", not_run: "未运行" };
+    const findingStatuses = { confirmed: "已确认", unverified: "待核实", environment_limited: "环境受限" };
+    target.replaceChildren();
+    $("review-report-dialog-title").textContent = `${sourceLabel}报告`;
+    target.append(create("h1", "report-title", `${repository.name || "项目"} · 代码审查报告`));
+    target.append(create("p", "report-subtitle", `${review.mode === "repository_audit" ? "全仓审查" : "改动审查"} · 版本 ${revision.head || "未知"} · ${review.created_at || "时间未知"}${repository.url ? ` · ${repository.url}` : ""}`));
+    const conclusion = create("div", "report-conclusion");
+    conclusion.textContent = confirmed
+      ? `确认 ${confirmed} 项问题，另有 ${unverified} 项待核实、${limited} 项受环境限制。`
+      : `本次未确认缺陷（不等于证明没有缺陷）；另有 ${unverified} 项待核实、${limited} 项受环境限制。`;
+    target.append(conclusion);
+    target.append(create("p", "report-note", "只有具备独立复现或可核验静态证据的问题才应标为已确认；模型线索默认待核实，未运行的测试不能算作通过。"));
+
+    const scopeSection = appendReviewReportSection(target, "审查范围");
+    scopeSection.append(create("p", "report-note", review.scope_summary || "未记录范围说明。"));
+    const notes = Array.isArray(review.coverage_notes) ? review.coverage_notes : [];
+    notes.forEach((note) => scopeSection.append(create("p", "report-note", note)));
+
+    const checkSection = appendReviewReportSection(target, "检查结果");
+    const checks = Array.isArray(report.checks) ? report.checks : [];
+    appendReviewReportTable(checkSection, ["命令", "状态", "退出码", "结果"], checks.map((check) => [
+      check.command || "—", statuses[check.status] || check.status || "—",
+      check.exit_code == null ? "—" : String(check.exit_code), check.summary || "",
+    ]));
+
+    const findingsSection = appendReviewReportSection(target, `问题明细（${findings.length}）`);
+    if (!findings.length) findingsSection.append(create("p", "report-note", "本次没有记录问题或待核实线索。"));
+    findings.forEach((finding) => {
+      const card = create("article", "report-finding");
+      const status = findingStatuses[finding.status] || finding.status || "状态未知";
+      card.append(create("strong", "", `[${finding.severity || "未评级"}] ${labels[finding.category] || finding.category || "问题"} · ${status} · ${finding.title || "未命名问题"}`));
+      const locations = (finding.evidence || []).map((evidence) => {
+        if (evidence.path) return evidence.line ? `${evidence.path}:${evidence.line}` : evidence.path;
+        return evidence.url || "位置未提供";
+      });
+      if (locations.length) card.append(create("p", "", `位置：${locations.join("；")}`));
+      for (const [label, key] of [["预期", "expected"], ["实际", "actual"], ["影响", "impact"], ["建议", "suggested_action"]]) {
+        if (finding[key]) card.append(create("p", "", `${label}：${finding[key]}`));
+      }
+      (finding.evidence || []).forEach((evidence) => {
+        if (evidence.observation) card.append(create("p", "", `证据：${evidence.observation}`));
+      });
+      if (finding.reproduction?.command) card.append(create("p", "", `复现命令：${finding.reproduction.command}`));
+      if (finding.reproduction?.observed) card.append(create("p", "", `观察：${finding.reproduction.observed}`));
+      findingsSection.append(card);
+    });
+    target.append(create("p", "report-note", `导入时间：${record.imported_at || "未知"} · 报告按 Skill 审查记录原文展示，模型线索与已确认问题保持区分。`));
+  }
+  $("review-report-open-btn").addEventListener("click", () => {
+    if (!reviewRun) { toast("当前项目还没有审查记录"); return; }
+    renderReviewReport(reviewRun);
+    $("review-report-dialog").showModal();
+  });
+  $("review-report-close-btn").addEventListener("click", () => $("review-report-dialog").close());
+  $("review-report-print-btn").addEventListener("click", () => {
+    document.body.classList.add("review-report-print");
+    window.print();
+    document.body.classList.remove("review-report-print");
+  });
+  $("review-report-dialog").addEventListener("click", (event) => {
+    if (event.target === $("review-report-dialog")) $("review-report-dialog").close();
+  });
   function setReviewStartBusy(busy) {
     reviewStartBusy = busy;
     const btn = $("drive-btn");
@@ -3738,6 +4333,10 @@
   let taskBurstTimer = null;
   function handleEvent(event) {
     if (event.type === "review_status" || event.type === "drive_status") { onDriveStatus(event); return; }
+    if (event.type === "code_review_updated" || event.type === "auto_review_status") {
+      if (selectedProject && event.workspace === selectedProject.workspace) loadReviewHistory();
+      return;
+    }
     if (event.type === "review_task_status") {
       const workspace = event.workspace || event.run?.workspace;
       if (workspace && (!selectedProject || workspace !== selectedProject.workspace)) return;
@@ -3858,13 +4457,41 @@
       const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`);
       if (epoch !== dataEpoch) return;
       reviewRuns = payload.runs || [];
+      skillReviewReports = payload.skill_reports || [];
+      codeReviewReports = payload.code_reports || [];
+      autoReviewState = payload.auto_review || autoReviewState;
       reviewFeedback = new Map((payload.feedback || []).map((item) => [item.identity || reviewFindingIdentity(item.label, item.detail), item]));
       renderReviewHistory(reviewRuns);
+      renderSkillReviewHistory(skillReviewReports);
+      renderAutoReviewHistory(codeReviewReports);
+      renderAutoReviewState(autoReviewState);
       if (reviewRun) renderReviewFindings(reviewRun);
     } catch (error) {
-      if (epoch === dataEpoch) { reviewRuns = []; reviewFeedback = new Map(); renderReviewHistory([]); }
+      if (epoch === dataEpoch) { reviewRuns = []; skillReviewReports = []; codeReviewReports = []; reviewFeedback = new Map(); renderReviewHistory([]); renderSkillReviewHistory([]); renderAutoReviewHistory([]); }
     }
   }
+  $("skill-report-import-btn").addEventListener("click", () => {
+    if (!selectedProject) { toast("请先选择一个监控项目"); return; }
+    $("skill-report-file").click();
+  });
+  $("skill-report-file").addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 950_000) { toast("报告文件过大，请限制在 950 KB 以内"); return; }
+    if (!selectedProject) { toast("请先选择一个监控项目"); return; }
+    const workspace = selectedProject.workspace;
+    const epoch = dataEpoch;
+    try {
+      const report = JSON.parse(await file.text());
+      const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/skill-reports`, {
+        method: "POST", body: { report },
+      });
+      if (epoch !== dataEpoch || selectedProject?.workspace !== workspace) return;
+      await loadReviewHistory(epoch);
+      toast(`已将 ${payload.record?.repository_name || file.name} 保存到本机审查历史`);
+    } catch (error) { toast(`导入失败：${error.message}`); }
+  });
   $("review-export-btn").addEventListener("click", async () => {
     if (!selectedProject) return;
     try {
@@ -3876,7 +4503,7 @@
       link.download = `code-defog-review-history-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      toast(`已导出 ${payload.runs?.length || 0} 条审查记录`);
+      toast(`已导出 ${payload.runs?.length || 0} 条本地检查、${payload.code_reports?.length || 0} 条 Code Defog AI 审查和 ${payload.skill_reports?.length || 0} 份 Skill 报告`);
     } catch (error) { toast(error.message); }
   });
   $("review-clear-btn").addEventListener("click", async () => {
@@ -3886,15 +4513,21 @@
     try {
       const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`, { method: "DELETE" });
       reviewRuns = [];
+      skillReviewReports = [];
+      codeReviewReports = [];
       reviewFeedback = new Map();
       reviewRun = null;
+      $("review-report-open-btn").disabled = true;
+      if ($("review-report-dialog").open) $("review-report-dialog").close();
       renderReviewHistory([]);
+      renderSkillReviewHistory([]);
+      renderAutoReviewHistory([]);
       renderReviewTasks(null);
       renderReviewFindings(null);
       renderReviewCases(null);
       $("review-run-meta").textContent = "历史记录已清空";
       $("review-history-compare").hidden = true;
-      toast(`已清理 ${payload.deleted?.runs || 0} 条审查记录和问题状态`);
+      toast(`已清理 ${payload.deleted?.runs || 0} 条本地检查、${payload.deleted?.ai_reports || 0} 条 Code Defog AI 审查、${payload.deleted?.skill_reports || 0} 份 Skill 报告和问题状态`);
     } catch (error) { toast(error.message); }
   });
   async function boot() {
@@ -4038,7 +4671,16 @@
     stopDriveTimer();
     reviewRun = null;
     reviewRuns = [];
+    skillReviewReports = [];
+    codeReviewReports = [];
+    autoReviewState = { enabled: false, status: "disabled", quiet_seconds: 10800 };
+    renderAutoReviewHistory([]);
+    renderAutoReviewState(autoReviewState);
     reviewFeedback = new Map();
+    const reportButton = $("review-report-open-btn");
+    if (reportButton) reportButton.disabled = true;
+    const reportDialog = $("review-report-dialog");
+    if (reportDialog?.open) reportDialog.close();
     const compare = $("review-compare-btn");
     if (compare) compare.disabled = true;
     reviewStartError = "";
@@ -4057,6 +4699,7 @@
     if (casesTarget) casesTarget.replaceChildren(create("div", "review-empty", "仅测试超时或非零退出会进入 Case。"));
     const history = $("review-history");
     if (history) history.replaceChildren(create("div", "review-empty", "尚无历史记录。"));
+    renderSkillReviewHistory([]);
     const comparison = $("review-history-compare");
     if (comparison) { comparison.hidden = true; comparison.replaceChildren(); }
     const meta = $("review-run-meta");

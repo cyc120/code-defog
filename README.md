@@ -142,7 +142,8 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 `web/index.html` 是唯一的管理界面来源，采用**项目优先导航**：左侧边栏固定展示品牌、监控项目列表（点击切换当前项目）和视图导航（项目审查 / 代码地图 / Case 审计 / 监控项目），顶部栏显示当前项目与运行时状态。
 
 - **项目选择窗口**：自动检索本机 git 仓库与运行中进程工作目录，勾选要监控的项目；支持手动添加路径。
-- **项目审查视图**：首屏为自助化驱动。范围使用完整/快速分段控件，检查项可分别启用测试、静态风险和 Git；随后显示 Harness 运行模式、阶段任务图、确定性发现、关联 Case 和审查历史。可标记发现为已修复、误报或已知问题，并比较最近两次成功审查的新增与未再出现项。代码类发现按文件、行号、风险类型和证据绑定标记；每条审查记录保留分支和完整提交号。历史保存在本地 SQLite，每个项目最多保留 200 次审查；不会创建源码快照。
+- **项目审查视图**：审查来源分为 Code Defog 自动 AI 审查、本地检查和 Skill 报告。自动 AI 审查需逐项目开启，默认关闭；开启前会显示模型提供方与源码发送范围。文件变化连续 3 小时安静后，后台只读审查累计变更；限定 40 个文本文件、单文件 32 KB、总内容 160 KB，敏感文件与生成目录跳过，模型线索一律标记为待核实，不运行测试或修改代码。静态风险按文件折叠汇总，避免将 `except Exception` 等扫描线索误当成已确认缺陷。自动 AI 报告、确定性本地 Review Run 和手动导入的 Skill 报告分别保存到本地 SQLite，可在网页查看、导出或清理。
+- **结果可信度与评测**：报告区分已确认问题、待核实线索和环境受限项，显示位置、证据、影响与建议；“未确认缺陷”不代表证明没有缺陷。试点评测流程见 [`docs/review-evaluation.md`](docs/review-evaluation.md)，当前案例集规模有限，不代表总体准确率。
 - **代码地图**：只解析当前已登记的被监控项目，不默认解析 Code Defog 自身。全宽画布以目录、文件、符号和导入关系绘制 2D 地图；关系标记为 `static`、`unresolved` 等证据等级。画布支持滚轮缩放、空白区域拖拽平移和大小复位。点击文件或符号后，画布内可拖动的悬浮机器人会自动调用当前已启用的 LLM，给出节点职责与一跳关系流的简要说明；请求固定只发送结构元数据和一跳关系，不发送源码。模型结论始终标为“非执行证据”，且只能引用当前 dossier 的节点或边证据。
 - **Case 审计**：Case 队列、详情与来源、Agent 运行、工具、审批、制品、知识与复盘证据页签。
 - **Harness 调度**：从只读 `/api/harness` 清单展示当前任务图、各 Agent 边界和实际运行记录；审批状态不会被派发给 Agent。
@@ -155,7 +156,7 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 
 ### LLM 厂商与密钥
 
-首选在控制台顶栏的「LLM 设置」保存并启用一个厂商。当前实现使用 OpenAI 兼容的 `/chat/completions` 协议，内置 DeepSeek、OpenAI、Ollama 和自定义兼容端点预设。DeepSeek、OpenAI 与远程自定义端点需要 API 密钥；本机 Ollama 可免密直接调用。自定义远程端点必须使用 HTTPS；`http://` 仅允许本机 `localhost`/回环地址，以支持 Ollama。
+首选在控制台顶栏的「LLM 设置」保存并启用一个厂商。当前实现使用 OpenAI 兼容的 `/chat/completions` 协议，内置 DeepSeek、OpenAI、Ollama 和自定义兼容端点预设。DeepSeek、OpenAI 与远程自定义端点需要 API 密钥；本机 Ollama 可免密直接调用。自定义远程端点必须使用 HTTPS；`http://` 仅允许本机 `localhost`/回环地址，以支持 Ollama。Code Defog 自动 AI 审查仅在用户显式开启项目设置或点击“立即审查”后发送限定的变更文件文本；每次自动审查绑定已确认的提供方、端点和模型，配置变化后暂停。
 
 密钥保存在当前用户应用数据目录的 `llm_providers.json`，目录权限 `0700`、文件权限 `0600`。它不进入 git 工作区、SQLite、SSE、工作日志、浏览器 `localStorage` 或任何 API 响应。页面只显示是否已配置和来源类型，不显示密钥或其片段。保存的 DeepSeek 密钥优先于环境变量；尚未保存时，才兼容读取 `DEEPSEEK_API_KEY`。
 
@@ -172,6 +173,12 @@ RECEIVED -> TRIAGED -> DIAGNOSED -> PLAN_APPROVAL -> REPAIRING
 Windows 的 `ctime` 表示创建时间，因此监控还会计算不超过 1 MiB 的普通文件内容摘要，识别大小和修改时间被恢复的改写。超过 1 MiB 的文件仍按元数据轮询，以控制大型项目的扫描开销。
 
 全项目审查的第一阶段现在会读取本地 Git 改动（相对 `HEAD`，含未跟踪文件），定位变动涉及的 Python 函数，并针对进程、配置与文件操作给出有位置和复现建议的**待验证线索**。它只读、不执行这些建议，也不把线索自动升级为 Case；测试实际失败或超时仍走已有的 Case 处理路径。分析设有文件数、文件大小和时间上限。
+
+### Code Defog 自动 AI 审查
+
+在项目审查页的「Code Defog 自动审查」分区中，可单独开启或关闭每个项目，也可手动启动一次审查。自动模式观察本机工作区变化；每次变化会重置 3 小时安静窗口，期间的变更文件合并为一份任务并单独记录运行状态。服务启动会恢复已登记项目的监控、补扫现有 Git 改动，并把上次中断的自动任务重新排队；自动任务失败会保留文件列表，安静 3 小时后重试。该路径不运行 shell 命令、测试或构建，不写入项目源码。审查结果在 SQLite 独立保留，默认最多 200 条，并与本地确定性检查及导入的 Skill 报告分开展示。
+
+启用前页面明确显示当前模型和请求端点。提交给远端模型的仅是限额内、UTF-8 解码成功的变更文本文件；常见密钥文件、生成目录和二进制文件会跳过。自动任务绑定启用时的提供方、端点与模型指纹，设置改变后停止并要求重新确认。模型报告中的每项发现均强制为“待核实”，没有任何模型结论会被当作复现证据。云端持续监控服务尚未部署；当前实现是本机监视、本机保存报告、按用户设置调用模型端点。
 
 ### 全项目 Review Run
 
@@ -197,6 +204,12 @@ Windows 的 `ctime` 表示创建时间，因此监控还会计算不超过 1 MiB
 | `POST` | `/api/projects/{workspace}/drive` | `service_token` | 启动全项目 Review Run（202；已在运行则 409；路径名为兼容保留） |
 | `GET` | `/api/projects/{workspace}/drive` | `service_token` | 最近一次 Review Run（兼容路径） |
 | `GET` | `/api/projects/{workspace}/reviews` | `service_token` | 最近的 Review Run、任务历史和人工状态标记 |
+| `GET` | `/api/projects/{workspace}/code-reviews` | `service_token` | Code Defog AI 审查历史和自动任务状态 |
+| `GET` | `/api/projects/{workspace}/code-reviews/{run_id}` | `service_token` | 读取 Code Defog AI 审查报告 |
+| `POST` | `/api/projects/{workspace}/ai-review-settings` | `service_token` | 显式启用/关闭该项目自动 AI 审查 |
+| `POST` | `/api/projects/{workspace}/code-reviews` | `service_token` | 立即启动一次只读 AI 改动审查 |
+| `POST` | `/api/projects/{workspace}/skill-reports` | `service_token` | 校验并导入一个 Skill 审查 JSON 到本地历史（最大请求体 1 MB） |
+| `GET` | `/api/projects/{workspace}/skill-reports/{report_id}` | `service_token` | 读取已导入 Skill 报告的完整内容 |
 | `GET` | `/api/projects/{workspace}/reviews/export` | `service_token` | 导出该项目保留的审查历史和问题状态为 JSON |
 | `DELETE` | `/api/projects/{workspace}/reviews` | `service_token` | 清空该项目审查历史和问题状态；审查运行中返回 `409` |
 | `POST` | `/api/projects/{workspace}/review-feedback` | `service_token` | 保存或清除单条审查发现的本地状态标记 |
@@ -209,7 +222,7 @@ Windows 的 `ctime` 表示创建时间，因此监控还会计算不超过 1 MiB
 
 项目助手不具备审批、调度、命令执行、代码修改或发布权限。它只接收经过裁剪的项目监控记录、Case 聚合统计、最新项目浏览报告和最近 6 条经服务端裁剪的浏览器内存消息；不会发送 git remote、令牌、源码、完整测试输出或完整聊天记录。未配置当前厂商密钥时，接口会明确返回不可用状态，不会伪造回答。
 
-审查历史在本地数据库按项目保留，最多 200 次审查记录；可在审查面板下载 JSON 备份，或清空当前项目的历史和发现状态。清空前会弹出二次确认，正在执行的审查不会被清理。
+审查历史在本地数据库按项目保留，最多 200 次控制台审查和 200 份 Skill 报告；可导入 Skill 生成的结构化 JSON、在网页内打开报告、下载包含两类记录的 JSON 备份，或清空当前项目的审查历史和发现状态。报告仅发送到本机服务，不会发送给外部服务。清空前会弹出二次确认，正在执行的审查不会被清理。
 
 ## Case API 与审批
 

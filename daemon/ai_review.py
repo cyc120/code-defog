@@ -46,8 +46,7 @@ def _git(root: Path, *args: str) -> list[str]:
     return [item.decode("utf-8", errors="surrogateescape") for item in result.stdout.split(b"\0") if item]
 
 
-def changed_paths(workspace: str | Path) -> list[str]:
-    """Return bounded Git worktree changes relative to HEAD, including untracked files."""
+def _all_changed_paths(workspace: str | Path) -> list[str]:
     root = Path(workspace).expanduser().resolve()
     try:
         _git(root, "rev-parse", "--verify", "HEAD")
@@ -56,7 +55,12 @@ def changed_paths(workspace: str | Path) -> list[str]:
         tracked = _git(root, "ls-files", "--cached", "-z", "--")
     staged = _git(root, "diff", "--cached", "--name-only", "-z", "--")
     untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z", "--")
-    return sorted(set(tracked) | set(staged) | set(untracked))[:MAX_FILES]
+    return sorted(set(tracked) | set(staged) | set(untracked))
+
+
+def changed_paths(workspace: str | Path) -> list[str]:
+    """Return bounded Git worktree changes relative to HEAD, including untracked files."""
+    return _all_changed_paths(workspace)[:MAX_FILES]
 
 
 def _eligible(path: str) -> bool:
@@ -71,31 +75,63 @@ def _eligible(path: str) -> bool:
     return item.suffix.lower() in TEXT_SUFFIXES
 
 
+def _read_candidate(root: Path, name: str, total: int) -> tuple[str | None, int, str | None]:
+    if not _eligible(name):
+        return None, 0, "非审查文本类型、敏感文件或生成路径"
+    path = root / name
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+        if path.is_symlink() or not resolved.is_file():
+            return None, 0, "不是普通文件或路径越界"
+        size = resolved.stat().st_size
+        if size > MAX_FILE_BYTES:
+            return None, size, f"超过单文件 {MAX_FILE_BYTES // 1000} KB 限制"
+        if total + size > MAX_TOTAL_BYTES:
+            return None, size, f"超过总内容 {MAX_TOTAL_BYTES // 1000} KB 限制"
+        content = resolved.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None, 0, "无法安全读取 UTF-8 文本"
+    return content, size, None
+
+
+def preview_changed_files(workspace: str | Path) -> dict[str, Any]:
+    """Return eligible file metadata without returning any source content."""
+    root = Path(workspace).expanduser().resolve()
+    changed = _all_changed_paths(root)
+    eligible: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    candidate_total = 0
+    for name in changed[:MAX_FILES]:
+        _content, size, reason = _read_candidate(root, name, 0)
+        if reason:
+            excluded.append({"path": name, "size_bytes": size, "reason": reason})
+            continue
+        eligible.append({"path": name, "size_bytes": size})
+        candidate_total += size
+    return {
+        "files": eligible,
+        "excluded": excluded,
+        "changed_file_count": len(changed),
+        "shown_file_count": min(len(changed), MAX_FILES),
+        "omitted_file_count": max(0, len(changed) - MAX_FILES),
+        "max_files": MAX_FILES,
+        "max_file_bytes": MAX_FILE_BYTES,
+        "max_total_bytes": MAX_TOTAL_BYTES,
+        "candidate_total_bytes": candidate_total,
+    }
+
+
 def _read_changed_files(root: Path, names: list[str]) -> tuple[list[dict[str, Any]], list[str]]:
     files: list[dict[str, Any]] = []
     notes: list[str] = []
     total = 0
     for name in names[:MAX_FILES]:
-        if not _eligible(name):
-            notes.append(f"未检查 {name}（非目标文本文件或敏感/生成路径）")
+        decoded, size, reason = _read_candidate(root, name, total)
+        if reason:
+            notes.append(f"未检查 {name}（{reason}）")
             continue
-        path = root / name
-        try:
-            resolved = path.resolve(strict=True)
-            resolved.relative_to(root)
-            if path.is_symlink() or not resolved.is_file():
-                notes.append(f"未检查 {name}（不是普通文件）")
-                continue
-            size = resolved.stat().st_size
-            if size > MAX_FILE_BYTES or total + size > MAX_TOTAL_BYTES:
-                notes.append(f"未检查 {name}（超过单文件或总内容限制）")
-                continue
-            content = resolved.read_bytes()
-            decoded = content.decode("utf-8")
-        except (OSError, UnicodeDecodeError, ValueError):
-            notes.append(f"未检查 {name}（无法安全读取 UTF-8 文本）")
-            continue
-        total += len(content)
+        total += size
         files.append({"path": name, "content": decoded})
     if len(names) > MAX_FILES:
         notes.append(f"变更文件超过上限，仅取前 {MAX_FILES} 个")

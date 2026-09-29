@@ -177,9 +177,7 @@ class ProjectMonitor:
         if not callable(callback):
             return
         try:
-            batch = self.store.claim_due_auto_review(
-                workspace, quiet_seconds=int(self.review_quiet_period),
-            )
+            batch = self.store.claim_due_auto_review(workspace)
         except Exception as exc:
             now = time.monotonic()
             if now - self._auto_review_error_notified.get(workspace, 0.0) >= 60.0:

@@ -32,7 +32,7 @@ def _get_validator():
 DEFAULT_RETENTION = 2000
 # Bumped when the on-disk layout gains a structural change; migrate_schema
 # uses PRAGMA user_version so future data-conditioned migrations have a hook.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 DEFAULT_REVIEW_RETENTION = 200
 DEFAULT_REVIEW_FEEDBACK_RETENTION = 1000
 DEFAULT_CONVERSATION_ID = "default"
@@ -250,7 +250,8 @@ class StateStore:
                 ai_review_error TEXT,
                 ai_review_last_report_id TEXT,
                 ai_review_provider_id TEXT NOT NULL DEFAULT '',
-                ai_review_provider_signature TEXT NOT NULL DEFAULT ''
+                ai_review_provider_signature TEXT NOT NULL DEFAULT '',
+                ai_review_quiet_seconds INTEGER NOT NULL DEFAULT 10800
             );
             CREATE INDEX IF NOT EXISTS idx_monitored_projects_status
                 ON monitored_projects(status);
@@ -505,6 +506,7 @@ class StateStore:
             "ai_review_last_report_id": "TEXT",
             "ai_review_provider_id": "TEXT NOT NULL DEFAULT ''",
             "ai_review_provider_signature": "TEXT NOT NULL DEFAULT ''",
+            "ai_review_quiet_seconds": "INTEGER NOT NULL DEFAULT 10800",
         }
         needs_auto_review_columns = [name for name in auto_review_columns if name not in monitored_cols]
         case_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(cases)").fetchall()}
@@ -1696,7 +1698,8 @@ class StateStore:
             self.connection.commit()
 
     def set_auto_review_enabled(self, workspace: str, enabled: bool,
-                                provider_id: str = "", provider_signature: str = "") -> dict[str, Any] | None:
+                                provider_id: str = "", provider_signature: str = "",
+                                quiet_seconds: int | None = None) -> dict[str, Any] | None:
         abs_path = str(Path(workspace).expanduser().resolve())
         value = bool(enabled)
         with self.lock:
@@ -1704,9 +1707,24 @@ class StateStore:
                 "UPDATE monitored_projects SET ai_review_enabled = ?, ai_review_status = ?, "
                 "ai_review_last_change = NULL, ai_review_pending_files_json = '[]', "
                 "ai_review_error = NULL, ai_review_provider_id = ?, "
-                "ai_review_provider_signature = ? WHERE workspace = ?",
+                "ai_review_provider_signature = ?, "
+                "ai_review_quiet_seconds = COALESCE(?, ai_review_quiet_seconds) WHERE workspace = ?",
                 (1 if value else 0, "watching" if value else "disabled",
-                 provider_id if value else "", provider_signature if value else "", abs_path),
+                 provider_id if value else "", provider_signature if value else "",
+                 quiet_seconds, abs_path),
+            )
+            self.connection.commit()
+            row = self.connection.execute(
+                "SELECT * FROM monitored_projects WHERE workspace = ?", (abs_path,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_auto_review_quiet_seconds(self, workspace: str, quiet_seconds: int) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            self.connection.execute(
+                "UPDATE monitored_projects SET ai_review_quiet_seconds = ? WHERE workspace = ?",
+                (int(quiet_seconds), abs_path),
             )
             self.connection.commit()
             row = self.connection.execute(
@@ -1737,7 +1755,7 @@ class StateStore:
             )
             self.connection.commit()
 
-    def claim_due_auto_review(self, workspace: str, quiet_seconds: int = 10800,
+    def claim_due_auto_review(self, workspace: str, quiet_seconds: int | None = None,
                               now: float | None = None) -> dict[str, Any] | None:
         """Atomically take the quiet-window batch so it is scheduled only once."""
         abs_path = str(Path(workspace).expanduser().resolve())
@@ -1752,9 +1770,13 @@ class StateStore:
             row = self.connection.execute(
                 "SELECT * FROM monitored_projects WHERE workspace = ?", (abs_path,),
             ).fetchone()
+            configured_quiet_seconds = max(
+                60, int(quiet_seconds if quiet_seconds is not None
+                        else (row["ai_review_quiet_seconds"] if row else 10800)),
+            )
             if (not row or not row["ai_review_enabled"] or row["ai_review_status"] == "running"
                     or row["ai_review_last_change"] is None
-                    or timestamp - float(row["ai_review_last_change"]) < quiet_seconds):
+                    or timestamp - float(row["ai_review_last_change"]) < configured_quiet_seconds):
                 return None
             try:
                 paths = json.loads(row["ai_review_pending_files_json"] or "[]")

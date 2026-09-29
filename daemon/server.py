@@ -30,7 +30,7 @@ from .llm_summary import (
     normalize_project_assistant_history,
     test_llm_provider,
 )
-from .ai_review import changed_paths as ai_changed_paths, review_working_tree
+from .ai_review import changed_paths as ai_changed_paths, preview_changed_files, review_working_tree
 
 
 MAX_BODY_BYTES = 1_000_000
@@ -154,6 +154,14 @@ class CodeDefogServer(ThreadingHTTPServer):
         if trigger == "automatic" and not project.get("ai_review_enabled"):
             raise ValueError("该项目尚未启用自动 AI 审查")
         selected_paths = list(dict.fromkeys(paths if paths is not None else ai_changed_paths(normalized)))[:200]
+        if trigger == "manual" and paths is not None:
+            preview = preview_changed_files(normalized)
+            eligible = {item["path"]: int(item["size_bytes"]) for item in preview["files"]}
+            invalid = sorted(set(selected_paths) - set(eligible))
+            if invalid:
+                raise ValueError("所选文件已不在可审查范围内，请刷新文件预览")
+            if sum(eligible[path] for path in selected_paths) > int(preview["max_total_bytes"]):
+                raise ValueError("所选文件总量超过审查上限，请取消部分文件后重试")
         if not selected_paths:
             raise ValueError("当前工作区没有待审查的 Git 变更")
         with self.ai_review_threads_lock:
@@ -173,7 +181,7 @@ class CodeDefogServer(ThreadingHTTPServer):
             worker = Thread(
                 target=self._run_code_review,
                 args=(run_id, normalized, selected_paths, revision,
-                      expected_provider_id, expected_provider_signature),
+                      expected_provider_id, expected_provider_signature, trigger),
                 name=f"code-review-{run_id[-8:]}", daemon=True,
             )
             self.ai_review_threads[normalized] = worker
@@ -183,7 +191,8 @@ class CodeDefogServer(ThreadingHTTPServer):
     def _run_code_review(self, run_id: str, workspace: str,
                          paths: list[str], revision: str,
                          expected_provider_id: str | None = None,
-                         expected_provider_signature: str | None = None) -> None:
+                         expected_provider_signature: str | None = None,
+                         trigger: str = "manual") -> None:
         provider_id = ""
         model = ""
         try:
@@ -199,7 +208,7 @@ class CodeDefogServer(ThreadingHTTPServer):
             )
             self.publish({
                 "type": "code_review_updated", "workspace": workspace,
-                "run_id": run_id, "status": "complete",
+                "run_id": run_id, "status": "complete", "trigger": trigger,
             })
         except Exception as exc:
             message = clean_text(exc, 1000) or "AI 审查失败"
@@ -208,7 +217,7 @@ class CodeDefogServer(ThreadingHTTPServer):
             )
             self.publish({
                 "type": "code_review_updated", "workspace": workspace,
-                "run_id": run_id, "status": "error", "error": message,
+                "run_id": run_id, "status": "error", "error": message, "trigger": trigger,
             })
 
     def invalidate_code_graph_cache(self, workspace: str | None = None) -> None:
@@ -509,6 +518,31 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             return
         self.send_text(content, "text/html")
 
+    def serve_ui_asset(self, route: str) -> None:
+        """Serve the small, bundled CSS/JS assets used by the Web console."""
+        ui_dir = self.server.ui_dir
+        if not ui_dir:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        from urllib.parse import unquote
+
+        relative = unquote(route.removeprefix("/ui/assets/"))
+        if not relative or Path(relative).name != relative or Path(relative).suffix not in {".css", ".js"}:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        root = Path(ui_dir).resolve()
+        asset = (root / "assets" / relative).resolve()
+        if asset.parent != (root / "assets").resolve():
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            content = asset.read_text(encoding="utf-8")
+        except OSError:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        content_type = "text/css" if asset.suffix == ".css" else "text/javascript"
+        self.send_text(content, content_type)
+
     def serve_ui_config(self) -> None:
         """Hand the browser the connection config (host/port/token/user).
 
@@ -617,6 +651,9 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         if route in ("/", "/ui", "/ui/"):
             self.serve_ui()
             return
+        if route.startswith("/ui/assets/"):
+            self.serve_ui_asset(route)
+            return
         if route == "/ui/config":
             # Defense in depth: token-bearing endpoint must not be reachable
             # from cross-site browser contexts (Host check above already
@@ -659,6 +696,18 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             workspace = unquote(route[len("/api/projects/"):-len("/reviews/export")])
             self.get_project_reviews_export(workspace)
             return
+        if route.startswith("/api/projects/") and route.endswith("/code-reviews/preview"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/code-reviews/preview")])
+            if not workspace or self.server.store.get_monitored_project(workspace) is None:
+                self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                self.send_json({"ok": True, **preview_changed_files(workspace)})
+            except (OSError, RuntimeError, ValueError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
         if route.startswith("/api/projects/") and "/code-reviews/" in route:
             from urllib.parse import unquote
 
@@ -684,7 +733,7 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                     "pending_files": pending_files,
                     "error": project.get("ai_review_error"),
                     "last_report_id": project.get("ai_review_last_report_id"),
-                    "quiet_seconds": 10800,
+                    "quiet_seconds": int(project.get("ai_review_quiet_seconds") or 10800),
                 },
             })
             return
@@ -904,11 +953,27 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             if payload is None:
                 return
             enabled = payload.get("enabled")
-            if not isinstance(enabled, bool):
+            quiet_seconds = payload.get("quiet_seconds")
+            allowed_quiet_seconds = {300, 1800, 3600, 10800}
+            if enabled is not None and not isinstance(enabled, bool):
                 self.send_json({"error": "enabled must be a boolean"}, HTTPStatus.BAD_REQUEST)
                 return
-            if self.server.store.get_monitored_project(workspace) is None:
+            if quiet_seconds is not None and (
+                    isinstance(quiet_seconds, bool) or not isinstance(quiet_seconds, int)
+                    or quiet_seconds not in allowed_quiet_seconds):
+                self.send_json({"error": "quiet_seconds must be one of 300, 1800, 3600, or 10800"},
+                               HTTPStatus.BAD_REQUEST)
+                return
+            if enabled is None and quiet_seconds is None:
+                self.send_json({"error": "provide enabled or quiet_seconds"}, HTTPStatus.BAD_REQUEST)
+                return
+            current_project = self.server.store.get_monitored_project(workspace)
+            if current_project is None:
                 self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+                return
+            if enabled is None:
+                project = self.server.store.set_auto_review_quiet_seconds(workspace, quiet_seconds)
+                self.send_json({"ok": True, "project": project})
                 return
             if enabled:
                 provider = self.server.llm_provider_store.resolve_active()
@@ -920,7 +985,7 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                     "model": provider.get("model"),
                 }, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
                 project = self.server.store.set_auto_review_enabled(
-                    workspace, True, str(provider.get("id") or ""), signature,
+                    workspace, True, str(provider.get("id") or ""), signature, quiet_seconds,
                 )
                 # Include already-dirty files when the user enables monitoring;
                 # otherwise a monitor whose baseline predates this setting
@@ -932,7 +997,9 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                 if pending_paths:
                     self.server.store.note_auto_review_changes(workspace, pending_paths, time.time())
             else:
-                project = self.server.store.set_auto_review_enabled(workspace, False)
+                project = self.server.store.set_auto_review_enabled(
+                    workspace, False, quiet_seconds=quiet_seconds,
+                )
             self.send_json({"ok": True, "project": project})
             return
 
@@ -948,8 +1015,18 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             if self.server.store.get_monitored_project(workspace) is None:
                 self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
                 return
+            requested_paths = payload.get("paths")
+            if requested_paths is not None and (
+                    not isinstance(requested_paths, list)
+                    or any(not isinstance(item, str) for item in requested_paths)
+                    or len(requested_paths) > 40):
+                self.send_json({"error": "paths must be a list of at most 40 file paths"},
+                               HTTPStatus.BAD_REQUEST)
+                return
             try:
-                run_id = self.server.start_code_review(workspace, trigger="manual")
+                run_id = self.server.start_code_review(
+                    workspace, requested_paths, trigger="manual",
+                )
             except (ValueError, RuntimeError) as error:
                 self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
                 return
@@ -1482,7 +1559,7 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                             "last_change": project.get("ai_review_last_change"),
                             "pending_files": json.loads(project.get("ai_review_pending_files_json") or "[]"),
                             "error": project.get("ai_review_error"),
-                            "quiet_seconds": 10800,
+                            "quiet_seconds": int(project.get("ai_review_quiet_seconds") or 10800),
                         }})
 
     def get_code_review_report(self, workspace: str, run_id: str) -> None:

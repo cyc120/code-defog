@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from _helpers import read_console_source
 from daemon import llm_summary
 from daemon import server as server_module
 from daemon.llm_providers import LLMProviderStore
@@ -473,7 +474,7 @@ class LLMProviderEndpointTests(unittest.TestCase):
 
 class LLMProviderConsoleTests(unittest.TestCase):
     def test_console_has_provider_settings_without_key_local_storage(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(encoding="utf-8")
+        console = read_console_source()
         self.assertIn('id="llm-settings-drawer"', console)
         self.assertIn('id="llm-provider-select"', console)
         self.assertIn('id="llm-api-key"', console)

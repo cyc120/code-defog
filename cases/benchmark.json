@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "name": "Code Defog review benchmark",
+  "maturity": "pilot",
+  "notes": [
+    "This set has two verified behavior-defect cases and is too small to claim general review accuracy.",
+    "There are no curated clean-change controls yet; false discovery proportion is not a statistically representative false-positive rate.",
+    "Review findings must be manually adjudicated against the case evidence. Never score an unverified model claim as a confirmed defect."
+  ],
+  "gold_findings": [
+    {
+      "case_id": "rhinelabui-001",
+      "title": "Archive section validation accepts missing or empty items",
+      "category": "behavior_defect",
+      "expected_path": "scripts/archive-content.mjs",
+      "expected_symbol": "validateContent",
+      "expected_behavior": "Reject a section without items and reject empty sections before archive export; the defective version accepted these inputs and later threw or emitted empty content.",
+      "source": "cases/rhinelabui-001/README.md",
+      "reproduction": "node cases/rhinelabui-001/reproduce.mjs <RhineLabUI-worktree>",
+      "pre_fix_revision": "6394b3c6a203ad687d535071cecd6bcce3447ff2"
+    },
+    {
+      "case_id": "rhinelabui-003",
+      "title": "Single-column drag selects the wrong archive lane",
+      "category": "behavior_defect",
+      "expected_path": "src/scene.ts",
+      "expected_symbol": "trackCoordinate / trackPosition",
+      "expected_behavior": "Keep the selected lane aligned with the visible track in a single-column archive; the defective version used a five-column center offset and selected a different lane.",
+      "source": "cases/rhinelabui-003/README.md",
+      "reproduction": "node cases/rhinelabui-003/verify-drag.mjs",
+      "pre_fix_revision": "6394b3c6a203ad687d535071cecd6bcce3447ff2"
+    }
+  ],
+  "classification_guardrails": [
+    {
+      "case_id": "rhinelabui-002",
+      "expected_category": "regression_check_failure",
+      "must_not_claim": "The application loop navigation is broken based only on the obsolete five-column test failure.",
+      "source": "cases/rhinelabui-002/README.md",
+      "purpose": "Check whether the reviewer distinguishes a broken/stale check from a confirmed product behavior defect."
+    }
+  ],
+  "clean_change_controls": []
+}

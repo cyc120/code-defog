@@ -17,6 +17,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from _helpers import read_console_source
 from agent_runtime.harness import DevLoopHarness
 from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
 from daemon.code_graph import CodeGraphError, build_code_graph, build_node_dossier
@@ -335,7 +336,7 @@ class CodeGraphEndpointTests(unittest.TestCase):
                 server.shutdown(); server.server_close(); store.close()
 
     def test_console_has_full_width_code_map_with_automatic_llm_action(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(encoding="utf-8")
+        console = read_console_source()
         self.assertIn('data-view="code-map"', console)
         self.assertNotIn('code-map-inspector', console)
         self.assertNotIn('code-map-source-consent', console)

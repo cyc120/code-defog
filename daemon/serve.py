@@ -274,9 +274,19 @@ def main() -> None:
     # created before the server, so use a tiny closure that receives its target
     # only after local service initialization completes.
     server_ref: dict[str, CodeDefogServer] = {}
+
+    def notify_project_change(workspace: str) -> None:
+        current = server_ref.get("server")
+        if current is not None:
+            current.invalidate_code_graph_cache(workspace)
+            current.publish({"type": "auto_review_status", "workspace": workspace})
+
     project_monitor = ProjectMonitor(
         store,
-        on_project_change=lambda workspace: server_ref.get("server") and server_ref["server"].invalidate_code_graph_cache(workspace),
+        on_project_change=notify_project_change,
+        on_auto_review=lambda workspace, paths: server_ref.get("server") and server_ref["server"].start_code_review(
+            workspace, paths, trigger="automatic",
+        ),
     )
 
     server = CodeDefogServer(
@@ -288,6 +298,12 @@ def main() -> None:
         harness=harness,
     )
     server_ref["server"] = server
+    try:
+        recovered_reviews = store.recover_interrupted_code_reviews()
+        if recovered_reviews:
+            print(f"recovered {recovered_reviews} interrupted code review(s)", file=sys.stderr)
+    except Exception as exc:
+        print(f"code review recovery sweep failed (continuing): {exc}", file=sys.stderr)
     address, port = server.server_address
     console_url = ui_url(address, port)
     descriptor_registered = False
@@ -329,6 +345,7 @@ def main() -> None:
 
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
+        project_monitor.start()
         server.serve_forever(poll_interval=0.25)
     finally:
         if descriptor_registered:

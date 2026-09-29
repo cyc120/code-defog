@@ -6,11 +6,14 @@ test probes use fake commands, and everything runs in temp dirs.
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import shlex
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -27,6 +30,11 @@ from daemon.llm_summary import build_drive_prompt, generate_drive_summary
 from _helpers import start_server
 from daemon.server import CodeCCTVServer
 from daemon.store import StateStore
+
+
+def _python_command(code: str) -> str:
+    args = [sys.executable, "-c", code]
+    return subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
 
 
 def _make_repo(base: Path, name: str = "proj") -> Path:
@@ -56,6 +64,8 @@ class BrowseProjectTests(unittest.TestCase):
             self.assertTrue(b["git"]["is_git"])
             self.assertTrue(b["git"]["branch"])
             self.assertTrue(b["git"]["head"])
+            self.assertEqual(len(b["git"]["head_full"]), 40)
+            self.assertEqual(b["git"]["head"], b["git"]["head_full"][:12])
             self.assertIn("README.md", b["markers"])
 
     def test_browse_can_skip_git_metadata(self) -> None:
@@ -97,7 +107,7 @@ class BrowseProjectTests(unittest.TestCase):
             self.assertTrue(cmd["detected"])
             self.assertEqual(cmd["kind"], "pytest")
             self.assertEqual(cmd["detail"], "tests 目录")
-            self.assertTrue(cmd["command"].startswith(sys.executable))
+            self.assertIn(sys.executable, cmd["command"])
 
     def test_detect_test_command_unittest_directory(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -117,22 +127,63 @@ class BrowseProjectTests(unittest.TestCase):
 class TestProbeTests(unittest.TestCase):
     def test_probe_passing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            r = run_test_probe(directory, {"detected": True, "command": "true"}, timeout=5)
+            r = run_test_probe(directory, {"detected": True, "command": _python_command("import sys; sys.exit(0)")}, timeout=5)
             self.assertTrue(r["ran"])
             self.assertTrue(r["passed"])
 
     def test_probe_failing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            r = run_test_probe(directory, {"detected": True, "command": "false"}, timeout=5)
+            r = run_test_probe(directory, {"detected": True, "command": _python_command("import sys; sys.exit(1)")}, timeout=5)
             self.assertTrue(r["ran"])
             self.assertFalse(r["passed"])
 
     def test_probe_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            r = run_test_probe(directory, {"detected": True, "command": "sleep 30"},
+            r = run_test_probe(directory, {"detected": True, "command": _python_command("import time; time.sleep(30)")},
                                timeout=1)
             self.assertTrue(r["timed_out"])
             self.assertFalse(r["passed"])
+
+    @unittest.skipUnless(os.name == "nt", "Windows job object regression")
+    def test_probe_timeout_kills_child_after_parent_exits(self) -> None:
+        """A child inheriting stdout must not defeat the runner deadline."""
+        import ctypes
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pid_file = root / "child.pid"
+            parent = root / "parent.py"
+            parent.write_text(
+                "import subprocess, sys\n"
+                "from pathlib import Path\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(12)'])\n"
+                "Path(sys.argv[1]).write_text(str(child.pid))\n",
+                encoding="utf-8",
+            )
+            child_pid = None
+            try:
+                command = subprocess.list2cmdline([sys.executable, str(parent), str(pid_file)])
+                started = time.monotonic()
+                result = run_test_probe(directory, {"detected": True, "command": command}, timeout=1)
+                elapsed = time.monotonic() - started
+                child_pid = int(pid_file.read_text())
+                self.assertTrue(result["timed_out"])
+                self.assertLess(elapsed, 5)
+                kernel = ctypes.windll.kernel32
+                handle = kernel.OpenProcess(0x1000, False, child_pid)
+                if handle:
+                    try:
+                        code = ctypes.c_ulong()
+                        self.assertTrue(kernel.GetExitCodeProcess(handle, ctypes.byref(code)))
+                        self.assertNotEqual(code.value, 259)  # STILL_ACTIVE
+                    finally:
+                        kernel.CloseHandle(handle)
+            finally:
+                if child_pid is None and pid_file.exists():
+                    child_pid = int(pid_file.read_text())
+                if child_pid is not None:
+                    subprocess.run(["taskkill", "/PID", str(child_pid), "/T", "/F"],
+                                   capture_output=True, check=False)
 
     def test_probe_missing_command(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -396,6 +447,40 @@ class DriveEndpointTests(unittest.TestCase):
                        data=b"{}", method="POST",
                        headers={"X-Code-CCTV-Token": token})
 
+    def test_review_feedback_endpoint_persists_identity_and_returns_it_in_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            store.register_monitored_project({
+                "workspace": directory, "kind": "process", "name": "tmp-project",
+            })
+            server, base, token = self._start_server(store, inject_stub=False)
+            try:
+                encoded_workspace = directory.replace("/", "%2F")
+                identity = '["code-v1","src/api.py",42,"bare-except","except:"]'
+                body = json.dumps({
+                    "label": "静态风险", "detail": "src/api.py:42 except:",
+                    "identity": identity, "status": "fixed",
+                }).encode("utf-8")
+                request = Request(
+                    f"{base}/api/projects/{encoded_workspace}/review-feedback",
+                    data=body, method="POST",
+                    headers={"X-Code-Defog-Token": token, "Content-Type": "application/json"},
+                )
+                with urlopen(request, timeout=3) as response:
+                    saved = json.loads(response.read())
+                self.assertEqual(saved["feedback"]["identity"], identity)
+
+                history_request = Request(
+                    f"{base}/api/projects/{encoded_workspace}/reviews",
+                    headers={"X-Code-Defog-Token": token},
+                )
+                with urlopen(history_request, timeout=3) as response:
+                    history = json.loads(response.read())
+                self.assertEqual(history["feedback"][0]["status"], "fixed")
+                self.assertEqual(history["feedback"][0]["identity"], identity)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
     def test_post_requires_auth(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "s.sqlite3")
@@ -484,6 +569,55 @@ class DriveEndpointTests(unittest.TestCase):
                 self.assertTrue(body["ok"])
                 self.assertEqual(body["count"], 1)
                 self.assertEqual(body["runs"][0]["run_id"], run_id)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_review_history_export_and_clear_are_project_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as other:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            run_id = store.begin_review_run(directory, {"mode": "full"}, [{
+                "task_key": "prepare", "title": "准备", "stage": "prepare", "order": 1,
+            }])
+            store.finish_review_run(run_id, "complete", 0.1, {"file_count": 1}, None, [], None)
+            store.set_review_finding_feedback(directory, "问题", "证据", "fixed")
+            other_run = store.begin_review_run(other)
+            store.finish_review_run(other_run, "complete", 0.1, None, None, [], None)
+            server, base, token = self._start_server(store)
+            encoded = directory.replace("/", "%2F")
+            try:
+                headers = {"X-Code-CCTV-Token": token}
+                with urlopen(Request(f"{base}/api/projects/{encoded}/reviews/export", headers=headers), timeout=3) as resp:
+                    exported = json.loads(resp.read())
+                self.assertEqual(exported["format"], "code-defog-review-history-v1")
+                self.assertEqual([run["run_id"] for run in exported["runs"]], [run_id])
+                self.assertEqual(len(exported["feedback"]), 1)
+
+                request = Request(f"{base}/api/projects/{encoded}/reviews", headers=headers, method="DELETE")
+                with urlopen(request, timeout=3) as resp:
+                    deleted = json.loads(resp.read())["deleted"]
+                self.assertEqual(deleted, {
+                    "runs": 1, "tasks": 1, "feedback": 1,
+                    "skill_reports": 0, "ai_reports": 0,
+                })
+                self.assertEqual(store.list_review_runs(directory), [])
+                self.assertEqual(len(store.list_review_runs(other)), 1)
+            finally:
+                server.shutdown(); server.server_close(); store.close()
+
+    def test_clear_review_history_refuses_running_review(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = StateStore(Path(directory) / "s.sqlite3")
+            run_id = store.begin_review_run(directory)
+            server, base, token = self._start_server(store)
+            try:
+                request = Request(
+                    f"{base}/api/projects/{directory.replace('/', '%2F')}/reviews",
+                    headers={"X-Code-CCTV-Token": token}, method="DELETE",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urlopen(request, timeout=3)
+                self.assertEqual(error.exception.code, 409)
+                self.assertEqual(store.get_review_run(run_id)["status"], "running")
             finally:
                 server.shutdown(); server.server_close(); store.close()
 

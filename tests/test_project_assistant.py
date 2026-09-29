@@ -17,6 +17,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from _helpers import read_console_source
 from daemon import llm_summary
 from daemon.llm_summary import (
     build_project_assistant_prompt,
@@ -284,9 +285,7 @@ class ProjectAssistantEndpointTests(unittest.TestCase):
 
 class ProjectAssistantConsoleTests(unittest.TestCase):
     def test_console_has_bounded_project_assistant_drawer(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn('id="assistant-open-btn"', console)
         self.assertIn('id="assistant-drawer"', console)
         self.assertIn('id="assistant-cancel-btn"', console)
@@ -298,18 +297,14 @@ class ProjectAssistantConsoleTests(unittest.TestCase):
         self.assertIn("body: { question, history }", console)
 
     def test_drive_report_does_not_interpolate_project_content_as_html(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         start = console.index("function renderDriveRun")
         end = console.index("async function loadDriveLatest", start)
         self.assertNotIn("innerHTML", console[start:end])
         self.assertIn("driveReportItem", console[start:end])
 
     def test_project_picker_accepts_whole_row_selection(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         # A label makes the complete row activate its native checkbox without
         # nesting an interactive input inside a button.
         self.assertIn('const option = create("label", "proj-option");', console)

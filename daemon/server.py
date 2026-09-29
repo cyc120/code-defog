@@ -12,16 +12,17 @@ import queue
 import secrets
 import sys
 import time
+import subprocess
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any
 from urllib.parse import urlparse
 
 from .code_graph import CodeGraphError, build_code_graph, build_node_dossier
 from .code_semantics import interpret_code_dossier
-from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text
+from .store import StateStore, ALL_GRANTED_ACTIONS, APPROVAL_ACTIONS, REJECT_ACTIONS, clean_text, utc_now
 from .llm_providers import LLMProviderStore
 from .llm_summary import (
     get_llm_summary,
@@ -29,6 +30,7 @@ from .llm_summary import (
     normalize_project_assistant_history,
     test_llm_provider,
 )
+from .ai_review import changed_paths as ai_changed_paths, preview_changed_files, review_working_tree
 
 
 MAX_BODY_BYTES = 1_000_000
@@ -88,6 +90,8 @@ class CodeDefogServer(ThreadingHTTPServer):
         # Local project discovery + monitoring (enterprise milestone 1).
         self.project_discovery_agent = project_discovery_agent
         self.project_monitor = project_monitor
+        self.ai_review_threads: dict[str, Thread] = {}
+        self.ai_review_threads_lock = Lock()
         # Automated drive runner (browse + test + static-scan + LLM summary).
         self.drive_runner = drive_runner
         self.harness = harness
@@ -139,6 +143,82 @@ class CodeDefogServer(ThreadingHTTPServer):
             self.assistant_cache.clear()
         with self.code_semantic_cache_lock:
             self.code_semantic_cache.clear()
+
+    def start_code_review(self, workspace: str, paths: list[str] | None = None,
+                          trigger: str = "manual") -> str:
+        """Queue a read-only project review on a daemon worker thread."""
+        normalized = str(Path(workspace).expanduser().resolve())
+        project = self.store.get_monitored_project(normalized)
+        if project is None:
+            raise ValueError("项目未登记为本机监控项目")
+        if trigger == "automatic" and not project.get("ai_review_enabled"):
+            raise ValueError("该项目尚未启用自动 AI 审查")
+        selected_paths = list(dict.fromkeys(paths if paths is not None else ai_changed_paths(normalized)))[:200]
+        if trigger == "manual" and paths is not None:
+            preview = preview_changed_files(normalized)
+            eligible = {item["path"]: int(item["size_bytes"]) for item in preview["files"]}
+            invalid = sorted(set(selected_paths) - set(eligible))
+            if invalid:
+                raise ValueError("所选文件已不在可审查范围内，请刷新文件预览")
+            if sum(eligible[path] for path in selected_paths) > int(preview["max_total_bytes"]):
+                raise ValueError("所选文件总量超过审查上限，请取消部分文件后重试")
+        if not selected_paths:
+            raise ValueError("当前工作区没有待审查的 Git 变更")
+        with self.ai_review_threads_lock:
+            if normalized in self.ai_review_threads and self.ai_review_threads[normalized].is_alive():
+                raise ValueError("该项目已有 AI 审查正在运行")
+            try:
+                head = subprocess.run(
+                    ["git", "-C", normalized, "rev-parse", "HEAD"],
+                    capture_output=True, text=True, timeout=5, check=False,
+                )
+                revision = head.stdout.strip() if head.returncode == 0 else ""
+            except (OSError, subprocess.TimeoutExpired):
+                revision = ""
+            expected_provider_id = str(project.get("ai_review_provider_id") or "") if trigger == "automatic" else None
+            expected_provider_signature = str(project.get("ai_review_provider_signature") or "") if trigger == "automatic" else None
+            run_id = self.store.begin_code_review_report(normalized, trigger, selected_paths, revision)
+            worker = Thread(
+                target=self._run_code_review,
+                args=(run_id, normalized, selected_paths, revision,
+                      expected_provider_id, expected_provider_signature, trigger),
+                name=f"code-review-{run_id[-8:]}", daemon=True,
+            )
+            self.ai_review_threads[normalized] = worker
+            worker.start()
+        return run_id
+
+    def _run_code_review(self, run_id: str, workspace: str,
+                         paths: list[str], revision: str,
+                         expected_provider_id: str | None = None,
+                         expected_provider_signature: str | None = None,
+                         trigger: str = "manual") -> None:
+        provider_id = ""
+        model = ""
+        try:
+            result = review_working_tree(
+                workspace, paths, self.llm_provider_store, head=revision,
+                expected_provider_id=expected_provider_id,
+                expected_provider_signature=expected_provider_signature,
+            )
+            provider_id = str(result.get("provider") or "")
+            model = str(result.get("model") or "")
+            self.store.finish_code_review_report(
+                run_id, workspace, "complete", provider_id, model, result["report"], None,
+            )
+            self.publish({
+                "type": "code_review_updated", "workspace": workspace,
+                "run_id": run_id, "status": "complete", "trigger": trigger,
+            })
+        except Exception as exc:
+            message = clean_text(exc, 1000) or "AI 审查失败"
+            self.store.finish_code_review_report(
+                run_id, workspace, "error", provider_id, model, None, message,
+            )
+            self.publish({
+                "type": "code_review_updated", "workspace": workspace,
+                "run_id": run_id, "status": "error", "error": message, "trigger": trigger,
+            })
 
     def invalidate_code_graph_cache(self, workspace: str | None = None) -> None:
         """Forget structural and semantic views after monitored project changes."""
@@ -438,6 +518,31 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             return
         self.send_text(content, "text/html")
 
+    def serve_ui_asset(self, route: str) -> None:
+        """Serve the small, bundled CSS/JS assets used by the Web console."""
+        ui_dir = self.server.ui_dir
+        if not ui_dir:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        from urllib.parse import unquote
+
+        relative = unquote(route.removeprefix("/ui/assets/"))
+        if not relative or Path(relative).name != relative or Path(relative).suffix not in {".css", ".js"}:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        root = Path(ui_dir).resolve()
+        asset = (root / "assets" / relative).resolve()
+        if asset.parent != (root / "assets").resolve():
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        try:
+            content = asset.read_text(encoding="utf-8")
+        except OSError:
+            self.send_json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+            return
+        content_type = "text/css" if asset.suffix == ".css" else "text/javascript"
+        self.send_text(content, content_type)
+
     def serve_ui_config(self) -> None:
         """Hand the browser the connection config (host/port/token/user).
 
@@ -546,6 +651,9 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
         if route in ("/", "/ui", "/ui/"):
             self.serve_ui()
             return
+        if route.startswith("/ui/assets/"):
+            self.serve_ui_asset(route)
+            return
         if route == "/ui/config":
             # Defense in depth: token-bearing endpoint must not be reachable
             # from cross-site browser contexts (Host check above already
@@ -581,6 +689,70 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             return
         if route == "/api/projects/discover":
             self.projects_discover()
+            return
+        if route.startswith("/api/projects/") and route.endswith("/reviews/export"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/reviews/export")])
+            self.get_project_reviews_export(workspace)
+            return
+        if route.startswith("/api/projects/") and route.endswith("/code-reviews/preview"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/code-reviews/preview")])
+            if not workspace or self.server.store.get_monitored_project(workspace) is None:
+                self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+                return
+            try:
+                self.send_json({"ok": True, **preview_changed_files(workspace)})
+            except (OSError, RuntimeError, ValueError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        if route.startswith("/api/projects/") and "/code-reviews/" in route:
+            from urllib.parse import unquote
+
+            workspace_part, run_part = route[len("/api/projects/"):].split("/code-reviews/", 1)
+            self.get_code_review_report(unquote(workspace_part), unquote(run_part))
+            return
+        if route.startswith("/api/projects/") and route.endswith("/code-reviews"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/code-reviews")])
+            reports = self.server.store.list_code_review_reports(workspace)
+            project = self.server.store.get_monitored_project(workspace) or {}
+            try:
+                pending_files = json.loads(project.get("ai_review_pending_files_json") or "[]")
+            except json.JSONDecodeError:
+                pending_files = []
+            self.send_json({
+                "ok": True, "reports": reports, "count": len(reports),
+                "auto_review": {
+                    "enabled": bool(project.get("ai_review_enabled")),
+                    "status": project.get("ai_review_status", "disabled"),
+                    "last_change": project.get("ai_review_last_change"),
+                    "pending_files": pending_files,
+                    "error": project.get("ai_review_error"),
+                    "last_report_id": project.get("ai_review_last_report_id"),
+                    "quiet_seconds": int(project.get("ai_review_quiet_seconds") or 10800),
+                },
+            })
+            return
+        if route.startswith("/api/projects/") and "/skill-reports/" in route:
+            from urllib.parse import unquote
+
+            prefix = "/api/projects/"
+            workspace_part, report_part = route[len(prefix):].split("/skill-reports/", 1)
+            self.get_skill_review_report(unquote(workspace_part), unquote(report_part))
+            return
+        if route.startswith("/api/projects/") and route.endswith("/skill-reports"):
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/skill-reports")])
+            if not workspace:
+                self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+                return
+            reports = self.server.store.list_skill_review_reports(workspace)
+            self.send_json({"ok": True, "reports": reports, "count": len(reports)})
             return
         if route.startswith("/api/projects/") and route.endswith("/reviews"):
             from urllib.parse import unquote
@@ -747,6 +919,148 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True, "project": project}, HTTPStatus.CREATED)
             return
 
+        if route.startswith("/api/projects/") and route.endswith("/skill-reports"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/skill-reports")])
+            if not workspace:
+                self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+                return
+            if self.server.store.get_monitored_project(workspace) is None:
+                self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+                return
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            try:
+                report = self.validate_skill_review_report(payload.get("report"))
+                record = self.server.store.import_skill_review_report(workspace, report)
+            except (ValueError, KeyError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({"ok": True, "record": record}, HTTPStatus.CREATED)
+            return
+
+        if route.startswith("/api/projects/") and route.endswith("/ai-review-settings"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/ai-review-settings")])
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            enabled = payload.get("enabled")
+            quiet_seconds = payload.get("quiet_seconds")
+            allowed_quiet_seconds = {300, 1800, 3600, 10800}
+            if enabled is not None and not isinstance(enabled, bool):
+                self.send_json({"error": "enabled must be a boolean"}, HTTPStatus.BAD_REQUEST)
+                return
+            if quiet_seconds is not None and (
+                    isinstance(quiet_seconds, bool) or not isinstance(quiet_seconds, int)
+                    or quiet_seconds not in allowed_quiet_seconds):
+                self.send_json({"error": "quiet_seconds must be one of 300, 1800, 3600, or 10800"},
+                               HTTPStatus.BAD_REQUEST)
+                return
+            if enabled is None and quiet_seconds is None:
+                self.send_json({"error": "provide enabled or quiet_seconds"}, HTTPStatus.BAD_REQUEST)
+                return
+            current_project = self.server.store.get_monitored_project(workspace)
+            if current_project is None:
+                self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+                return
+            if enabled is None:
+                project = self.server.store.set_auto_review_quiet_seconds(workspace, quiet_seconds)
+                self.send_json({"ok": True, "project": project})
+                return
+            if enabled:
+                provider = self.server.llm_provider_store.resolve_active()
+                if not provider.get("api_key") and provider.get("requires_api_key", True):
+                    self.send_json({"error": "请先在模型设置中配置当前提供方，再开启自动 AI 审查"}, HTTPStatus.CONFLICT)
+                    return
+                signature = hashlib.sha256(json.dumps({
+                    "id": provider.get("id"), "base_url": provider.get("base_url"),
+                    "model": provider.get("model"),
+                }, ensure_ascii=True, sort_keys=True).encode("utf-8")).hexdigest()
+                project = self.server.store.set_auto_review_enabled(
+                    workspace, True, str(provider.get("id") or ""), signature, quiet_seconds,
+                )
+                # Include already-dirty files when the user enables monitoring;
+                # otherwise a monitor whose baseline predates this setting
+                # would wait forever for a fresh filesystem event.
+                try:
+                    pending_paths = ai_changed_paths(workspace)
+                except (OSError, RuntimeError, ValueError):
+                    pending_paths = []
+                if pending_paths:
+                    self.server.store.note_auto_review_changes(workspace, pending_paths, time.time())
+            else:
+                project = self.server.store.set_auto_review_enabled(
+                    workspace, False, quiet_seconds=quiet_seconds,
+                )
+            self.send_json({"ok": True, "project": project})
+            return
+
+        if route.startswith("/api/projects/") and route.endswith("/code-reviews"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/code-reviews")])
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            if self.server.store.get_monitored_project(workspace) is None:
+                self.send_json({"error": "project is not monitored"}, HTTPStatus.NOT_FOUND)
+                return
+            requested_paths = payload.get("paths")
+            if requested_paths is not None and (
+                    not isinstance(requested_paths, list)
+                    or any(not isinstance(item, str) for item in requested_paths)
+                    or len(requested_paths) > 40):
+                self.send_json({"error": "paths must be a list of at most 40 file paths"},
+                               HTTPStatus.BAD_REQUEST)
+                return
+            try:
+                run_id = self.server.start_code_review(
+                    workspace, requested_paths, trigger="manual",
+                )
+            except (ValueError, RuntimeError) as error:
+                self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
+                return
+            self.send_json({"ok": True, "run_id": run_id}, HTTPStatus.ACCEPTED)
+            return
+
+        if route.startswith("/api/projects/") and route.endswith("/review-feedback"):
+            if not self.require_service_auth():
+                return
+            from urllib.parse import unquote
+
+            workspace = unquote(route[len("/api/projects/"):-len("/review-feedback")])
+            payload = self.read_json_body()
+            if payload is None:
+                return
+            if (self.server.drive_runner is None
+                    and self.server.store.get_monitored_project(workspace) is None):
+                self.send_json({"error": "workspace is not a registered monitored project"},
+                               HTTPStatus.FORBIDDEN)
+                return
+            try:
+                feedback = self.server.store.set_review_finding_feedback(
+                    workspace,
+                    str(payload.get("label") or ""),
+                    str(payload.get("detail") or ""),
+                    str(payload.get("status") or ""),
+                    str(payload.get("identity") or "") or None,
+                )
+            except ValueError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                return
+            self.send_json({"ok": True, "feedback": feedback}, HTTPStatus.OK)
+            return
+
         # ── Project Review Run (legacy /drive name): start read-only review ─
         if route.startswith("/api/projects/") and route.endswith("/drive"):
             if not self.require_service_auth():
@@ -798,6 +1112,18 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
                 return
             from urllib.parse import unquote
 
+            if route.endswith("/reviews"):
+                workspace = unquote(route[len("/api/projects/"):-len("/reviews")])
+                if not workspace:
+                    self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    deleted = self.server.store.delete_review_history(workspace)
+                except RuntimeError as error:
+                    self.send_json({"error": str(error)}, HTTPStatus.CONFLICT)
+                    return
+                self.send_json({"ok": True, "deleted": deleted})
+                return
             workspace = unquote(route[len("/api/projects/"):])
             if not workspace:
                 self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
@@ -1221,7 +1547,124 @@ class CodeDefogHandler(BaseHTTPRequestHandler):
             self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
             return
         runs = self.server.store.list_review_runs(workspace)
-        self.send_json({"ok": True, "runs": runs, "count": len(runs)})
+        feedback = self.server.store.list_review_finding_feedback(workspace)
+        skill_reports = self.server.store.list_skill_review_reports(workspace)
+        code_reports = self.server.store.list_code_review_reports(workspace)
+        project = self.server.store.get_monitored_project(workspace) or {}
+        self.send_json({"ok": True, "runs": runs, "count": len(runs), "feedback": feedback,
+                        "skill_reports": skill_reports, "code_reports": code_reports,
+                        "auto_review": {
+                            "enabled": bool(project.get("ai_review_enabled")),
+                            "status": project.get("ai_review_status", "disabled"),
+                            "last_change": project.get("ai_review_last_change"),
+                            "pending_files": json.loads(project.get("ai_review_pending_files_json") or "[]"),
+                            "error": project.get("ai_review_error"),
+                            "quiet_seconds": int(project.get("ai_review_quiet_seconds") or 10800),
+                        }})
+
+    def get_code_review_report(self, workspace: str, run_id: str) -> None:
+        if not workspace or not run_id:
+            self.send_json({"error": "workspace and run id are required"}, HTTPStatus.BAD_REQUEST)
+            return
+        record = self.server.store.get_code_review_report(workspace, run_id)
+        if record is None:
+            self.send_json({"error": "Code Defog review not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_json({"ok": True, **record})
+
+    def get_skill_review_report(self, workspace: str, report_id: str) -> None:
+        if not workspace or not report_id:
+            self.send_json({"error": "workspace and report id are required"}, HTTPStatus.BAD_REQUEST)
+            return
+        record = self.server.store.get_skill_review_report(workspace, report_id)
+        if record is None:
+            self.send_json({"error": "skill review report not found"}, HTTPStatus.NOT_FOUND)
+            return
+        self.send_json({"ok": True, **record})
+
+    @staticmethod
+    def validate_skill_review_report(report: Any) -> dict[str, Any]:
+        """Validate the Skill review record shape without adding a schema dependency."""
+        if not isinstance(report, dict) or report.get("schema_version") != "1.0":
+            raise ValueError("unsupported Skill report schema_version")
+        review = report.get("review")
+        if not isinstance(review, dict):
+            raise ValueError("review must be an object")
+        if review.get("mode") not in {"diff", "repository_audit"}:
+            raise ValueError("review.mode must be diff or repository_audit")
+        repository = review.get("repository")
+        revision = review.get("revision")
+        if not isinstance(repository, dict) or not all(
+            isinstance(repository.get(key), str) and repository[key].strip()
+            for key in ("key", "name")
+        ):
+            raise ValueError("review.repository must include key and name")
+        if not isinstance(revision, dict) or not isinstance(revision.get("head"), str) or not revision["head"].strip():
+            raise ValueError("review.revision.head is required")
+        for key in ("id", "created_at", "scope_summary"):
+            if not isinstance(review.get(key), str) or not review[key].strip():
+                raise ValueError(f"review.{key} is required")
+        if len(review["id"]) > 160 or len(review["scope_summary"]) > 12000:
+            raise ValueError("review id or scope_summary is too long")
+        checks = report.get("checks")
+        findings = report.get("findings")
+        if not isinstance(checks, list) or len(checks) > 500:
+            raise ValueError("checks must be an array with at most 500 entries")
+        if not isinstance(findings, list) or len(findings) > 500:
+            raise ValueError("findings must be an array with at most 500 entries")
+        allowed_check_status = {"passed", "failed", "environment_limited", "not_run"}
+        for check in checks:
+            if not isinstance(check, dict) or not all(
+                isinstance(check.get(key), str) for key in ("command", "summary")
+            ) or check.get("status") not in allowed_check_status:
+                raise ValueError("each check needs command, summary, and a valid status")
+        allowed_categories = {
+            "behavior_defect", "content_rule_inconsistency", "factual_content_error",
+            "maintenance_gap", "regression_check_failure", "unverified_lead", "environment_issue",
+        }
+        allowed_severities = {"P0", "P1", "P2", "P3", "unrated"}
+        allowed_finding_status = {"confirmed", "unverified", "environment_limited"}
+        for finding in findings:
+            if not isinstance(finding, dict):
+                raise ValueError("each finding must be an object")
+            if not all(isinstance(finding.get(key), str) for key in ("fingerprint", "title", "impact")):
+                raise ValueError("each finding needs fingerprint, title, and impact")
+            if finding.get("category") not in allowed_categories:
+                raise ValueError("finding category is invalid")
+            if finding.get("severity") not in allowed_severities:
+                raise ValueError("finding severity is invalid")
+            if finding.get("status") not in allowed_finding_status:
+                raise ValueError("finding status is invalid")
+            evidence = finding.get("evidence")
+            if not isinstance(evidence, list) or not evidence or len(evidence) > 100:
+                raise ValueError("each finding needs 1 to 100 evidence entries")
+            if any(not isinstance(item, dict) or not isinstance(item.get("observation"), str) for item in evidence):
+                raise ValueError("each evidence entry needs an observation")
+        return report
+
+    def get_project_reviews_export(self, workspace: str) -> None:
+        """Return all retained review records for a project as exportable JSON."""
+        if not workspace:
+            self.send_json({"error": "workspace required"}, HTTPStatus.BAD_REQUEST)
+            return
+        runs = self.server.store.list_review_runs(workspace, limit=200)
+        feedback = self.server.store.list_review_finding_feedback(workspace)
+        skill_reports = [
+            self.server.store.get_skill_review_report(workspace, item["report_id"])
+            for item in self.server.store.list_skill_review_reports(workspace, limit=200)
+        ]
+        code_reports = [
+            self.server.store.get_code_review_report(workspace, item["run_id"])
+            for item in self.server.store.list_code_review_reports(workspace, limit=200)
+        ]
+        self.send_json({
+            "format": "code-defog-review-history-v1",
+            "exported_at": utc_now(),
+            "runs": runs,
+            "feedback": feedback,
+            "skill_reports": [item for item in skill_reports if item is not None],
+            "code_reports": [item for item in code_reports if item is not None],
+        })
 
     def get_case(self, case_id: str) -> None:
         case = self.server.store.get_case(case_id)

@@ -1,0 +1,3986 @@
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const create = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+  const CASE_EVENTS = ["case_created", "case_action", "case_transition", "case_retrospective"];
+  const STATUS_META = {
+    RECEIVED: { label: "已接收", color: "var(--ink-muted)", tone: "neutral", detail: "已接收输入，等待分诊。" },
+    TRIAGED: { label: "已分诊", color: "var(--blue)", tone: "info", detail: "输入已归并并完成基础分类。" },
+    DIAGNOSED: { label: "已诊断", color: "var(--blue)", tone: "info", detail: "诊断阶段已完成，等待修复计划审批。" },
+    PLAN_APPROVAL: { label: "计划待审批", color: "var(--yellow)", tone: "warning", detail: "需要人工批准后，才允许进入受控修复。" },
+    REPAIRING: { label: "修复中", color: "var(--blue)", tone: "info", detail: "受控修复动作仅能在隔离沙箱中执行。" },
+    VERIFYING: { label: "验证中", color: "var(--blue)", tone: "info", detail: "等待质量门禁的确定性结果。" },
+    PATCH_REJECTED: { label: "补丁被拦截", color: "var(--red)", tone: "danger", detail: "质量门禁已阻止该补丁继续放行。" },
+    RELEASE_APPROVAL: { label: "放行待审批", color: "var(--yellow)", tone: "warning", detail: "质量门禁已完成，仍需人工确认模拟放行。" },
+    RELEASED: { label: "已放行", color: "var(--green)", tone: "success", detail: "流程已批准放行，不代表存在生产部署证据。" },
+    ROLLED_BACK: { label: "已回滚", color: "var(--red)", tone: "danger", detail: "流程已进入回滚分支。" },
+    ESCALATED: { label: "已升级", color: "var(--rose)", tone: "attention", detail: "自动链路停止，等待人工处理。" },
+    CLOSED: { label: "已关闭", color: "var(--green)", tone: "success", detail: "Case 已结束，可继续核对复盘与知识记录。" },
+  };
+  const MAIN_STATES = ["RECEIVED", "TRIAGED", "DIAGNOSED", "PLAN_APPROVAL", "REPAIRING", "VERIFYING", "RELEASE_APPROVAL", "RELEASED", "CLOSED"];
+  const TABS = [["sources", "来源"], ["agent_runs", "运行"], ["tool_runs", "工具"], ["approvals", "决策"], ["artifacts", "制品"], ["knowledge", "知识"], ["retrospective", "复盘"]];
+  const AGENTS = [
+    { id: "triage", title: "分诊证据", state: "TRIAGED", handoff: "DIAGNOSED", boundary: "归并和分类输入，不修改代码或执行审批。" },
+    { id: "diagnosis", title: "诊断影响", state: "DIAGNOSED", handoff: "PLAN_APPROVAL", boundary: "形成结构化诊断建议，不写入工作树或发布。" },
+    { id: "repair", title: "修复执行", state: "REPAIRING", handoff: "VERIFYING", boundary: "仅允许受控隔离沙箱，不写主分支或执行审批。" },
+    { id: "verification", title: "验证发布", state: "VERIFYING", handoff: "RELEASE_APPROVAL", boundary: "质量门禁只给出建议，不执行真实发布或审批。" },
+  ];
+  const TOOL_LABELS = {
+    sandbox_copy: ["隔离沙箱拷贝", "复制受控工作树，源仓库保持不变。"],
+    apply_case_a_patch: ["受控补丁应用", "只允许预审的 Case A 补丁替换。"],
+    quality_gate: ["确定性质量门禁", "以本地质量门禁退出码决定拦截或放行。"],
+  };
+
+  let config = { host: "127.0.0.1", port: "", token: "", user: "reviewer", served: false, runtime_mode: "mock" };
+  let apiOnline = false;
+  let streamOnline = false;
+  let cases = [];
+  let selectedId = null;
+  let evidence = null;
+  let activeTab = "sources";
+  let pendingApproval = null;
+  let toastTimer = null;
+  let refreshTimer = null;
+  let streamController = null;
+  let streamEpoch = 0;
+  let streamWake = null;
+  let connectionEpoch = 0;
+  const SERVICE_CACHE_KEY = "cc-discovered-services";
+  let currentView = "overview";
+  let summaryLlm = null;
+  let selectedProject = null;      // { workspace, name, canonical_ref, status, kind, ... }
+  let monitoredProjects = [];      // from GET /api/projects
+  let dataEpoch = 0;               // bumped on connect AND project switch (race guard)
+  const PROJECT_KEY = "cc-current-project";
+  let driveTimer = null;           // setInterval handle for the drive mm:ss clock
+  let driveStartedAt = 0;          // Date.now() when the current drive started
+  let reviewRun = null;            // latest first-class Review Run for the selected project
+  let reviewRuns = [];             // short persisted history, newest first
+  let skillReviewReports = [];      // imported local Skill audit records for the selected project
+  let codeReviewReports = [];       // Code Defog model reviews, separate from Skill imports
+  let autoReviewState = { enabled: false, status: "disabled", quiet_seconds: 10800 };
+  let reviewFeedback = new Map();  // per-project human disposition of stable findings
+  let aiReviewPreview = null;
+  let aiReviewPreviewWorkspace = null;
+  let aiReviewSubmitting = false;
+  const notifiedAutoReviewRuns = new Set();
+  const AUTO_REVIEW_NOTICE_KEY = "code-defog-auto-review-notifications";
+  let harnessInfo = null;          // read-only dispatch manifest from /api/harness
+  let assistantMessages = [];      // browser-memory only; raw questions are never persisted
+  let assistantBusy = false;
+  let assistantAbortController = null;
+  let assistantRequestId = 0;
+  let llmProviderConfig = null;
+  let llmSettingsBusy = false;
+  let codeGraph = null;
+  let codeGraphWorkspace = null;
+  let codeMapSelectedNodeId = null;
+  let codeMapDossier = null;
+  let codeMapInterpreter = null;
+  let codeMapBusy = false;
+  let codeMapRequestId = 0;
+  let codeMapPendingLocation = null;
+  let codeMapView = { zoom: 1.25, panX: 0, panY: 0, width: 0, height: 0, pointer: null };
+  let codeMapRobotPosition = { x: 14, y: 14, pointer: null };
+  let projectPickerBusy = false;
+  let projectDiscoveryBusy = false;
+  let projectSwitchBusy = false;
+  let reviewStartBusy = false;
+  let reviewStartError = "";
+  let activeOverlay = null;
+  let overlayReturnFocus = null;
+
+  const OVERLAY_PANELS = {
+    connection: "connect-dialog",
+    projectPicker: "project-picker-dialog",
+    assistant: "assistant-drawer",
+    llmSettings: "llm-settings-drawer",
+  };
+  function overlayPanel(name) { return $(OVERLAY_PANELS[name]); }
+  function overlayFocusable(panel) {
+    if (!panel) return [];
+    return [...panel.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      .filter((element) => !element.hidden && element.getClientRects().length);
+  }
+  function beginOverlay(name, opener = document.activeElement, initialFocus = null) {
+    // Keep exactly one interaction layer active.  A discovery-only connection
+    // screen normally cannot be dismissed by its own close button, but it must
+    // still yield when another explicit overlay takes ownership.
+    if (activeOverlay && activeOverlay !== name) closeActiveOverlay(false, true);
+    activeOverlay = name;
+    overlayReturnFocus = opener instanceof HTMLElement ? opener : null;
+    const app = $("app");
+    if (app) {
+      app.inert = true;
+      app.setAttribute("aria-hidden", "true");
+    }
+    document.body.classList.add("modal-open");
+    requestAnimationFrame(() => {
+      if (activeOverlay !== name) return;
+      const panel = overlayPanel(name);
+      const target = initialFocus && !initialFocus.disabled ? initialFocus : overlayFocusable(panel)[0] || panel;
+      target?.focus({ preventScroll: true });
+    });
+  }
+  function endOverlay(name, restoreFocus = true) {
+    if (activeOverlay !== name) return;
+    const previousFocus = overlayReturnFocus;
+    activeOverlay = null;
+    overlayReturnFocus = null;
+    const app = $("app");
+    if (app) {
+      app.inert = false;
+      app.removeAttribute("aria-hidden");
+    }
+    document.body.classList.remove("modal-open");
+    if (restoreFocus && previousFocus?.isConnected && !previousFocus.disabled) {
+      requestAnimationFrame(() => previousFocus.focus({ preventScroll: true }));
+    }
+  }
+  function closeActiveOverlay(restoreFocus = true, force = false) {
+    if (activeOverlay === "assistant") closeAssistantDrawer(restoreFocus);
+    else if (activeOverlay === "llmSettings") closeLLMSettings(restoreFocus);
+    else if (activeOverlay === "projectPicker") closeProjectPicker(restoreFocus);
+    else if (activeOverlay === "connection") closeConnectionPicker(restoreFocus, force);
+  }
+  document.addEventListener("keydown", (event) => {
+    if (!activeOverlay) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (activeOverlay === "assistant" && assistantBusy) {
+        cancelAssistantRequest();
+      } else {
+        closeActiveOverlay(true);
+      }
+      return;
+    }
+    if (event.key !== "Tab") return;
+    const focusable = overlayFocusable(overlayPanel(activeOverlay));
+    if (!focusable.length) {
+      event.preventDefault();
+      overlayPanel(activeOverlay)?.focus({ preventScroll: true });
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1);
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }, true);
+
+  const root = document.documentElement;
+  const urlTheme = new URLSearchParams(location.search).get("theme");
+  if (urlTheme === "light" || urlTheme === "dark") root.dataset.theme = urlTheme;
+  function syncThemeButtons() {
+    const selectedTheme = root.dataset.theme === "dark" ? "dark" : "light";
+    document.querySelectorAll("[data-theme-btn]").forEach((button) => button.setAttribute("aria-pressed", button.dataset.themeBtn === selectedTheme ? "true" : "false"));
+  }
+  document.querySelectorAll("[data-theme-btn]").forEach((button) => button.addEventListener("click", () => {
+    root.dataset.theme = button.dataset.themeBtn;
+    syncThemeButtons();
+  }));
+  syncThemeButtons();
+
+  // ── View switching (hash routes #/audit / #/overview / #/code-map / #/projects) ──
+  // Pure toggle — data loading is funneled through refreshActiveView()/
+  // refreshAll() (see data layer), so switching never double-fetches.
+  function setView(view) {
+    currentView = ["overview", "code-map", "projects"].includes(view) ? view : "audit";
+    $("view-audit").hidden = currentView !== "audit";
+    $("view-overview").hidden = currentView !== "overview";
+    $("view-code-map").hidden = currentView !== "code-map";
+    $("view-projects").hidden = currentView !== "projects";
+    document.querySelectorAll(".sidebar-nav-item").forEach((btn) =>
+      btn.setAttribute("aria-current", btn.dataset.view === currentView ? "page" : "false"));
+    renderAuditEmptyState();
+    renderOverviewEmptyState();
+  }
+  function applyHash() {
+    const hash = location.hash.replace(/^#\/?/, "");
+    setView(hash === "audit" ? "audit" : hash === "code-map" ? "code-map" : hash === "projects" ? "projects" : "overview");
+  }
+  const VIEW_LABELS = { overview: "项目审查", "code-map": "代码地图", audit: "Case 审计", projects: "监控项目" };
+  const VIEW_HEADING_IDS = { overview: "overview-title", "code-map": "code-map-title", audit: "case-title-section", projects: "projects-title" };
+  let pendingViewFocus = false;
+  function focusCurrentViewHeading() {
+    const heading = $(VIEW_HEADING_IDS[currentView]);
+    if (!heading) return;
+    heading.tabIndex = -1;
+    requestAnimationFrame(() => heading.focus({ preventScroll: true }));
+  }
+  const viewNavItems = [...document.querySelectorAll(".sidebar-nav-item")];
+  viewNavItems.forEach((btn, index) => {
+    btn.addEventListener("click", () => {
+      const nextView = btn.dataset.view;
+      if (currentView === nextView) {
+        $("view-navigation-status").textContent = `正在刷新${VIEW_LABELS[nextView]}。`;
+        refreshActiveView(dataEpoch).catch((error) => toast(error.message || "刷新失败"));
+        return;
+      }
+      pendingViewFocus = true;
+      location.hash = "#/" + nextView;
+    });
+    btn.addEventListener("keydown", (event) => {
+      const keys = { ArrowLeft: -1, ArrowUp: -1, ArrowRight: 1, ArrowDown: 1 };
+      if (event.key === "Home" || event.key === "End") {
+        event.preventDefault();
+        viewNavItems[event.key === "Home" ? 0 : viewNavItems.length - 1].focus();
+        return;
+      }
+      if (!(event.key in keys)) return;
+      event.preventDefault();
+      const next = (index + keys[event.key] + viewNavItems.length) % viewNavItems.length;
+      viewNavItems[next].focus();
+    });
+  });
+  window.addEventListener("hashchange", () => {
+    applyHash();
+    $("view-navigation-status").textContent = `已进入${VIEW_LABELS[currentView]}。`;
+    if (pendingViewFocus) {
+      pendingViewFocus = false;
+      focusCurrentViewHeading();
+    }
+    refreshActiveView().catch((error) => toast(error.message || "刷新失败"));
+  });
+
+  function runtimeLabel() {
+    if (config.runtime_mode === "agentscope" || config.runtime_mode === "production") return "AgentScope 本地实验";
+    return "Mock + Harness 演练";
+  }
+  function renderConnectionStatus() {
+    const online = apiOnline || streamOnline;
+    $("runtime-status").dataset.online = String(online);
+    $("runtime-status").dataset.mode = config.runtime_mode === "production" ? "production" : "mock";
+    $("runtime-label").textContent = !online ? "服务离线"
+      : !apiOnline ? "实时连接可用，接口重试中"
+        : !streamOnline ? "服务在线 · 实时更新重连中" : runtimeLabel();
+    const banner = $("offline-banner");
+    banner.textContent = !online ? "本地服务连接中断，正在重试。"
+      : !streamOnline ? "数据接口可用，实时更新连接中断，正在重连。" : "";
+    banner.classList.toggle("show", !online || !streamOnline);
+  }
+  function setApiOnline(online) { apiOnline = online; renderConnectionStatus(); }
+  function setStreamOnline(online) { streamOnline = online; renderConnectionStatus(); }
+  function toast(message) {
+    const target = $("toast");
+    target.textContent = message;
+    target.classList.add("show");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => target.classList.remove("show"), 2600);
+  }
+
+  function baseUrl() { return config.served ? "" : `http://${config.host}:${config.port}`; }
+  async function api(path, options = {}) {
+    const headers = { "X-Code-Defog-Token": config.token };
+    if (options.tokenType) headers["X-Code-Defog-Token-Type"] = options.tokenType;
+    if (options.humanApprovalKey) headers["X-Code-Defog-Approval-Key"] = options.humanApprovalKey;
+    if (options.body) headers["Content-Type"] = "application/json";
+    let response;
+    try {
+      response = await fetch(baseUrl() + path, { method: options.method || "GET", headers, body: options.body ? JSON.stringify(options.body) : undefined, signal: options.signal });
+    } catch (error) {
+      if (error && error.name === "AbortError") throw error;
+      setApiOnline(false);
+      throw new Error("无法连接本地服务");
+    }
+    setApiOnline(true);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    return payload;
+  }
+
+  // ── 项目助手：单项目、只读、浏览器内存会话 ────────────────────────
+  function updateAssistantProject() {
+    const name = selectedProject ? (selectedProject.name || selectedProject.workspace) : "未选择项目";
+    $("assistant-project-name").textContent = name;
+    const unavailable = !selectedProject;
+    $("assistant-open-btn").disabled = unavailable;
+    $("assistant-input").disabled = unavailable || assistantBusy;
+    $("assistant-send-btn").disabled = unavailable || assistantBusy;
+    $("assistant-cancel-btn").hidden = !assistantBusy;
+    $("assistant-cancel-btn").disabled = !assistantBusy;
+    document.querySelectorAll(".assistant-suggestion, .assistant-follow-up").forEach((button) => {
+      button.disabled = unavailable || assistantBusy;
+    });
+  }
+  function renderAssistantThread() {
+    const target = $("assistant-thread");
+    target.replaceChildren();
+    if (!assistantMessages.length) {
+      target.append(create("div", "assistant-empty", selectedProject ? "暂无对话" : "未选择项目"));
+    }
+    assistantMessages.forEach((message) => {
+      const item = create("article", `assistant-message ${message.kind}`);
+      const label = create("div", "assistant-message-label", message.kind === "user" ? "你" : message.kind === "notice" ? "服务状态" : "项目助手");
+      const bubble = create("div", "assistant-bubble", message.text);
+      item.append(label, bubble);
+      if (message.kind === "assistant" && Array.isArray(message.sources) && message.sources.length) {
+        const meta = create("div", "assistant-message-meta");
+        message.sources.forEach((source) => meta.append(create("span", "assistant-source", source)));
+        item.append(meta);
+      }
+      if (message.kind === "assistant" && Array.isArray(message.followUps) && message.followUps.length) {
+        const followUps = create("div", "assistant-follow-ups");
+        message.followUps.forEach((question) => {
+          const button = create("button", "assistant-follow-up", question);
+          button.type = "button";
+          button.addEventListener("click", () => askAssistant(question));
+          followUps.append(button);
+        });
+        item.append(followUps);
+      }
+      target.append(item);
+    });
+    if (assistantBusy) target.append(create("div", "assistant-pending", "正在整理当前项目记录…"));
+    updateAssistantProject();
+    target.scrollTop = target.scrollHeight;
+  }
+  function resetAssistantConversation() {
+    assistantRequestId += 1;
+    if (assistantAbortController) assistantAbortController.abort();
+    assistantAbortController = null;
+    assistantMessages = [];
+    assistantBusy = false;
+    renderAssistantThread();
+  }
+  function openAssistantDrawer() {
+    if (!selectedProject) { toast("请先选择要监控的项目"); return; }
+    $("assistant-scrim").hidden = false;
+    $("assistant-drawer").hidden = false;
+    document.body.classList.add("assistant-open");
+    $("assistant-open-btn").setAttribute("aria-expanded", "true");
+    renderAssistantThread();
+    beginOverlay("assistant", document.activeElement, $("assistant-input"));
+  }
+  function closeAssistantDrawer(restoreFocus = true) {
+    const wasOpen = !$("assistant-drawer").hidden;
+    if (wasOpen && assistantBusy) cancelAssistantRequest();
+    $("assistant-scrim").hidden = true;
+    $("assistant-drawer").hidden = true;
+    document.body.classList.remove("assistant-open");
+    $("assistant-open-btn").setAttribute("aria-expanded", "false");
+    if (wasOpen) endOverlay("assistant", restoreFocus);
+  }
+  function assistantHistory() {
+    return assistantMessages
+      .filter((message) => message.kind === "user" || message.kind === "assistant")
+      .slice(-6)
+      .map((message) => ({ role: message.kind === "user" ? "user" : "assistant", content: message.text }));
+  }
+  function cancelAssistantRequest() {
+    if (assistantAbortController) assistantAbortController.abort();
+  }
+  async function askAssistant(rawQuestion) {
+    const question = String(rawQuestion || "").trim();
+    if (!question || assistantBusy || !selectedProject) return;
+    const workspace = selectedProject.workspace;
+    const history = assistantHistory();
+    const requestId = ++assistantRequestId;
+    const controller = new AbortController();
+    assistantAbortController = controller;
+    assistantMessages.push({ kind: "user", text: question });
+    assistantBusy = true;
+    $("assistant-input").value = "";
+    renderAssistantThread();
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/assistant`, {
+        method: "POST", body: { question, history }, signal: controller.signal,
+      });
+      if (requestId !== assistantRequestId || !selectedProject || selectedProject.workspace !== workspace) return;
+      const reply = payload.assistant || {};
+      if (reply.status === "ok" && typeof reply.answer === "string" && reply.answer.trim()) {
+        assistantMessages.push({
+          kind: "assistant",
+          text: reply.answer.trim(),
+          sources: Array.isArray(reply.sources) ? reply.sources : [],
+          followUps: Array.isArray(reply.follow_ups) ? reply.follow_ups : [],
+        });
+      } else {
+        assistantMessages.push({ kind: "notice", text: reply.reason || "项目助手暂时不可用。" });
+      }
+    } catch (error) {
+      if (requestId !== assistantRequestId) return;
+      if (controller.signal.aborted) {
+        assistantMessages.push({ kind: "notice", text: "已停止本次整理。" });
+      } else if (selectedProject && selectedProject.workspace === workspace) {
+        assistantMessages.push({ kind: "notice", text: error.message || "项目助手请求失败。" });
+      }
+    } finally {
+      if (requestId !== assistantRequestId) return;
+      assistantAbortController = null;
+      if (selectedProject && selectedProject.workspace === workspace) assistantBusy = false;
+      renderAssistantThread();
+      if (!$("assistant-drawer").hidden && !assistantBusy) $("assistant-input").focus();
+    }
+  }
+  $("assistant-open-btn").addEventListener("click", openAssistantDrawer);
+  $("assistant-close-btn").addEventListener("click", closeAssistantDrawer);
+  $("assistant-scrim").addEventListener("click", closeAssistantDrawer);
+  $("assistant-cancel-btn").addEventListener("click", cancelAssistantRequest);
+  $("assistant-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    askAssistant($("assistant-input").value);
+  });
+  $("assistant-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      askAssistant(event.currentTarget.value);
+    }
+  });
+  document.querySelectorAll(".assistant-suggestion").forEach((button) => {
+    button.addEventListener("click", () => askAssistant(button.dataset.question));
+  });
+  // ── 本地 LLM 设置：密钥不进入 localStorage 或界面状态 ──────────────
+  function llmProviderById(providerId) {
+    return (llmProviderConfig?.providers || []).find((provider) => provider.id === providerId) || null;
+  }
+  function setLLMSettingsBusy(busy) {
+    llmSettingsBusy = busy;
+    ["llm-provider-select", "llm-base-url", "llm-model", "llm-api-key", "llm-clear-key", "llm-test-btn", "llm-save-btn"].forEach((id) => {
+      $(id).disabled = busy;
+    });
+  }
+  function fillLLMProviderForm(providerId) {
+    const provider = llmProviderById(providerId);
+    if (!provider) return;
+    $("llm-provider-select").value = provider.id;
+    $("llm-base-url").value = provider.base_url || "";
+    $("llm-model").value = provider.model || "";
+    $("llm-api-key").value = "";
+    $("llm-clear-key").checked = false;
+    $("llm-settings-state").textContent = provider.configured
+      ? `${provider.key_source === "本机免密" ? "本机可用" : "已配置"} · ${provider.key_source || "本地受限配置"}`
+      : "未配置密钥";
+  }
+  function renderLLMProviderConfig(payload, selectedId) {
+    llmProviderConfig = payload?.llm || payload || null;
+    const providers = llmProviderConfig?.providers || [];
+    const select = $("llm-provider-select");
+    select.replaceChildren();
+    providers.forEach((provider) => {
+      const option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.name;
+      select.append(option);
+    });
+    fillLLMProviderForm(selectedId || llmProviderConfig?.active_provider || providers[0]?.id);
+    renderPersonalOnboarding();
+  }
+  function renderPersonalOnboarding() {
+    const projectState = $("onboarding-project-status");
+    if (!projectState) return;
+    projectState.textContent = selectedProject ? "已完成" : "待选择";
+    const completedRun = reviewRuns.some((run) => run.status === "complete");
+    const failedRun = reviewRuns.some((run) => run.status === "error");
+    const firstReviewState = $("onboarding-review-status");
+    if (firstReviewState) firstReviewState.textContent = completedRun ? "已完成" : failedRun ? "上次失败，可重试" : "待完成";
+    const provider = llmProviderById(llmProviderConfig?.active_provider);
+    const modelState = $("onboarding-model-status");
+    if (modelState) modelState.textContent = provider?.configured ? `已配置：${provider.name}（可选）` : "尚未配置（可跳过）";
+    const runButton = $("review-onboarding-run-btn");
+    if (runButton) runButton.disabled = !selectedProject || reviewStartBusy;
+  }
+  async function loadLLMProviderConfig() {
+    const payload = await api("/api/llm/providers");
+    renderLLMProviderConfig(payload);
+  }
+  function openLLMSettings() {
+    $("llm-settings-scrim").hidden = false;
+    $("llm-settings-drawer").hidden = false;
+    document.body.classList.add("llm-settings-open");
+    $("llm-settings-open-btn").setAttribute("aria-expanded", "true");
+    $("llm-settings-state").textContent = "正在读取本地配置…";
+    beginOverlay("llmSettings", document.activeElement, $("llm-settings-close-btn"));
+    setLLMSettingsBusy(true);
+    loadLLMProviderConfig().catch((error) => {
+      $("llm-settings-state").textContent = error.message || "无法读取 LLM 配置";
+    }).finally(() => {
+      setLLMSettingsBusy(false);
+      if (activeOverlay === "llmSettings") $("llm-provider-select").focus({ preventScroll: true });
+    });
+  }
+  function closeLLMSettings(restoreFocus = true) {
+    const wasOpen = !$("llm-settings-drawer").hidden;
+    $("llm-settings-scrim").hidden = true;
+    $("llm-settings-drawer").hidden = true;
+    document.body.classList.remove("llm-settings-open");
+    $("llm-settings-open-btn").setAttribute("aria-expanded", "false");
+    $("llm-api-key").value = "";
+    if (wasOpen) endOverlay("llmSettings", restoreFocus);
+  }
+  function llmSettingsPayload(includeKey) {
+    const payload = {
+      provider_id: $("llm-provider-select").value,
+      base_url: $("llm-base-url").value.trim(),
+      model: $("llm-model").value.trim(),
+      clear_key: $("llm-clear-key").checked,
+    };
+    const key = $("llm-api-key").value.trim();
+    if (includeKey && key) payload.api_key = key;
+    return payload;
+  }
+  $("llm-settings-open-btn").addEventListener("click", openLLMSettings);
+  $("llm-settings-close-btn").addEventListener("click", closeLLMSettings);
+  $("llm-settings-scrim").addEventListener("click", closeLLMSettings);
+  $("llm-provider-select").addEventListener("change", (event) => fillLLMProviderForm(event.currentTarget.value));
+  $("llm-settings-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (llmSettingsBusy) return;
+    const payload = llmSettingsPayload(true);
+    $("llm-api-key").value = "";
+    setLLMSettingsBusy(true);
+    try {
+      const result = await api("/api/llm/providers", { method: "POST", body: payload });
+      renderLLMProviderConfig(result, payload.provider_id);
+      toast("LLM 配置已保存并启用");
+      await loadProjectSummary(true);
+    } catch (error) {
+      $("llm-settings-state").textContent = error.message || "保存失败";
+    } finally {
+      setLLMSettingsBusy(false);
+    }
+  });
+  $("llm-test-btn").addEventListener("click", async () => {
+    if (llmSettingsBusy) return;
+    setLLMSettingsBusy(true);
+    try {
+      const result = await api("/api/llm/providers/test", { method: "POST", body: llmSettingsPayload(false) });
+      $("llm-settings-state").textContent = result.ok ? "连接正常" : (result.test?.reason || "连接测试失败");
+    } catch (error) {
+      $("llm-settings-state").textContent = error.message || "连接测试失败";
+    } finally {
+      setLLMSettingsBusy(false);
+    }
+  });
+  function cachedServices() {
+    try {
+      const items = JSON.parse(localStorage.getItem(SERVICE_CACHE_KEY) || "[]");
+      return Array.isArray(items) ? items : [];
+    } catch (error) {
+      return [];
+    }
+  }
+  function serviceFromCoordinates(host, port, source = "saved_connection") {
+    if (typeof host !== "string" || !/^\d{1,5}$/.test(String(port))) return null;
+    const numericPort = Number(port);
+    if (numericPort < 1 || numericPort > 65535) return null;
+    const trimmedHost = host.trim();
+    if (!trimmedHost) return null;
+    try {
+      const address = trimmedHost.includes(":") ? `[${trimmedHost}]` : trimmedHost;
+      const candidate = {
+        host: trimmedHost,
+        port: numericPort,
+        source,
+        status: "ready",
+        ui_url: `http://${address}:${numericPort}/ui`,
+      };
+      return serviceUrlSafe(candidate) ? candidate : null;
+    } catch (error) {
+      return null;
+    }
+  }
+  function rememberedConnectionService() {
+    try {
+      const remembered = JSON.parse(localStorage.getItem("cc-conn") || "{}");
+      return serviceFromCoordinates(remembered.host, remembered.port);
+    } catch (error) {
+      return null;
+    }
+  }
+  function verifiedServiceCandidates(services) {
+    return services.filter((service) =>
+      service && typeof service.host === "string" && typeof service.ui_url === "string" &&
+      service.status === "ready" && serviceUrlSafe(service));
+  }
+  async function hasHealthyService(service) {
+    try {
+      const endpoint = new URL(service.ui_url);
+      endpoint.pathname = "/health";
+      endpoint.search = "";
+      endpoint.hash = "";
+      const response = await fetch(endpoint.href, { cache: "no-store" });
+      const health = await response.json().catch(() => ({}));
+      if (!response.ok || !health || health.ok !== true || health.ui !== true) return false;
+      if (health.service !== "code-defog" && health.service !== "code-cctv") return false;
+      return service.source !== "registry" || !service.id || health.instance_id === service.id;
+    } catch (error) {
+      return false;
+    }
+  }
+  async function autoOpenRememberedService() {
+    // A file:// page never reads a token. It can only reuse a known loopback
+    // address after its public health endpoint proves it is a running console.
+    const saved = rememberedConnectionService();
+    const discovered = verifiedServiceCandidates(cachedServices());
+    const candidate = saved || (discovered.length === 1 ? discovered[0] : null);
+    if (!candidate || !await hasHealthyService(candidate)) return false;
+    location.replace(candidate.ui_url);
+    return true;
+  }
+  function serviceState(service) {
+    if (service.status === "ready") return "已验证";
+    if (service.status === "legacy") return "旧登记";
+    return "不可用";
+  }
+  function isCurrentService(service) {
+    try { return new URL(service.ui_url).origin === location.origin; } catch (error) { return false; }
+  }
+  // Only http(s) loopback URLs may be navigated to: a poisoned discovery
+  // entry (javascript:/data: scheme, or a non-loopback host) must never
+  // execute in the console origin.
+  function serviceUrlSafe(service) {
+    try {
+      const parsed = new URL(service.ui_url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+      if (isCurrentService(service)) return true; // same-origin page already trusted
+      const host = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+      return host === "127.0.0.1" || host === "localhost" || host === "::1";
+    } catch (error) {
+      return false;
+    }
+  }
+  function renderServices(services, message) {
+    const target = $("service-list");
+    target.innerHTML = "";
+    $("discovery-status").textContent = message;
+    if (!services.length) {
+      target.append(create("div", "empty-data", "未发现可展示的本机服务。"));
+      return;
+    }
+    services.forEach((service) => {
+      if (!service || typeof service.ui_url !== "string" || typeof service.host !== "string") return;
+      const current = isCurrentService(service);
+      const selectable = !current && (service.status === "ready" || service.status === "legacy") && serviceUrlSafe(service);
+      const option = create("button", `service-option ${current ? "current" : ""}`);
+      option.type = "button";
+      option.disabled = !selectable;
+      option.setAttribute("aria-label", `${service.label || "Code Defog"}，${current ? "当前服务" : serviceState(service)}`);
+      const copy = create("span", "");
+      copy.append(create("span", "service-option-name", service.label || "Code Defog"));
+      copy.append(create("span", "service-option-meta", `${service.host}:${service.port}`));
+      option.append(copy);
+      option.append(create("span", `service-option-state ${current ? "ready" : service.status || "offline"}`, current ? "当前服务" : serviceState(service)));
+      if (selectable) option.addEventListener("click", () => { location.assign(service.ui_url); });
+      target.append(option);
+    });
+    if (!target.childElementCount) target.append(create("div", "empty-data", "未发现可展示的本机服务。"));
+  }
+  async function refreshDiscoveredServices() {
+    if (location.protocol === "file:") {
+      const remembered = cachedServices();
+      renderServices(remembered, remembered.length ? "显示上次验证过的本机服务。" : "尚未缓存本机服务。启动服务后会自动打开仪表盘。 ");
+      return;
+    }
+    $("discovery-status").textContent = "正在检索本机服务。";
+    try {
+      const response = await fetch("/ui/services", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !Array.isArray(payload.services)) throw new Error("discovery unavailable");
+      localStorage.setItem(SERVICE_CACHE_KEY, JSON.stringify(payload.services));
+      const available = payload.services.filter((service) => service && typeof service.ui_url === "string");
+      renderServices(available, available.length ? `发现 ${available.length} 个本机服务。` : "未发现已登记的本机服务。");
+    } catch (error) {
+      const remembered = cachedServices();
+      renderServices(remembered, remembered.length ? "发现入口暂不可用，显示上次结果。" : "服务发现入口暂不可用。可手动连接。 ");
+    }
+  }
+  async function autoOpenOnlyDiscoveredService() {
+    // A discovery page never receives service tokens.  It may only redirect
+    // to one verified loopback daemon, which then performs the normal
+    // same-origin /ui/config bootstrap itself.  Multiple candidates still
+    // require an explicit choice rather than guessing the user's project.
+    try {
+      const response = await fetch("/ui/services", { cache: "no-store" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !Array.isArray(payload.services)) return false;
+      const candidates = verifiedServiceCandidates(payload.services);
+      if (candidates.length !== 1) return false;
+      location.replace(candidates[0].ui_url);
+      return true;
+    } catch (error) {
+      return false;
+    }
+  }
+  function showConnectionPicker(discoveryOnly = false, opener = document.activeElement) {
+    const standalone = !discoveryOnly && location.protocol === "file:";
+    $("connect-screen").classList.add("show");
+    $("connect-close-btn").hidden = discoveryOnly || !config.token;
+    $("connect-btn").setAttribute("aria-expanded", "true");
+    $("connect-eyebrow").textContent = standalone ? "免配置启动" : "本地连接";
+    $("connect-title").textContent = standalone ? "打开本机仪表盘" : "选择 Code Defog 服务";
+    $("connection-start").hidden = !standalone;
+    if (standalone) configureStartCommand();
+    $("connect-copy").textContent = discoveryOnly
+      ? "未能唯一确定本机服务，请选择已验证的回环地址服务。"
+      : standalone
+        ? "这个预览页不会要求你填写连接信息。启动服务后将自动进入已连接控制台。"
+        : "本机服务发现 Agent 只显示已登记的回环地址服务。";
+    $("c-host").value = config.host || "127.0.0.1";
+    $("c-port").value = config.port || "";
+    $("c-token").value = "";
+    $("manual-connect").open = false;
+    $("manual-connect-status").textContent = "";
+    beginOverlay("connection", opener, $("connect-close-btn").hidden ? ($("manual-connect").open ? $("c-host") : $("connect-dialog")) : $("connect-close-btn"));
+    refreshDiscoveredServices();
+  }
+  function closeConnectionPicker(restoreFocus = true, force = false) {
+    if (!force && $("connect-close-btn").hidden) return;
+    const wasOpen = $("connect-screen").classList.contains("show");
+    $("connect-screen").classList.remove("show");
+    $("connect-btn").setAttribute("aria-expanded", "false");
+    if (wasOpen) endOverlay("connection", restoreFocus);
+  }
+  function shellQuote(value) {
+    return `'${String(value).replace(/'/g, `'"'"'`)}'`;
+  }
+  function startCommandForCurrentCheckout() {
+    if (location.protocol !== "file:") return "python3 -m daemon.serve";
+    try {
+      const root = decodeURIComponent(new URL("../", location.href).pathname);
+      return `cd ${shellQuote(root)} && python3 -m daemon.serve`;
+    } catch (error) {
+      return "python3 -m daemon.serve";
+    }
+  }
+  function configureStartCommand() {
+    $("start-command").textContent = startCommandForCurrentCheckout();
+  }
+  function resetCaseData() {
+    cases = [];
+    selectedId = null;
+    evidence = null;
+    activeTab = "sources";
+    updateMetrics();
+    renderSelector();
+    renderCase();
+  }
+  async function initConnection() {
+    if (location.protocol !== "file:") {
+      try {
+        const response = await fetch("/ui/config");
+        if (response.ok) {
+          const payload = await response.json();
+          if (payload.mode === "discovery") {
+            if (await autoOpenOnlyDiscoveredService()) return false;
+            showConnectionPicker(true);
+            return false;
+          }
+          if (payload.config) {
+            config = { ...config, ...payload.config, served: true };
+            return true;
+          }
+        }
+      } catch (error) { /* fall through to direct connection */ }
+    }
+    if (location.protocol === "file:" && await autoOpenRememberedService()) return false;
+    // The service token is a bearer credential: it is kept out of
+    // localStorage (readable by any same-origin script / extension).
+    // Only host/port/user persist; the token rides in sessionStorage,
+    // which dies with the tab.
+    try {
+      const remembered = JSON.parse(localStorage.getItem("cc-conn") || "{}");
+      config = { ...config, ...remembered, token: sessionStorage.getItem("cc-token") || "", served: false };
+    } catch (error) { /* use defaults */ }
+    if (!config.token) {
+      showConnectionPicker();
+      return false;
+    }
+    return true;
+  }
+  async function copyStartCommand() {
+    const command = $("start-command").textContent.trim();
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(command);
+      copied = true;
+    } catch (error) {
+      const field = document.createElement("textarea");
+      field.value = command;
+      field.setAttribute("readonly", "");
+      field.style.cssText = "position:fixed;opacity:0;pointer-events:none;";
+      document.body.append(field);
+      field.select();
+      try { copied = document.execCommand("copy"); } catch (copyError) { copied = false; }
+      field.remove();
+    }
+    toast(copied ? "启动命令已复制；服务会自动打开仪表盘" : "无法自动复制，请手动复制启动命令");
+  }
+  $("manual-connect-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const host = $("c-host").value.trim();
+    const port = $("c-port").value.trim();
+    const token = $("c-token").value.trim();
+    const candidate = serviceFromCoordinates(host, port);
+    if (!candidate || !token) {
+      $("manual-connect").open = true;
+      toast("请填写 Host、Port 和 Token");
+      return;
+    }
+    const submit = $("c-save");
+    const status = $("manual-connect-status");
+    submit.disabled = true;
+    submit.textContent = "正在验证…";
+    status.textContent = "正在验证本机服务和令牌…";
+    try {
+      const endpoint = new URL("/api/management/info", candidate.ui_url);
+      const response = await fetch(endpoint.href, {
+        cache: "no-store",
+        headers: { "X-Code-Defog-Token": token },
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || "地址或 Token 无效");
+      stopSubscription();
+      config = { host: candidate.host, port: String(candidate.port), token, user: "reviewer", served: false, runtime_mode: "mock" };
+      // Persist connection coordinates only; the token never enters localStorage.
+      localStorage.setItem("cc-conn", JSON.stringify({ host: config.host, port: config.port, user: config.user }));
+      sessionStorage.setItem("cc-token", token);
+      closeConnectionPicker(false, true);
+      resetCaseData();
+      boot();
+    } catch (error) {
+      $("manual-connect").open = true;
+      status.textContent = error.message || "无法验证服务，请检查地址和 Token 后重试。";
+    } finally {
+      submit.disabled = false;
+      submit.textContent = "验证并连接";
+    }
+  });
+  $("connect-btn").addEventListener("click", (event) => showConnectionPicker(false, event.currentTarget));
+  $("connect-close-btn").addEventListener("click", () => closeConnectionPicker());
+  $("discover-refresh-btn").addEventListener("click", refreshDiscoveredServices);
+  $("copy-start-command").addEventListener("click", copyStartCommand);
+
+  function statusMeta(status) { return STATUS_META[status] || { label: status || "未知", color: "var(--ink-muted)", tone: "neutral", detail: "状态信息不可用。" }; }
+  function shortId(value) { return value ? String(value).replace("case-", "").slice(0, 8) : "—"; }
+  function shortRepo(value) { const parts = String(value || "").split("/"); return parts[parts.length - 1] || "—"; }
+  function relativeTime(value) {
+    const date = new Date(value || "");
+    if (Number.isNaN(date.getTime())) return value || "—";
+    const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+    if (seconds < 60) return "刚刚";
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} 分钟前`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} 小时前`;
+    return `${Math.floor(seconds / 86400)} 天前`;
+  }
+  function evidenceTotal(data) {
+    if (!data) return 0;
+    return ["sources", "agent_runs", "tool_runs", "approvals", "artifacts", "knowledge_records"].reduce((sum, key) => sum + (Array.isArray(data[key]) ? data[key].length : 0), 0);
+  }
+  function selectedCase() { return evidence && evidence.case; }
+
+  function updateMetrics() {
+    $("metric-total").textContent = cases.length;
+    $("metric-approval").textContent = cases.filter((item) => ["PLAN_APPROVAL", "RELEASE_APPROVAL"].includes(item.status)).length;
+    $("metric-blocked").textContent = cases.filter((item) => ["PATCH_REJECTED", "ROLLED_BACK", "ESCALATED"].includes(item.status)).length;
+    $("metric-closed").textContent = cases.filter((item) => item.status === "CLOSED").length;
+  }
+  function renderSelector() {
+    const select = $("case-select");
+    select.innerHTML = "";
+    if (!cases.length) {
+      const option = new Option("暂无 Case", "");
+      select.add(option);
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    cases.forEach((item) => {
+      const option = new Option(`${statusMeta(item.status).label} · ${item.title || shortId(item.case_id)}`, item.case_id);
+      select.add(option);
+    });
+    select.value = selectedId || cases[0].case_id;
+  }
+  function renderAuditEmptyState() {
+    const empty = $("workspace-empty-state");
+    const state = !selectedProject ? "no-project" : !cases.length ? "no-case" : "";
+    document.querySelectorAll("[data-audit-content]").forEach((node) => { node.hidden = Boolean(state); });
+    empty.hidden = !state;
+    if (!state) {
+      delete empty.dataset.state;
+      return;
+    }
+    const noProject = state === "no-project";
+    empty.dataset.state = state;
+    $("workspace-empty-title").textContent = noProject ? "从一个项目开始" : "暂无需要处理的 Case";
+    $("workspace-empty-copy").textContent = noProject
+      ? "选择一个本机 Git 仓库或输入绝对路径，开始后才会显示审查数据。"
+      : "当前项目尚未产生需要受控处置的异常；可先运行一次只读全项目审查。";
+    const steps = noProject
+      ? ["选择仓库或输入路径", "开始本机监控", "运行首次审查"]
+      : ["只读审查结构、测试、静态风险与 Git", "查看全项目审查发现", "仅异常结果会进入 Case"];
+    $("workspace-empty-steps").replaceChildren(...steps.map((step) => create("li", "", step)));
+    $("workspace-empty-cta").textContent = noProject ? "选择要监控的项目" : "前往全项目审查";
+  }
+  function renderOverviewEmptyState() {
+    const empty = $("overview-empty-state");
+    const noProject = !selectedProject;
+    document.querySelectorAll("[data-overview-content]").forEach((node) => {
+      if (node.id === "overview-drive") {
+        if (noProject) node.hidden = true;
+        return;
+      }
+      node.hidden = noProject;
+    });
+    empty.hidden = !noProject;
+  }
+  function addFact(parent, label, value, mono = false) {
+    const block = create("div", "case-fact");
+    block.append(create("dt", "", label));
+    block.append(create("dd", mono ? "mono" : "", value || "—"));
+    parent.append(block);
+  }
+  function addMeta(parent, label, value, strong = false) {
+    const span = create("span", "", `${label} `);
+    if (strong) span.append(create("strong", "", value || "—")); else span.append(document.createTextNode(value || "—"));
+    parent.append(span);
+  }
+  function decisionFor(caseData) {
+    const scope = caseData.sandbox_ref ? "受控沙箱" : "只读 Case";
+    if (caseData.status === "PLAN_APPROVAL") return { title: "等待批准修复计划", detail: "批准后才会在隔离沙箱中继续修复。", scope, target: caseData.base_commit || "缺少 base_commit", approval: true, plan: true, tone: "warning" };
+    if (caseData.status === "RELEASE_APPROVAL") return { title: "等待批准模拟放行", detail: "质量门禁已有结果，仍需人工确认目标补丁。", scope, target: caseData.patch_ref || "缺少 patch_ref", approval: true, plan: false, tone: "warning" };
+    if (caseData.status === "PATCH_REJECTED") return { title: "补丁已被质量门禁拦截", detail: "不要放行；请核对工具退出码与证据，或升级人工处理。", scope, target: caseData.patch_ref || "无有效补丁", approval: false, tone: "danger" };
+    if (caseData.status === "ESCALATED") return { title: "已升级人工处理", detail: "自动链路停止，下一步由人工确定。", scope, target: caseData.patch_ref || caseData.base_commit || "—", approval: false, tone: "attention" };
+    if (caseData.status === "RELEASED") return { title: "流程已放行", detail: "当前数据不包含真实部署证据，因此不将其表述为生产发布。", scope, target: caseData.patch_ref || "—", approval: false, tone: "success" };
+    if (caseData.status === "CLOSED") return { title: "证据闭环已完成", detail: "可继续核对复盘与知识条目。", scope, target: caseData.patch_ref || caseData.base_commit || "—", approval: false, tone: "success" };
+    return { title: statusMeta(caseData.status).detail, detail: "等待受控调度、质量门禁结果或人工决策。", scope, target: caseData.patch_ref || caseData.base_commit || "—", approval: false, tone: statusMeta(caseData.status).tone || "info" };
+  }
+  function renderAction(caseData) {
+    const decision = caseData ? decisionFor(caseData) : {
+      title: "等待选择 Case",
+      detail: "审批、沙箱和质量门禁会依据 Case 的真实状态显示在这里。",
+      scope: "—",
+      target: "—",
+      approval: false,
+      tone: "neutral",
+    };
+    $("action-desk").dataset.tone = decision.tone;
+    $("case-overview").dataset.tone = decision.tone;
+    $("action-risk").textContent = `风险 · ${caseData?.risk_level || "—"}`;
+    $("action-title").textContent = decision.title;
+    $("action-detail").textContent = decision.detail;
+    $("action-scope").textContent = decision.scope;
+    $("action-target").textContent = decision.target;
+    $("action-evidence").textContent = `${evidenceTotal(evidence)} 条`;
+    const actions = $("action-buttons");
+    actions.innerHTML = "";
+    if (!caseData) return;
+    if (decision.approval) {
+      const approve = create("button", "button primary", "批准");
+      approve.type = "button";
+      approve.addEventListener("click", () => openApproval(true));
+      const reject = create("button", "button danger", "拒绝");
+      reject.type = "button";
+      reject.addEventListener("click", () => openApproval(false));
+      actions.append(approve, reject);
+    } else if (!["CLOSED", "RELEASED", "ROLLED_BACK"].includes(caseData.status)) {
+      const escalate = create("button", "button danger", "升级人工处理");
+      escalate.type = "button";
+      escalate.addEventListener("click", escalateCase);
+      actions.append(escalate);
+    }
+  }
+  function renderCase() {
+    const caseData = selectedCase();
+    if (!caseData) {
+      $("case-title").textContent = "等待数据";
+      $("case-subtitle").textContent = "当前本地服务还没有可展示的 Case。";
+      $("case-state").textContent = "无 Case";
+      $("case-state").dataset.tone = "neutral";
+      $("case-meta").innerHTML = "";
+      $("case-facts").innerHTML = "";
+      $("case-updated").textContent = "—";
+      renderAction(null);
+      renderStateMachine(null);
+      renderAgents([]);
+      renderTools([]);
+      renderChain([]);
+      renderEvidenceTabs();
+      renderEvidence();
+      return;
+    }
+    const meta = statusMeta(caseData.status);
+    $("case-title").textContent = caseData.title || `Case ${shortId(caseData.case_id)}`;
+    $("case-subtitle").textContent = meta.detail;
+    $("case-updated").textContent = `更新于 ${relativeTime(caseData.updated_at)}`;
+    $("case-state").textContent = meta.label;
+    $("case-state").dataset.tone = meta.tone || "neutral";
+    const metaRow = $("case-meta");
+    metaRow.innerHTML = "";
+    const mode = create("span", `mode-badge ${config.runtime_mode === "production" ? "production" : ""}`, runtimeLabel());
+    metaRow.append(mode);
+    addMeta(metaRow, "Case", `#${shortId(caseData.case_id)}`, true);
+    addMeta(metaRow, "仓库", shortRepo(caseData.repository_ref), true);
+    addMeta(metaRow, "优先级", caseData.priority, true);
+    addMeta(metaRow, "风险", caseData.risk_level, true);
+    const facts = $("case-facts");
+    facts.innerHTML = "";
+    addFact(facts, "base_commit", caseData.base_commit, true);
+    addFact(facts, "patch_ref", caseData.patch_ref, true);
+    addFact(facts, "sandbox_ref", caseData.sandbox_ref, true);
+    addFact(facts, "trace_id", caseData.trace_id, true);
+    addFact(facts, "来源数", String(caseData.source_count ?? 0));
+    addFact(facts, "待审批动作", caseData.pending_action || "—");
+    renderAction(caseData);
+    renderStateMachine(caseData.status);
+    renderAgents(evidence.agent_runs || []);
+    renderTools(evidence.tool_runs || []);
+    renderChain(evidence.tool_runs || []);
+    renderEvidenceTabs();
+    renderEvidence();
+  }
+  function renderStateMachine(status) {
+    document.querySelectorAll(".state-node").forEach((node) => node.classList.remove("is-passed", "is-current", "is-blocked", "is-alert"));
+    document.querySelectorAll(".state-edge").forEach((node) => node.classList.remove("is-success", "is-blocked"));
+    $("state-caption").textContent = status ? statusMeta(status).detail : "选择 Case 后显示其实际流转位置与分支。";
+    if (!status) return;
+    // Whitelist the status before interpolating it into a selector: a
+    // malformed persisted value would otherwise abort the whole render.
+    if (!Object.prototype.hasOwnProperty.call(STATUS_META, status)) return;
+    const branch = ["PATCH_REJECTED", "ROLLED_BACK", "ESCALATED"].includes(status);
+    const index = MAIN_STATES.indexOf(status);
+    const passedCount = status === "PATCH_REJECTED"
+      ? MAIN_STATES.indexOf("REPAIRING") + 1
+      : status === "ROLLED_BACK"
+        ? MAIN_STATES.indexOf("RELEASED") + 1
+        : Math.max(index, 0);
+    if (passedCount > 0) MAIN_STATES.slice(0, passedCount).forEach((name) => document.querySelector(`[data-node="${name}"]`)?.classList.add("is-passed"));
+    if (branch) {
+      const target = document.querySelector(`[data-node="${status}"]`);
+      target?.classList.add(status === "ESCALATED" ? "is-alert" : "is-blocked");
+      if (status === "PATCH_REJECTED") $("edge-rejected").classList.add("is-blocked");
+      if (status === "ROLLED_BACK") {
+        $("edge-success").classList.add("is-success");
+        $("edge-rollback").classList.add("is-blocked");
+      }
+      if (status === "ESCALATED") $("edge-escalated").classList.add("is-blocked");
+      return;
+    }
+    document.querySelector(`[data-node="${status}"]`)?.classList.add("is-current");
+    if (["RELEASE_APPROVAL", "RELEASED", "CLOSED"].includes(status)) $("edge-success").classList.add("is-success");
+  }
+  function agentRun(agentId, runs) { return runs.find((run) => String(run.agent_id || "").toLowerCase().includes(agentId)); }
+  function renderAgents(runs) {
+    const target = $("agent-grid");
+    target.innerHTML = "";
+    const definitions = Array.isArray(harnessInfo?.tasks) && harnessInfo.tasks.length
+      ? harnessInfo.tasks.map((task) => ({
+        id: task.agent_id,
+        title: task.title || task.agent_id,
+        state: task.state || "—",
+        handoff: task.handoff_to || "—",
+        boundary: task.boundary || "未提供边界说明。",
+        order: task.order,
+      }))
+      : AGENTS;
+    const harnessName = harnessInfo?.id ? `${harnessInfo.id} · ` : "";
+    $("agent-record-count").textContent = `${harnessName}${runs.length} 条运行记录`;
+    definitions.forEach((definition) => {
+      const run = agentRun(definition.id, runs);
+      const card = create("article", "agent-card");
+      card.dataset.agent = definition.id;
+      card.append(create("div", "agent-label", `STEP ${definition.order ?? "—"} · ${definition.state}`));
+      card.append(create("h3", "agent-role", definition.title));
+      card.append(create("p", "agent-job", `派发给 ${definition.id}，完成后交接至 ${definition.handoff}。`));
+      card.append(create("p", "agent-boundary", definition.boundary));
+      const status = create("div", "agent-status");
+      status.append(create("span", "agent-label", run?.trace_id ? `trace ${String(run.trace_id).slice(0, 12)}` : "无运行记录"));
+      status.append(create("span", `run-badge ${run?.status === "completed" ? "completed" : run?.status === "failed" ? "failed" : ""}`, run ? (run.status || "unknown") : "未执行"));
+      card.append(status);
+      target.append(card);
+    });
+  }
+  async function loadHarness(epoch = dataEpoch) {
+    try {
+      const payload = await api("/api/harness");
+      if (epoch !== dataEpoch) return false;
+      harnessInfo = payload.harness || null;
+      renderReviewRuntime();
+      if (evidence) renderAgents(evidence.agent_runs || []);
+      return true;
+    } catch (error) {
+      harnessInfo = null;
+      renderReviewRuntime();
+      if (evidence) renderAgents(evidence.agent_runs || []);
+      return false;
+    }
+  }
+  function toolTitle(name) { return TOOL_LABELS[name] || [name || "未命名工具", "此工具名称未在当前界面映射。"] ; }
+  function renderTools(runs) {
+    const target = $("tool-pipeline");
+    target.innerHTML = "";
+    $("tool-record-count").textContent = `${runs.length} 条工具记录`;
+    if (!runs.length) { target.append(create("div", "empty-data", "当前 Case 没有可验证的工具调用记录。")); return; }
+    runs.slice().sort((a, b) => (a.chain_sequence || 0) - (b.chain_sequence || 0)).forEach((run) => {
+      const [title, detail] = toolTitle(run.tool_name);
+      const step = create("article", "pipe-step");
+      step.dataset.tool = run.tool_name || "";
+      step.dataset.exit = run.exit_code === 0 ? "ok" : "failed";
+      step.append(create("div", "pipe-seq", `STEP ${run.chain_sequence ?? "?"} · ${run.tool_name || "unknown"}`));
+      step.append(create("h3", "", title));
+      step.append(create("div", "pipe-detail", `${detail} ${run.exit_code === 0 ? "退出码 0。" : `退出码 ${run.exit_code ?? "?"}。`}`));
+      step.append(create("div", "hash", `in  ${String(run.input_sha256 || "—").slice(0, 24)}`));
+      step.append(create("div", "hash", `out ${String(run.output_sha256 || "—").slice(0, 24)}`));
+      target.append(step);
+    });
+  }
+  function renderChain(runs) {
+    const target = $("evidence-chain");
+    target.innerHTML = "";
+    $("chain-note").textContent = runs.length ? `${runs.length} 条连续记录` : "暂无链记录";
+    if (!runs.length) { target.append(create("div", "empty-data", "工具链尚未产生可展示的哈希记录。")); return; }
+    runs.slice().sort((a, b) => (a.chain_sequence || 0) - (b.chain_sequence || 0)).forEach((run) => {
+      const block = create("article", "chain-block");
+      block.append(create("div", "chain-name", `chain ${run.chain_sequence ?? "?"}`));
+      block.append(create("h3", "", run.tool_name || "unknown"));
+      block.append(create("div", "chain-meta", `Agent: ${run.agent_id || "—"} · exit ${run.exit_code ?? "—"}`));
+      block.append(create("div", "hash", `sha256 ${String(run.chain_hash || "—").slice(0, 32)}`));
+      target.append(block);
+    });
+  }
+
+  function renderEvidenceTabs() {
+    const target = $("evidence-tabs");
+    target.innerHTML = "";
+    TABS.forEach(([key, label]) => {
+      const tab = create("button", "evidence-tab", label);
+      tab.type = "button";
+      tab.id = `evidence-tab-${key}`;
+      tab.setAttribute("role", "tab");
+      tab.setAttribute("aria-selected", String(activeTab === key));
+      tab.setAttribute("aria-controls", "evidence-content");
+      tab.tabIndex = activeTab === key ? 0 : -1;
+      tab.addEventListener("click", () => selectEvidenceTab(key));
+      tab.addEventListener("keydown", (event) => {
+        const index = TABS.findIndex(([tabKey]) => tabKey === key);
+        if (event.key === "Home" || event.key === "End") {
+          event.preventDefault();
+          selectEvidenceTab(TABS[event.key === "Home" ? 0 : TABS.length - 1][0], true);
+          return;
+        }
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const next = (index + (event.key === "ArrowRight" ? 1 : -1) + TABS.length) % TABS.length;
+        selectEvidenceTab(TABS[next][0], true);
+      });
+      target.append(tab);
+    });
+    $("evidence-content").setAttribute("aria-labelledby", `evidence-tab-${activeTab}`);
+    $("evidence-count").textContent = evidence ? `${evidenceTotal(evidence)} 条索引` : "—";
+  }
+  function selectEvidenceTab(key, focus = false) {
+    if (!TABS.some(([tabKey]) => tabKey === key)) return;
+    activeTab = key;
+    renderEvidenceTabs();
+    renderEvidence();
+    if (focus) $("evidence-tab-" + key)?.focus({ preventScroll: true });
+  }
+  function table(headers, rows) {
+    const wrapper = create("div", "table-scroll");
+    const element = document.createElement("table");
+    const head = document.createElement("thead");
+    const headRow = document.createElement("tr");
+    headers.forEach((header) => headRow.append(create("th", "", header)));
+    head.append(headRow);
+    const body = document.createElement("tbody");
+    if (!rows.length) {
+      const row = document.createElement("tr");
+      const cell = create("td", "", "无数据");
+      cell.colSpan = headers.length;
+      row.append(cell);
+      body.append(row);
+    }
+    rows.forEach((rowData) => {
+      const row = document.createElement("tr");
+      rowData.forEach((cellData) => {
+        const cell = create("td", cellData.className || "", cellData.text);
+        if (cellData.node) cell.replaceChildren(cellData.node);
+        row.append(cell);
+      });
+      body.append(row);
+    });
+    element.append(head, body);
+    wrapper.append(element);
+    return wrapper;
+  }
+  function evidenceTitle(title, count) {
+    const head = create("div", "evidence-head");
+    head.append(create("h3", "", title));
+    head.append(create("span", "section-note", count));
+    return head;
+  }
+  function sourceRows() {
+    return (evidence?.sources || []).map((source) => {
+      let signal = "—";
+      try { const parsed = JSON.parse(source.extracted_signals_json || "{}"); signal = parsed.exception_type || parsed.message_pattern || "—"; } catch (error) { /* ignore invalid stored signal */ }
+      return [{ text: source.source_type || "—" }, { text: source.source_uri || "—" }, { text: source.received_at || "—" }, { text: source.association_state || "—" }, { text: signal, className: "mono" }];
+    });
+  }
+  function renderEvidence() {
+    const target = $("evidence-content");
+    target.innerHTML = "";
+    if (!evidence) { target.append(create("div", "empty-data", "当前没有可展示的 Case 证据。")); return; }
+    if (activeTab === "sources") {
+      target.append(evidenceTitle("来源记录", `${(evidence.sources || []).length} 条`));
+      target.append(table(["类型", "来源", "时间", "关联", "信号"], sourceRows()));
+    } else if (activeTab === "agent_runs") {
+      const rows = (evidence.agent_runs || []).map((run) => [
+        { text: run.agent_id || "—" },
+        { text: run.status || "—", className: run.status === "completed" ? "good" : run.status === "failed" ? "bad" : "" },
+        { text: run.started_at || "—" },
+        { text: run.finished_at || "—" },
+        { text: run.trace_id || "—", className: "mono" },
+        { text: run.output_ref || "—", className: "mono" },
+      ]);
+      target.append(evidenceTitle("Agent 运行记录", `${rows.length} 条`));
+      target.append(table(["Agent", "状态", "开始", "结束", "Trace", "输出引用"], rows));
+    } else if (activeTab === "tool_runs") {
+      const rows = (evidence.tool_runs || []).slice().sort((a, b) => (a.chain_sequence || 0) - (b.chain_sequence || 0)).map((run) => [{ text: String(run.chain_sequence ?? "—") }, { text: run.tool_name || "—" }, { text: run.agent_id || "—" }, { text: String(run.exit_code ?? "—"), className: run.exit_code === 0 ? "good" : "bad" }, { text: run.actual_argv || "—", className: "mono" }, { text: String(run.chain_hash || "—").slice(0, 20), className: "mono" }]);
+      target.append(evidenceTitle("工具运行记录", `${rows.length} 条`));
+      target.append(table(["序号", "工具", "Agent", "退出码", "实际命令", "chain hash"], rows));
+    } else if (activeTab === "approvals") {
+      const rows = (evidence.approvals || []).map((approval) => [{ text: approval.action || "—" }, { text: approval.decision || "—", className: approval.decision === "approved" ? "good" : approval.decision === "rejected" || approval.decision === "cancelled" ? "bad" : "" }, { text: approval.approver || "—" }, { text: approval.target_ref || "—", className: "mono" }, { text: approval.resolved_at || "—" }]);
+      target.append(evidenceTitle("审批记录", `${rows.length} 条`));
+      target.append(table(["动作", "决策", "审批人", "目标引用", "时间"], rows));
+    } else if (activeTab === "artifacts") {
+      const rows = (evidence.artifacts || []).map((artifact) => [{ text: artifact.kind || "—" }, { text: artifact.uri || "—", className: "mono" }, { text: String(artifact.sha256 || "—").slice(0, 24), className: "mono" }, { text: artifact.created_at || "—" }]);
+      target.append(evidenceTitle("制品索引", `${rows.length} 条`));
+      target.append(table(["类型", "URI", "sha256", "创建"], rows));
+    } else if (activeTab === "knowledge") {
+      const records = evidence.knowledge_records || [];
+      const rows = records.map((record) => {
+        const actions = create("div", "inline-actions");
+        if (record.status === "pending_review") {
+          ["verified", "rejected"].forEach((decision) => {
+            const button = create("button", "inline-button", decision === "verified" ? "验证" : "拒绝");
+            button.type = "button";
+            button.addEventListener("click", () => reviewKnowledge(record.record_id, decision));
+            actions.append(button);
+          });
+        }
+        return [{ text: record.record_id || "—", className: "mono" }, { text: record.status || "—", className: record.status === "verified" ? "good" : record.status === "rejected" ? "bad" : "warn" }, { text: (record.reuse_tags || []).join(", ") || "—" }, { text: record.reviewed_by || "—" }, { node: actions, text: "" }];
+      });
+      target.append(evidenceTitle("知识条目", `${rows.length} 条`));
+      target.append(table(["记录", "状态", "标签", "复核人", "操作"], rows));
+    } else if (activeTab === "retrospective") {
+      target.append(evidenceTitle("复盘报告", evidence.retrospective ? "已生成" : "未生成"));
+      const content = evidence.retrospective?.report?.content;
+      target.append(content ? create("pre", "", content) : create("div", "empty-data", "当前 Case 尚无复盘报告。"));
+    }
+  }
+
+  async function openApproval(approve) {
+    const caseData = selectedCase();
+    if (!caseData) return;
+    const plan = caseData.status === "PLAN_APPROVAL";
+    const target = plan ? caseData.base_commit : caseData.patch_ref;
+    if (!target) { toast("缺少审批所需的 target_ref"); return; }
+    pendingApproval = { approve, approver: config.user || "reviewer" };
+    $("dialog-title").textContent = approve ? "确认审批决策" : "确认拒绝决策";
+    $("dialog-copy").textContent = "确认后会签发并立即消费一次性审批授权，该授权无法重复使用。";
+    $("dialog-action").textContent = approve ? (plan ? "批准在沙箱执行修复" : "批准模拟放行") : (plan ? "拒绝修复计划" : "拒绝模拟放行");
+    $("dialog-target").textContent = target;
+    $("dialog-approver").textContent = pendingApproval.approver;
+    $("dialog-approval-key").value = "";
+    $("dialog-confirm").textContent = approve ? "确认并继续" : "确认拒绝";
+    const dialog = $("approval-dialog");
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+    } else {
+      // No <dialog> support: collect the key via prompt and fail CLOSED
+      // when the user cancels — never issue an approval without the key.
+      const key = window.prompt("请输入人工审批密钥（无法显示对话框时的手动降级）");
+      const pending = pendingApproval;
+      pendingApproval = null;
+      if (pending && key && key.trim()) {
+        await executeApproval(pending.approve, pending.approver, key.trim());
+      } else if (pending) {
+        toast("已取消审批：需要人工审批密钥。");
+      }
+    }
+  }
+  function submitApproval() {
+    const pending = pendingApproval;
+    const humanApprovalKey = $("dialog-approval-key").value.trim();
+    if (!humanApprovalKey) { toast("请输入人工审批密钥"); return; }
+    pendingApproval = null;
+    $("dialog-approval-key").value = ""; // never leave the key in the DOM
+    const dialog = $("approval-dialog");
+    if (typeof dialog.close === "function") dialog.close();
+    if (pending) executeApproval(pending.approve, pending.approver, humanApprovalKey);
+  }
+  $("dialog-cancel").addEventListener("click", () => { pendingApproval = null; $("approval-dialog").close(); });
+  $("dialog-confirm").addEventListener("click", submitApproval);
+  // Enter inside the form must submit-and-approve, not silently close the
+  // dialog (the default method=dialog behaviour discards the typed key).
+  $("approval-dialog").addEventListener("submit", (event) => { event.preventDefault(); submitApproval(); });
+  // Escape / backdrop close must tear down pending state too.
+  $("approval-dialog").addEventListener("close", () => { pendingApproval = null; $("dialog-approval-key").value = ""; });
+  async function executeApproval(approve, approver, humanApprovalKey) {
+    const caseData = selectedCase();
+    if (!caseData) return;
+    const plan = caseData.status === "PLAN_APPROVAL";
+    const action = plan ? (approve ? "approve_plan" : "reject_plan") : (approve ? "approve_release" : "reject_release");
+    const target = plan ? caseData.base_commit : caseData.patch_ref;
+    try {
+      const issued = await api(`/api/cases/${caseData.case_id}/approval-grant`, { method: "POST", humanApprovalKey, body: { action, target_ref: target, approver } });
+      await api(`/api/cases/${caseData.case_id}/actions`, { method: "POST", tokenType: "approval", body: { action, approval_token: issued.grant.approval_token, target_ref: target, reason: `${approve ? "approved" : "rejected"} by ${approver}` } });
+      toast(approve ? "审批已提交" : "拒绝已提交");
+      await refreshAll();
+    } catch (error) { toast(error.message); }
+  }
+  async function escalateCase() {
+    const caseData = selectedCase();
+    if (!caseData || !window.confirm("确认将此 Case 升级为人工处理？")) return;
+    try {
+      await api(`/api/cases/${caseData.case_id}/actions`, { method: "POST", body: { action: "cancel", reason: "escalated from audit dashboard" } });
+      toast("Case 已升级人工处理");
+      await refreshAll();
+    } catch (error) { toast(error.message); }
+  }
+  async function reviewKnowledge(recordId, decision) {
+    const humanApprovalKey = window.prompt("请输入人工审批密钥");
+    if (!humanApprovalKey) return;
+    try {
+      await api(`/api/knowledge/${recordId}/review`, { method: "POST", humanApprovalKey, body: { decision, note: "reviewed from audit dashboard" } });
+      toast(decision === "verified" ? "知识条目已验证" : "知识条目已拒绝");
+      await loadEvidence(selectedId);
+    } catch (error) { toast(error.message); }
+  }
+
+  async function loadCases(epoch = dataEpoch) {
+    const repo = selectedProject?.canonical_ref;
+    if (!repo) {
+      if (epoch !== dataEpoch) return false;
+      resetAuditCaseData();
+      return true;
+    }
+    const result = await api(`/api/cases?limit=500&repository_ref=${encodeURIComponent(repo)}`);
+    if (epoch !== dataEpoch) return false;
+    cases = result.cases || [];
+    if (!cases.some((item) => item.case_id === selectedId)) selectedId = cases[0]?.case_id || null;
+    updateMetrics();
+    renderSelector();
+    renderAuditEmptyState();
+    return true;
+  }
+  let lastEvidenceKey = null; // { caseId, json } — SSE refreshes dedupe here
+  function resetAuditCaseData() {
+    cases = [];
+    selectedId = null;
+    evidence = null;
+    activeTab = "sources";
+    lastEvidenceKey = null;
+    updateMetrics();
+    renderSelector();
+    renderCase();
+    renderAuditEmptyState();
+  }
+  async function loadEvidence(caseId, epoch = dataEpoch) {
+    if (!caseId) {
+      if (epoch !== dataEpoch) return false;
+      evidence = null;
+      lastEvidenceKey = null;
+      renderCase();
+      renderAuditEmptyState();
+      return true;
+    }
+    const result = await api(`/api/cases/${caseId}/evidence`);
+    if (epoch !== dataEpoch) return false;
+    // Byte-identical evidence (SSE-triggered refresh of an unchanged case)
+    // must not tear down and rebuild the whole case view.
+    const key = caseId + "\u0000" + JSON.stringify(result.evidence);
+    if (key === lastEvidenceKey) return true;
+    lastEvidenceKey = key;
+    evidence = result.evidence;
+    renderCase();
+    renderAuditEmptyState();
+    return true;
+  }
+  // ── 代码地图：只显示当前已登记项目的结构元数据 ───────────────────
+  function codeMapNodeById(nodeId) {
+    return (codeGraph?.nodes || []).find((node) => node.id === nodeId) || null;
+  }
+  function codeMapNodeLabel(node) {
+    if (!node) return "未选择节点";
+    return node.type === "symbol" ? `${node.label} · ${node.path}` : (node.path || node.label || "节点");
+  }
+  function codeMapEvidenceLabel(value) {
+    return ({ static: "静态证据", inferred: "推断", unresolved: "待确认" })[value] || value || "待确认";
+  }
+  function clampCodeMapView() {
+    const { zoom, width, height } = codeMapView;
+    if (!width || !height) return;
+    const xLimit = width - width * zoom;
+    const yLimit = height - height * zoom;
+    codeMapView.panX = Math.min(Math.max(codeMapView.panX, Math.min(0, xLimit)), Math.max(0, xLimit));
+    codeMapView.panY = Math.min(Math.max(codeMapView.panY, Math.min(0, yLimit)), Math.max(0, yLimit));
+  }
+  function updateCodeMapViewport() {
+    const stage = $("code-map-stage");
+    const scene = stage?.querySelector(".code-map-scene");
+    if (scene) scene.setAttribute("transform", `translate(${codeMapView.panX} ${codeMapView.panY}) scale(${codeMapView.zoom})`);
+    const level = $("code-map-zoom-level");
+    if (level) level.value = codeMapView.width ? `${Math.round(codeMapView.zoom * 100)}%` : "—";
+    const hasMap = Boolean(scene);
+    $("code-map-zoom-out").disabled = !hasMap || codeMapView.zoom <= .76;
+    $("code-map-zoom-in").disabled = !hasMap || codeMapView.zoom >= 2.75;
+    $("code-map-zoom-reset").disabled = !hasMap;
+  }
+  function resetCodeMapViewport(width = 0, height = 0) {
+    codeMapView = { zoom: 1.25, panX: width * -.125, panY: height * -.125, width, height, pointer: null };
+    clampCodeMapView();
+    updateCodeMapViewport();
+  }
+  function zoomCodeMap(nextZoom, focus = null) {
+    if (!codeMapView.width || !codeMapView.height) return;
+    const previous = codeMapView.zoom;
+    const zoom = Math.max(.75, Math.min(2.8, nextZoom));
+    if (zoom === previous) return;
+    const point = focus || { x: codeMapView.width / 2, y: codeMapView.height / 2 };
+    const sourceX = (point.x - codeMapView.panX) / previous;
+    const sourceY = (point.y - codeMapView.panY) / previous;
+    codeMapView.zoom = zoom;
+    codeMapView.panX = point.x - sourceX * zoom;
+    codeMapView.panY = point.y - sourceY * zoom;
+    clampCodeMapView();
+    updateCodeMapViewport();
+  }
+  function positionCodeMapRobot() {
+    const stage = $("code-map-stage");
+    const robot = $("code-map-robot");
+    if (!stage || !robot) return;
+    const maxX = Math.max(8, stage.clientWidth - robot.offsetWidth - 8);
+    const maxY = Math.max(8, stage.clientHeight - robot.offsetHeight - 8);
+    codeMapRobotPosition.x = Math.max(8, Math.min(maxX, codeMapRobotPosition.x));
+    codeMapRobotPosition.y = Math.max(8, Math.min(maxY, codeMapRobotPosition.y));
+    robot.style.transform = `translate(${codeMapRobotPosition.x}px, ${codeMapRobotPosition.y}px)`;
+  }
+  function codeMapRobotSummary(node) {
+    if (!node) return { state: "idle", status: "LLM 节点解读", label: "等待选择", summary: "点击一个文件或符号，我会结合它的一跳关系说明它在项目中的作用。" };
+    if (codeMapBusy) return { state: "waiting", status: "LLM 正在解读", label: codeMapNodeLabel(node), summary: "正在根据结构关系定位这个节点在项目中的职责。" };
+    const semantic = codeMapInterpreter?.semantic;
+    if (codeMapInterpreter?.status === "ok" && semantic?.role) {
+      const flow = Array.isArray(semantic.flow) && semantic.flow.length ? ` ${semantic.flow[0]}` : "";
+      return { state: "ready", status: "LLM 已生成", label: codeMapNodeLabel(node), summary: `${semantic.role}${flow}` };
+    }
+    const neighbors = codeMapDossier?.facts?.neighbor_count || 0;
+    const type = node.type === "symbol" ? (node.symbol_kind || "符号") : node.type === "file" ? "文件" : "目录";
+    const suffix = neighbors ? `，已识别 ${neighbors} 个一跳协作节点` : "，当前未发现可解析的一跳协作节点";
+    const unavailable = codeMapInterpreter?.status === "unavailable" || codeMapInterpreter?.status === "error";
+    return { state: unavailable ? "error" : "ready", status: unavailable ? "LLM 暂不可用" : "结构关系摘要", label: codeMapNodeLabel(node), summary: `这个${type}位于 ${node.path || node.label || "当前地图"}${suffix}。${unavailable ? " LLM 暂不可用，正在显示静态关系摘要。" : ""}` };
+  }
+  function renderCodeMapRobot() {
+    const robot = $("code-map-robot");
+    if (!robot) return;
+    const content = codeMapRobotSummary(codeMapNodeById(codeMapSelectedNodeId));
+    robot.dataset.state = content.state;
+    $("code-map-robot-kicker-text").textContent = content.status;
+    $("code-map-robot-node").textContent = content.label;
+    $("code-map-robot-summary").textContent = content.summary;
+    positionCodeMapRobot();
+  }
+  function createCodeMapRobot() {
+    const robot = create("aside", "code-map-robot");
+    robot.id = "code-map-robot";
+    robot.setAttribute("aria-live", "polite");
+    robot.setAttribute("aria-label", "代码地图 LLM 总结助手");
+    const handle = create("button", "code-map-robot-handle");
+    handle.id = "code-map-robot-handle";
+    handle.type = "button";
+    handle.setAttribute("aria-label", "拖动代码地图总结助手");
+    handle.dataset.tooltip = "拖动助手";
+    const icon = create("i", "");
+    icon.dataset.lucide = "bot";
+    icon.setAttribute("aria-hidden", "true");
+    handle.append(icon);
+    const speech = create("div", "code-map-robot-speech");
+    const kicker = create("div", "code-map-robot-kicker");
+    const kickerText = create("span", "", "LLM 节点解读");
+    kickerText.id = "code-map-robot-kicker-text";
+    kicker.append(create("i", "code-map-robot-state"), kickerText);
+    const nodeLabel = create("span", "code-map-robot-node");
+    nodeLabel.id = "code-map-robot-node";
+    const summary = create("p", "code-map-robot-summary");
+    summary.id = "code-map-robot-summary";
+    speech.append(kicker, nodeLabel, summary);
+    robot.append(handle, speech);
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      codeMapRobotPosition.pointer = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: codeMapRobotPosition.x, startY: codeMapRobotPosition.y };
+      robot.classList.add("is-dragging");
+      handle.setPointerCapture(event.pointerId);
+    });
+    handle.addEventListener("pointermove", (event) => {
+      const pointer = codeMapRobotPosition.pointer;
+      if (!pointer || pointer.id !== event.pointerId) return;
+      codeMapRobotPosition.x = pointer.startX + event.clientX - pointer.x;
+      codeMapRobotPosition.y = pointer.startY + event.clientY - pointer.y;
+      positionCodeMapRobot();
+    });
+    const stopRobotDrag = (event) => {
+      if (!codeMapRobotPosition.pointer || codeMapRobotPosition.pointer.id !== event.pointerId) return;
+      codeMapRobotPosition.pointer = null;
+      robot.classList.remove("is-dragging");
+    };
+    handle.addEventListener("pointerup", stopRobotDrag);
+    handle.addEventListener("pointercancel", stopRobotDrag);
+    requestAnimationFrame(() => {
+      if (window.lucide) window.lucide.createIcons({ attrs: { width: 16, height: 16 } });
+      renderCodeMapRobot();
+    });
+    return robot;
+  }
+  function bindCodeMapViewport(svg) {
+    const stage = $("code-map-stage");
+    const pointFromEvent = (event) => {
+      const box = svg.getBoundingClientRect();
+      return { x: ((event.clientX - box.left) / box.width) * codeMapView.width, y: ((event.clientY - box.top) / box.height) * codeMapView.height };
+    };
+    svg.addEventListener("wheel", (event) => {
+      event.preventDefault();
+      zoomCodeMap(codeMapView.zoom * (event.deltaY < 0 ? 1.12 : .88), pointFromEvent(event));
+    }, { passive: false });
+    svg.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.target.closest?.(".code-map-node")) return;
+      const point = pointFromEvent(event);
+      codeMapView.pointer = { id: event.pointerId, x: point.x, y: point.y, panX: codeMapView.panX, panY: codeMapView.panY };
+      stage.classList.add("is-panning");
+      svg.setPointerCapture(event.pointerId);
+    });
+    svg.addEventListener("pointermove", (event) => {
+      const pointer = codeMapView.pointer;
+      if (!pointer || pointer.id !== event.pointerId) return;
+      const point = pointFromEvent(event);
+      codeMapView.panX = pointer.panX + point.x - pointer.x;
+      codeMapView.panY = pointer.panY + point.y - pointer.y;
+      clampCodeMapView();
+      updateCodeMapViewport();
+    });
+    const stopPanning = (event) => {
+      if (!codeMapView.pointer || codeMapView.pointer.id !== event.pointerId) return;
+      codeMapView.pointer = null;
+      stage.classList.remove("is-panning");
+    };
+    svg.addEventListener("pointerup", stopPanning);
+    svg.addEventListener("pointercancel", stopPanning);
+  }
+  function clearCodeMapSelection() {
+    codeMapRequestId += 1;
+    codeMapSelectedNodeId = null;
+    codeMapDossier = null;
+    codeMapInterpreter = null;
+    codeMapBusy = false;
+  }
+  function resetCodeMap() {
+    codeGraph = null;
+    codeGraphWorkspace = null;
+    codeMapBusy = false;
+    clearCodeMapSelection();
+    const stage = $("code-map-stage");
+    if (stage) stage.replaceChildren(create("div", "code-map-empty", "选择一个已监控项目后加载代码地图。"));
+    const meta = $("code-map-meta");
+    if (meta) meta.textContent = "—";
+    const overall = $("code-map-status");
+    if (overall) overall.textContent = "选择项目后加载";
+    const clear = $("code-map-clear-selection");
+    if (clear) clear.hidden = true;
+    resetCodeMapViewport();
+  }
+  function codeMapVisibleNodes() {
+    const query = $("code-map-filter").value.trim().toLowerCase();
+    const all = Array.isArray(codeGraph?.nodes) ? codeGraph.nodes : [];
+    const showSymbols = $("code-map-show-symbols").checked;
+    const showUnresolved = $("code-map-show-unresolved").checked;
+    const matching = all.filter((node) => {
+      const matches = !query || [node.label, node.path, node.type, node.symbol_kind]
+        .filter(Boolean).join(" ").toLowerCase().includes(query);
+      return matches && (showSymbols || query || node.type !== "symbol")
+        && (showUnresolved || (node.type !== "unresolved" && node.type !== "parse_error"));
+    });
+    const depth = Number($("code-map-scope")?.value || 0);
+    if (!codeMapSelectedNodeId || !depth) return matching;
+    const allowed = new Set([codeMapSelectedNodeId]);
+    let frontier = new Set(allowed);
+    for (let level = 0; level < depth; level += 1) {
+      const next = new Set();
+      (codeGraph.edges || []).forEach((edge) => {
+        if (frontier.has(edge.source) && !allowed.has(edge.target)) next.add(edge.target);
+        if (frontier.has(edge.target) && !allowed.has(edge.source)) next.add(edge.source);
+      });
+      next.forEach((id) => allowed.add(id));
+      frontier = next;
+    }
+    return matching.filter((node) => allowed.has(node.id));
+  }
+  function renderCodeMap() {
+    const stage = $("code-map-stage");
+    const clear = $("code-map-clear-selection");
+    if (!codeGraph) {
+      stage.replaceChildren(create("div", "code-map-empty", selectedProject ? "正在加载结构关系…" : "选择一个已监控项目后加载代码地图。"));
+      if (clear) clear.hidden = true;
+      resetCodeMapViewport();
+      return;
+    }
+    const visibleNodes = codeMapVisibleNodes();
+    const visibleIds = new Set(visibleNodes.map((node) => node.id));
+    if (codeMapSelectedNodeId && !visibleIds.has(codeMapSelectedNodeId)) clearCodeMapSelection();
+    const visibleEdges = (codeGraph.edges || []).filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target));
+    const selectedNodeId = visibleIds.has(codeMapSelectedNodeId) ? codeMapSelectedNodeId : null;
+    if (clear) clear.hidden = !selectedNodeId;
+    if (!visibleNodes.length) {
+      stage.replaceChildren(create("div", "code-map-empty", "没有匹配的代码节点。"));
+      $("code-map-meta").textContent = `0/${codeGraph.counts?.nodes || 0} 节点 · 0 关系`;
+      resetCodeMapViewport();
+      return;
+    }
+    const relatedIds = new Set(selectedNodeId ? [selectedNodeId] : []);
+    if (selectedNodeId) {
+      visibleEdges.forEach((edge) => {
+        if (edge.source === selectedNodeId || edge.target === selectedNodeId) {
+          relatedIds.add(edge.source);
+          relatedIds.add(edge.target);
+        }
+      });
+    }
+    const groups = ["directory", "file", "symbol", "unresolved", "parse_error"];
+    const ordered = groups.flatMap((type) => visibleNodes.filter((node) => node.type === type));
+    const columns = Math.max(2, Math.ceil(Math.sqrt(Math.max(ordered.length, 1) * 1.5)));
+    const width = Math.max(720, columns * 150 + 80);
+    const rows = Math.max(3, Math.ceil(Math.max(ordered.length, 1) / columns));
+    const height = Math.max(500, rows * 128 + 80);
+    const viewportChanged = codeMapView.width !== width || codeMapView.height !== height;
+    const positions = new Map();
+    ordered.forEach((node, index) => {
+      const groupOffset = groups.indexOf(node.type) * 12;
+      positions.set(node.id, {
+        x: 62 + (index % columns) * ((width - 124) / Math.max(columns - 1, 1)),
+        y: 58 + Math.floor(index / columns) * Math.max(96, (height - 116) / Math.max(rows - 1, 1)) + groupOffset,
+      });
+    });
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("class", "code-map-svg");
+    svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    svg.setAttribute("role", "group");
+    svg.setAttribute("aria-label", "当前被监控项目的代码关系图；可聚焦节点后按 Enter 或空格让 LLM 解读节点作用");
+    svg.dataset.hasSelection = String(Boolean(selectedNodeId));
+    const defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+    marker.setAttribute("id", "code-map-arrow"); marker.setAttribute("viewBox", "0 0 8 8"); marker.setAttribute("refX", "7"); marker.setAttribute("refY", "4"); marker.setAttribute("markerWidth", "5"); marker.setAttribute("markerHeight", "5"); marker.setAttribute("orient", "auto-start-reverse");
+    const arrow = document.createElementNS("http://www.w3.org/2000/svg", "path"); arrow.setAttribute("d", "M 0 0 L 8 4 L 0 8 z"); arrow.setAttribute("fill", "currentColor"); marker.append(arrow); defs.append(marker); svg.append(defs);
+    const scene = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    scene.setAttribute("class", "code-map-scene");
+    svg.append(scene);
+    visibleEdges.forEach((edge) => {
+      const source = positions.get(edge.source); const target = positions.get(edge.target);
+      if (!source || !target) return;
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      const isRelated = !selectedNodeId || edge.source === selectedNodeId || edge.target === selectedNodeId;
+      const relation = String(edge.relation || "").replace(/[^a-z0-9_-]/gi, "");
+      const direction = selectedNodeId && edge.source === selectedNodeId ? " is-outgoing" : selectedNodeId && edge.target === selectedNodeId ? " is-incoming" : "";
+      path.setAttribute("class", `code-map-edge relation-${relation}${edge.evidence === "unresolved" ? " unresolved" : ""}${isRelated ? " is-related" : ""}${direction}`);
+      path.setAttribute("d", `M ${source.x} ${source.y} L ${target.x} ${target.y}`);
+      path.setAttribute("marker-end", "url(#code-map-arrow)");
+      path.style.color = edge.evidence === "unresolved" ? "var(--yellow)" : edge.relation === "imports" ? "var(--blue)" : edge.relation === "declares" ? "var(--green)" : "var(--line-strong)";
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = `${edge.relation} · ${codeMapEvidenceLabel(edge.evidence)}${edge.line ? ` · ${edge.line} 行` : ""}`;
+      path.append(title); scene.append(path);
+    });
+    ordered.forEach((node) => {
+      const position = positions.get(node.id); if (!position) return;
+      const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      const isRelated = !selectedNodeId || relatedIds.has(node.id);
+      group.setAttribute("class", `code-map-node ${node.type}${node.id === codeMapSelectedNodeId ? " selected" : ""}${isRelated ? " is-related" : ""}`);
+      group.setAttribute("transform", `translate(${position.x} ${position.y})`);
+      group.dataset.nodeId = node.id;
+      group.setAttribute("tabindex", "0"); group.setAttribute("role", "button"); group.setAttribute("aria-pressed", String(node.id === codeMapSelectedNodeId)); group.setAttribute("aria-label", `选择 ${codeMapNodeLabel(node)}`);
+      if (node.type === "directory") {
+        const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect"); rect.setAttribute("x", "-42"); rect.setAttribute("y", "-16"); rect.setAttribute("width", "84"); rect.setAttribute("height", "32"); rect.setAttribute("rx", "4"); group.append(rect);
+      } else {
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle"); circle.setAttribute("r", node.type === "file" ? "18" : "14"); group.append(circle);
+      }
+      const label = document.createElementNS("http://www.w3.org/2000/svg", "text"); label.setAttribute("text-anchor", "middle"); label.setAttribute("y", node.type === "directory" ? "31" : "32"); label.textContent = String(node.label || "节点").slice(0, 22); group.append(label);
+      const type = document.createElementNS("http://www.w3.org/2000/svg", "text"); type.setAttribute("class", "node-type"); type.setAttribute("text-anchor", "middle"); type.setAttribute("y", node.type === "directory" ? "43" : "44"); type.textContent = node.type === "symbol" ? (node.symbol_kind || "symbol") : node.type; group.append(type);
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title"); title.textContent = `${codeMapNodeLabel(node)}${node.line_start ? `:${node.line_start}` : ""}`; group.append(title);
+      const select = () => selectCodeMapNode(node.id);
+      group.addEventListener("click", select);
+      group.addEventListener("keydown", (event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); select(); } });
+      scene.append(group);
+    });
+    stage.replaceChildren(svg, createCodeMapRobot());
+    bindCodeMapViewport(svg);
+    if (viewportChanged) resetCodeMapViewport(width, height);
+    else updateCodeMapViewport();
+    renderCodeMapRobot();
+    const totalNodes = codeGraph.counts?.nodes || 0;
+    const totalEdges = codeGraph.counts?.edges || 0;
+    const totalUnresolved = (codeGraph.nodes || []).filter((node) => node.type === "unresolved" || node.type === "parse_error").length;
+    const scopeLabel = $("code-map-scope")?.value === "1" ? " · 一跳视图" : $("code-map-scope")?.value === "2" ? " · 两跳视图" : "";
+    const outgoing = selectedNodeId ? (codeGraph.edges || []).filter((edge) => edge.source === selectedNodeId).length : 0;
+    const incoming = selectedNodeId ? (codeGraph.edges || []).filter((edge) => edge.target === selectedNodeId).length : 0;
+    const directionLabel = selectedNodeId ? ` · 它指向 ${outgoing} 个节点 · 有 ${incoming} 个节点指向它` : "";
+    $("code-map-meta").textContent = `展示 ${visibleNodes.length}/${totalNodes} 节点 · ${visibleEdges.length}/${totalEdges} 关系 · ${totalUnresolved} 个待确认引用${scopeLabel}${directionLabel}`;
+  }
+  async function loadCodeMapDossier() {
+    const node = codeMapNodeById(codeMapSelectedNodeId);
+    if (!selectedProject || !node || (node.type !== "file" && node.type !== "symbol")) return;
+    const selection = {
+      path: node.path,
+      start_line: Number(node.line_start || 1),
+      end_line: Number(node.line_end || node.line_start || 1),
+    };
+    const requestId = ++codeMapRequestId;
+    codeMapBusy = true;
+    renderCodeMapRobot();
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/code-graph/interpret`, {
+        method: "POST", body: { node_id: node.id, selection, include_preview: false, include_source: false, interpret: true },
+      });
+      if (requestId !== codeMapRequestId || !selectedProject || selectedProject.workspace !== codeGraphWorkspace || codeMapSelectedNodeId !== node.id) return;
+      codeMapDossier = payload.dossier || null;
+      codeMapInterpreter = payload.interpreter || null;
+      if (payload.cached) toast("已复用当前代码版本的解读");
+    } catch (error) {
+      if (requestId === codeMapRequestId) codeMapInterpreter = { status: "error", reason: error.message || "节点请求失败" };
+    }
+    finally {
+      if (requestId !== codeMapRequestId) return;
+      codeMapBusy = false;
+      renderCodeMapRobot();
+    }
+  }
+  async function selectCodeMapNode(nodeId, interpret = true) {
+    const node = codeMapNodeById(nodeId);
+    if (!node) return;
+    codeMapRequestId += 1;
+    codeMapSelectedNodeId = nodeId; codeMapDossier = null; codeMapInterpreter = null; codeMapBusy = false;
+    renderCodeMap();
+    requestAnimationFrame(() => $("code-map-stage")?.querySelector(`[data-node-id="${CSS.escape(nodeId)}"]`)?.focus({ preventScroll: true }));
+    if (!interpret || (node.type !== "file" && node.type !== "symbol")) return;
+    // Node clicks send only structure metadata and one-hop relationships to the LLM.
+    await loadCodeMapDossier();
+  }
+  async function loadCodeMap(force = false, epoch = dataEpoch) {
+    if (!selectedProject) { resetCodeMap(); return; }
+    if (!force && codeGraph && codeGraphWorkspace === selectedProject.workspace) { renderCodeMap(); focusPendingCodeMapLocation(); return; }
+    const workspace = selectedProject.workspace; clearCodeMapSelection(); codeGraph = null; codeGraphWorkspace = workspace;
+    $("code-map-status").textContent = "加载结构关系…"; renderCodeMap();
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/code-graph`);
+      if (epoch !== dataEpoch || !selectedProject || selectedProject.workspace !== workspace) return;
+      codeGraph = payload.graph || null;
+      const counts = codeGraph?.counts || {};
+      $("code-map-status").textContent = codeGraph?.truncated ? "已加载（节点预算已截断）" : "已加载确定性结构";
+      $("code-map-meta").textContent = `${counts.nodes || 0} 节点 · ${counts.edges || 0} 关系`;
+      renderCodeMap();
+      focusPendingCodeMapLocation();
+    } catch (error) {
+      if (epoch !== dataEpoch) return;
+      codeGraph = null; $("code-map-status").textContent = "地图不可用";
+      $("code-map-stage").replaceChildren(create("div", "code-map-empty", error.message || "无法加载代码地图。"));
+    }
+  }
+  async function refreshCodeMap() {
+    const button = $("code-map-refresh-btn");
+    if (button.disabled) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      await loadCodeMap(true);
+    } finally {
+      button.disabled = false;
+      button.setAttribute("aria-busy", "false");
+    }
+  }
+  $("code-map-refresh-btn").addEventListener("click", refreshCodeMap);
+  $("code-map-zoom-out").addEventListener("click", () => zoomCodeMap(codeMapView.zoom / 1.18));
+  $("code-map-zoom-in").addEventListener("click", () => zoomCodeMap(codeMapView.zoom * 1.18));
+  $("code-map-zoom-reset").addEventListener("click", () => resetCodeMapViewport(codeMapView.width, codeMapView.height));
+  function handleCodeMapFilter() {
+    const selectedStillVisible = !codeMapSelectedNodeId || codeMapVisibleNodes().some((node) => node.id === codeMapSelectedNodeId);
+    if (!selectedStillVisible) {
+      clearCodeMapSelection();
+      $("code-map-status").textContent = "筛选已清除节点选择";
+    }
+    renderCodeMap();
+  }
+  $("code-map-filter").addEventListener("input", handleCodeMapFilter);
+  $("code-map-show-symbols").addEventListener("change", handleCodeMapFilter);
+  $("code-map-show-unresolved").addEventListener("change", handleCodeMapFilter);
+  $("code-map-scope").addEventListener("change", handleCodeMapFilter);
+  $("code-map-clear-selection").addEventListener("click", () => {
+    clearCodeMapSelection();
+    renderCodeMap();
+    $("code-map-filter").focus({ preventScroll: true });
+  });
+  window.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || activeOverlay || $("approval-dialog").open || currentView !== "code-map" || !codeMapSelectedNodeId) return;
+    event.preventDefault();
+    clearCodeMapSelection();
+    renderCodeMap();
+    $("code-map-filter").focus({ preventScroll: true });
+  });
+  // Refresh only the data the ACTIVE view needs, plus the sidebar project list.
+  async function refreshActiveView(epoch = dataEpoch) {
+    if (currentView === "overview") {
+      await loadProjectSummary(false, epoch);
+      await loadDriveLatest(epoch);
+      await loadReviewHistory(epoch);
+    } else if (currentView === "code-map") {
+      await loadCodeMap(false, epoch);
+    } else if (currentView === "projects") {
+      await loadProjects(epoch);
+    } else {
+      if (!await loadCases(epoch) || epoch !== dataEpoch) return;
+      await loadEvidence(selectedId, epoch);
+    }
+  }
+  async function refreshAll(epoch = dataEpoch, forceProjects = false) {
+    try {
+      const projectsLoaded = await loadProjects(epoch, forceProjects);   // sidebar, TTL-cached unless forced
+      if (!projectsLoaded || epoch !== dataEpoch) return false;
+      if (currentView !== "projects") await refreshActiveView(epoch); // projects already rendered
+      return true;
+    } catch (error) {
+      if (epoch === dataEpoch) toast(error.message);
+      return false;
+    }
+  }
+  $("case-select").addEventListener("change", async (event) => {
+    selectedId = event.target.value || null;
+    activeTab = "sources";
+    try { await loadEvidence(selectedId); } catch (error) { toast(error.message); }
+  });
+  async function refreshWorkspace() {
+    const button = $("refresh-btn");
+    if (button.disabled) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.dataset.tooltip = "正在刷新";
+    try {
+      if (await refreshAll(dataEpoch, true)) toast("已刷新当前项目数据");
+      else toast("刷新未完成，请检查本地服务后重试");
+    } finally {
+      button.disabled = false;
+      button.setAttribute("aria-busy", "false");
+      button.dataset.tooltip = "刷新数据";
+    }
+  }
+  $("refresh-btn").addEventListener("click", refreshWorkspace);
+
+  function stopSubscription() {
+    streamEpoch += 1;
+    if (streamController) streamController.abort();
+    streamController = null;
+    if (streamWake) streamWake();
+    streamWake = null;
+  }
+  function waitForStreamRetry(milliseconds) {
+    return new Promise((resolve) => {
+      const wake = () => {
+        clearTimeout(timer);
+        if (streamWake === wake) streamWake = null;
+        resolve();
+      };
+      const timer = setTimeout(wake, milliseconds);
+      streamWake = wake;
+    });
+  }
+  async function subscribe(connection) {
+    const epoch = ++streamEpoch;
+    let retry = 1;
+    while (epoch === streamEpoch && connection === connectionEpoch) {
+      const controller = new AbortController();
+      streamController = controller;
+      try {
+        const response = await fetch(baseUrl() + "/api/stream", {
+          headers: { "X-Code-Defog-Token": config.token }, signal: controller.signal,
+        });
+        if (!response.ok || !response.body) throw new Error("stream unavailable");
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        setStreamOnline(true);
+        retry = 1;
+        while (epoch === streamEpoch && connection === connectionEpoch) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          const events = buffer.split("\n\n");
+          buffer = events.pop();
+          events.forEach((event) => {
+            const line = event.split("\n").find((entry) => entry.startsWith("data:"));
+            if (!line) return;
+            try { handleEvent(JSON.parse(line.slice(5).trim())); } catch (error) { /* ignore malformed stream frame */ }
+          });
+        }
+      } catch (error) {
+        if (epoch !== streamEpoch || connection !== connectionEpoch || error.name === "AbortError") return;
+        setStreamOnline(false);
+      } finally {
+        if (streamController === controller) streamController = null;
+      }
+      if (epoch !== streamEpoch || connection !== connectionEpoch) return;
+      await waitForStreamRetry(Math.min(retry, 10) * 1000);
+      retry *= 2;
+    }
+  }
+  // ── 全项目 Review Run：启动、任务图、结果与历史 ──────────────────
+  function fmtDuration(seconds) {
+    const s = Math.max(0, Math.floor(seconds));
+    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  }
+  function reviewRuntimeLabel() {
+    const mode = config.runtime_mode === "agentscope" || config.runtime_mode === "production"
+      ? "AgentScope 本地实验" : "Mock";
+    const harness = harnessInfo?.id || "本地 Harness";
+    return `${harness} / ${mode}`;
+  }
+  function renderReviewRuntime() {
+    const label = reviewRuntimeLabel();
+    const target = $("review-runtime-label");
+    const detail = $("review-runtime-detail");
+    if (target) target.textContent = label;
+    if (detail) detail.textContent = "项目审查 Agent 为本地确定性只读执行，不是 AgentTeams 运行凭据。";
+  }
+  function setReviewCommandState(label, tone = "neutral", state = tone) {
+    const badge = $("review-command-state");
+    const command = $("review-command");
+    if (!badge || !command) return;
+    badge.textContent = label;
+    badge.dataset.tone = tone;
+    command.dataset.state = state;
+  }
+  function renderReviewCommandState() {
+    // The top bar is updated in the same project-selection render pass.  Use it
+    // as a display fallback so an in-flight project refresh never leaves the
+    // command card claiming that no project is selected.
+    const hasProject = Boolean(selectedProject) || $("topbar-project")?.textContent !== "未选择项目";
+    if (!hasProject) { setReviewCommandState("等待选择项目", "neutral", "empty"); return; }
+    if (reviewStartBusy) { setReviewCommandState("正在启动审查", "info", "running"); return; }
+    if (reviewStartError) { setReviewCommandState("启动失败", "danger", "error"); return; }
+    if (!reviewRun) { setReviewCommandState("可以开始", "info", "ready"); return; }
+    if (reviewRun.status === "running") { setReviewCommandState("审查进行中", "info", "running"); return; }
+    if (reviewRun.status === "complete") { setReviewCommandState("最近一次已完成", "success", "complete"); return; }
+    if (reviewRun.status === "error") { setReviewCommandState("最近一次需复核", "danger", "error"); return; }
+    setReviewCommandState("等待开始", "neutral", "ready");
+  }
+  function selectedReviewScope() {
+    const mode = document.querySelector('input[name="review-mode"]:checked')?.value || "full";
+    const components = {};
+    document.querySelectorAll('input[name="review-component"]').forEach((input) => {
+      components[input.value] = input.checked;
+    });
+    components.structure = true;
+    return { mode, components };
+  }
+  function renderReviewProjectFacts() {
+    const target = $("review-project-facts");
+    if (!target) return;
+    target.replaceChildren();
+    if (!selectedProject) {
+      target.append(create("span", "review-project-fact", "未选择项目"));
+      renderReviewCommandState();
+      return;
+    }
+    target.append(create("span", "review-project-fact", selectedProject.name || selectedProject.workspace));
+    target.append(create("span", "review-project-fact", selectedProject.workspace));
+    if (selectedProject.base_commit) target.append(create("span", "review-project-fact", selectedProject.base_commit));
+    renderReviewCommandState();
+  }
+  function startDriveTimer() {
+    stopDriveTimer();
+    driveStartedAt = reviewRun?.started_at ? Date.parse(reviewRun.started_at) : Date.now();
+    if (!Number.isFinite(driveStartedAt)) driveStartedAt = Date.now();
+    $("ov-drive-timer").textContent = "00:00";
+    driveTimer = setInterval(() => {
+      $("ov-drive-timer").textContent = fmtDuration((Date.now() - driveStartedAt) / 1000);
+    }, 1000);
+  }
+  function stopDriveTimer() {
+    if (driveTimer) { clearInterval(driveTimer); driveTimer = null; }
+  }
+  function setDriveStatus(visible, stateText, stateClass) {
+    $("ov-drive-status").hidden = !visible;
+    if (!visible) return;
+    $("ov-drive-state").textContent = stateText;
+    $("ov-drive-state").className = `llm-badge ${stateClass}`;
+  }
+  function reviewStatusLabel(status) {
+    return ({ pending: "等待", running: "执行中", complete: "已完成", error: "失败", skipped: "跳过" })[status] || status || "等待";
+  }
+  function taskTime(task) {
+    if (task.finished_at) return relativeTime(task.finished_at);
+    if (task.started_at) return "进行中";
+    return "等待开始";
+  }
+  function renderReviewTasks(run) {
+    const target = $("review-task-graph");
+    target.replaceChildren();
+    const tasks = Array.isArray(run?.tasks) ? run.tasks : [];
+    target.classList.toggle("is-empty", !tasks.length);
+    if (!tasks.length) {
+      target.append(create("div", "review-empty", "该历史驱动未记录阶段任务。"));
+      return;
+    }
+    tasks.forEach((task) => {
+      const card = create("article", `review-task ${task.status || "pending"}`);
+      card.title = task.failure_reason || task.title || "";
+      card.append(create("div", "review-task-stage", task.stage || "review"));
+      card.append(create("div", "review-task-title", task.title || task.task_key));
+      card.append(create("div", "review-task-state", reviewStatusLabel(task.status)));
+      card.append(create("div", "review-task-time", taskTime(task)));
+      target.append(card);
+    });
+  }
+  function reviewFindingIdentity(label, detail) {
+    const clean = (value, limit) => String(value).replace(/\s+/g, " ").trim().slice(0, limit);
+    return JSON.stringify(["text-v1", clean(label, 120), clean(detail, 1200)]);
+  }
+  function focusPendingCodeMapLocation() {
+    const pending = codeMapPendingLocation;
+    if (!pending || !codeGraph) return;
+    codeMapPendingLocation = null;
+    const normalize = (value) => String(value || "").replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+    const candidates = (codeGraph.nodes || []).filter((node) => normalize(node.path) === normalize(pending.path));
+    const target = candidates.find((node) => node.type === "symbol" && Number(node.line_start) <= pending.line && Number(node.line_end || node.line_start) >= pending.line)
+      || candidates.find((node) => node.type === "file")
+      || candidates[0];
+    if (!target) {
+      toast(`代码地图中未找到 ${pending.path}:${pending.line}，可能尚未被当前解析器收录`);
+      return;
+    }
+    $("code-map-show-unresolved").checked = true;
+    $("code-map-show-symbols").checked = true;
+    $("code-map-scope").value = "1";
+    selectCodeMapNode(target.id, false);
+  }
+  function codeFindingIdentity(file, line, kind, evidence, occurrence = 1) {
+    const clean = (value, limit) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+    const identity = ["code-v2", clean(file, 500).replace(/\\/g, "/").toLowerCase(), clean(kind, 100), clean(evidence, 1000)];
+    if (Number(occurrence) > 1) identity.push(Number(occurrence));
+    return JSON.stringify(identity);
+  }
+  function codeFindingLegacyIdentity(file, line, kind, evidence) {
+    const clean = (value, limit) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+    return JSON.stringify(["code-v1", clean(file, 500), Number(line) || 0, clean(kind, 100), clean(evidence, 1000)]);
+  }
+  function reportFindingIdentity(finding) {
+    const evidence = (finding.evidence || [])[0] || {};
+    const clean = (value, limit) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
+    const path = clean(evidence.path || evidence.url, 500).replace(/\\/g, "/").toLowerCase();
+    return JSON.stringify(["report-v1", clean(finding.category, 100), path,
+      clean(finding.title, 240).toLowerCase(), clean(evidence.observation, 500).toLowerCase()]);
+  }
+  function jumpToCodeLocation(path, line) {
+    if (!path || !Number.isFinite(Number(line))) return;
+    codeMapPendingLocation = { path: String(path), line: Number(line) };
+    if ($("review-report-dialog")?.open) $("review-report-dialog").close();
+    if (currentView === "code-map") refreshActiveView().catch((error) => toast(error.message || "代码地图加载失败"));
+    else location.hash = "#/code-map";
+  }
+  function appendReviewFindingActions(target, label, detail, identity, legacyIdentity = null) {
+    const saved = reviewFeedback.get(identity) || (legacyIdentity ? reviewFeedback.get(legacyIdentity) : null);
+    const select = document.createElement("select");
+    select.className = "review-finding-status";
+    select.setAttribute("aria-label", `标记${label}发现状态`);
+    [["open", "未标记"], ["fixed", "已修复"], ["false_positive", "误报"], ["accepted", "已知问题"]].forEach(([value, text]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      select.append(option);
+    });
+    select.value = saved?.status || "open";
+    const save = create("button", "review-finding-save", "保存状态");
+    save.type = "button";
+    save.addEventListener("click", async () => {
+      if (!selectedProject) return;
+      const workspace = selectedProject.workspace;
+      const epoch = dataEpoch;
+      save.disabled = true;
+      select.disabled = true;
+      try {
+        const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/review-feedback`, {
+          method: "POST", body: { label, detail, identity, status: select.value },
+        });
+        if (epoch === dataEpoch && selectedProject?.workspace === workspace) {
+          const feedback = payload.feedback;
+          if (feedback.status === "open") reviewFeedback.delete(feedback.identity);
+          else reviewFeedback.set(feedback.identity, feedback);
+          if (reviewRun) renderReviewFindings(reviewRun);
+          toast("处理状态已保存；后续审查会沿用此标记");
+        }
+      } catch (error) { toast(`保存失败：${error.message}`); }
+      finally { save.disabled = false; select.disabled = false; }
+    });
+    target.append(select, save);
+  }
+  function appendReviewFinding(target, label, detail, identity = reviewFindingIdentity(label, detail), legacyIdentity = null) {
+    const row = create("div", "review-finding");
+    row.append(create("span", "review-finding-label", label));
+    const content = create("span", "", detail);
+    content.style.flex = "1 1 220px";
+    row.append(content);
+    const sourceLocation = String(detail).match(/^(.+?):(\d+)\s/);
+    if (sourceLocation) {
+      const jump = create("button", "review-finding-save", "在代码地图定位");
+      jump.type = "button";
+      jump.addEventListener("click", () => jumpToCodeLocation(sourceLocation[1], Number(sourceLocation[2])));
+      row.append(jump);
+    }
+    appendReviewFindingActions(row, label, detail, identity, legacyIdentity);
+    target.append(row);
+  }
+  function reviewFindingEntries(run) {
+    const findings = [];
+    const add = (label, detail, identity = reviewFindingIdentity(label, detail), legacyIdentity = null) => {
+      findings.push({ label, detail: String(detail), identity, legacyIdentity });
+    };
+    const browse = run?.browse || {};
+    const test = browse.test || {};
+    const scan = browse.static_scan || {};
+    const changeReview = browse.change_review || {};
+    const reviewTask = (run?.tasks || []).find((task) => task.task_key === "project_review");
+    const agentOutput = reviewTask?.output || {};
+    const observations = Array.isArray(agentOutput.observations) ? agentOutput.observations : [];
+    observations.slice(0, 3).forEach((observation) => add("结构", observation));
+    if (test.detected) {
+      const result = test.ran ? (test.timed_out ? "测试超时" : test.execution_error ? "测试无法启动" : test.passed ? "测试通过" : "测试失败") : test.runner_unavailable ? "测试运行器不可用，未执行项目测试" : "已识别测试命令，未执行";
+      add("测试", result);
+    }
+    const gaps = Array.isArray(scan.error_handling_gaps) ? scan.error_handling_gaps : [];
+    if (scan.scanned_files != null) add("静态", `扫描 ${scan.scanned_files} 个文件，标记 ${gaps.length} 处待人工判断的错误处理风险。`);
+    const gapOccurrences = new Map();
+    gaps.slice(0, 30).forEach((gap) => {
+      const detail = `${gap.file}:${gap.line} ${gap.snippet || gap.kind || "错误处理风险"}`;
+      const kind = gap.kind || "static-risk";
+      const evidence = gap.snippet || "";
+      const occurrenceKey = JSON.stringify([String(gap.file || "").replace(/\\/g, "/").toLowerCase(), kind, evidence]);
+      const occurrence = (gapOccurrences.get(occurrenceKey) || 0) + 1;
+      gapOccurrences.set(occurrenceKey, occurrence);
+      add("静态风险", detail, codeFindingIdentity(gap.file, gap.line, kind, evidence, occurrence), codeFindingLegacyIdentity(gap.file, gap.line, kind, evidence));
+    });
+    const hints = Array.isArray(changeReview.hypotheses) ? changeReview.hypotheses : [];
+    if (changeReview.status === "ready") {
+      add("改动", `相对 HEAD 有 ${changeReview.changed_files} 个变动文件，定位 ${changeReview.functions?.length || 0} 个 Python 函数；以下只是待验证线索。`);
+      const hintOccurrences = new Map();
+      hints.slice(0, 5).forEach((hint) => {
+        const kind = hint.kind || "change-hypothesis";
+        const evidence = `${hint.function}|${hint.title}|${hint.probe}`;
+        const occurrenceKey = JSON.stringify([String(hint.file || "").replace(/\\/g, "/").toLowerCase(), kind, evidence]);
+        const occurrence = (hintOccurrences.get(occurrenceKey) || 0) + 1;
+        hintOccurrences.set(occurrenceKey, occurrence);
+        add("待验证", `${hint.file}:${hint.line} ${hint.function} · ${hint.title}。建议：${hint.probe}`,
+          codeFindingIdentity(hint.file, hint.line, kind, evidence, occurrence), codeFindingLegacyIdentity(hint.file, hint.line, kind, evidence));
+      });
+    }
+    const git = browse.git || {};
+    if (git.branch) add("Git", `${git.branch} · ${git.dirty_count ?? 0} 个未提交变更`);
+    return findings;
+  }
+  function renderReviewFindingsInto(target, run) {
+    target.replaceChildren();
+    const unique = new Map(reviewFindingEntries(run).map((item) => [item.identity, item]));
+    const entries = Array.from(unique.values());
+    const handledCount = entries.filter((item) => {
+      const status = (reviewFeedback.get(item.identity) || (item.legacyIdentity && reviewFeedback.get(item.legacyIdentity)))?.status;
+      return status && status !== "open";
+    }).length;
+    const filter = $("review-show-handled");
+    const filterLabel = $("review-show-handled-label");
+    if (filterLabel) filterLabel.textContent = filter?.checked ? `隐藏已处理（${handledCount}）` : `显示已处理（${handledCount}）`;
+    const visibleEntries = filter?.checked ? entries : entries.filter((item) => {
+      const status = (reviewFeedback.get(item.identity) || (item.legacyIdentity && reviewFeedback.get(item.legacyIdentity)))?.status;
+      return !status || status === "open";
+    });
+    const staticSummary = visibleEntries.find((item) => item.label === "静态");
+    const staticRisks = visibleEntries.filter((item) => item.label === "静态风险");
+    const otherFindings = visibleEntries.filter((item) => item.label !== "静态风险" && item.label !== "静态");
+    otherFindings.forEach(({ label, detail, identity, legacyIdentity }) => appendReviewFinding(target, label, detail, identity, legacyIdentity));
+    if (staticSummary) {
+      const summary = create("div", "review-static-summary");
+      summary.append(create("span", "finding-label", "静态扫描"));
+      summary.append(create("span", "", staticSummary.detail));
+      target.append(summary);
+    }
+    if (staticRisks.length) {
+      const risks = create("details", "review-risk-details");
+      const groups = new Map();
+      staticRisks.forEach((item) => {
+        const match = item.detail.match(/^(.*):(\d+)\s+(.*)$/);
+        const file = match?.[1] || "其他文件";
+        if (!groups.has(file)) groups.set(file, []);
+        groups.get(file).push(item);
+      });
+      risks.append(create("summary", "", `静态风险线索 · ${staticRisks.length} 条 · ${groups.size} 个文件（待人工判断）`));
+      const fileList = create("div", "review-risk-files");
+      groups.forEach((items, file) => {
+        const group = create("details", "review-risk-file");
+        group.append(create("summary", "", `${file} · ${items.length} 条`));
+        const rows = create("div", "review-risk-items");
+        items.forEach(({ label, detail, identity, legacyIdentity }) => appendReviewFinding(rows, label, detail, identity, legacyIdentity));
+        group.append(rows);
+        fileList.append(group);
+      });
+      risks.append(fileList);
+      target.append(risks);
+    }
+    if (!target.childElementCount) target.append(create("div", "review-empty", handledCount && !filter?.checked ? `当前 ${handledCount} 条发现已处理并隐藏。勾选“显示已处理”可查看。` : "审查完成后将在这里汇总确定性发现。"));
+  }
+  function renderReviewFindings(run) { renderReviewFindingsInto($("review-findings"), run); }
+  async function openReviewCase(caseId) {
+    if (!caseId) return;
+    location.hash = "#/audit";
+    try {
+      await loadCases();
+      selectedId = caseId;
+      $("case-select").value = caseId;
+      await loadEvidence(caseId);
+    } catch (error) { toast(error.message); }
+  }
+  function renderReviewCases(run) {
+    const target = $("review-case-list");
+    target.replaceChildren();
+    const browse = run?.browse || {};
+    const promotion = browse.case_promotion || {};
+    const caseIds = Array.from(new Set([...(run?.linked_case_ids || []), ...(promotion.case_id ? [promotion.case_id] : [])]));
+    if (!caseIds.length) {
+      target.append(create("div", "review-empty", "本次未触发 Case；静态提示保留为审查发现。"));
+      return;
+    }
+    caseIds.forEach((caseId) => {
+      const row = create("div", "review-case");
+      const link = create("button", "review-case-link", `${shortId(caseId)}${promotion.case_status ? ` · ${statusMeta(promotion.case_status).label}` : ""}`);
+      link.type = "button";
+      link.addEventListener("click", () => openReviewCase(caseId));
+      row.append(link);
+      row.append(create("span", "", promotion.outcome === "timeout" ? "测试超时" : "测试非零退出"));
+      target.append(row);
+    });
+  }
+  function renderReviewHistory(runs = reviewRuns) {
+    const target = $("review-history");
+    target.replaceChildren();
+    if (!runs.length) {
+      target.append(create("div", "review-empty", "尚无历史记录。"));
+      const compare = $("review-compare-btn");
+      if (compare) compare.disabled = true;
+      return;
+    }
+    runs.slice(0, 6).forEach((run) => {
+      const row = create("button", "review-history-row");
+      row.type = "button";
+      row.title = "查看此审查记录";
+      row.addEventListener("click", () => onDriveStatus({ run }));
+      row.append(create("span", "review-history-id", shortId(run.run_id)));
+      row.append(create("span", "review-history-meta", `${run.status === "complete" ? "完成" : run.status === "error" ? "失败" : "运行中"} · ${relativeTime(run.started_at)}`));
+      row.append(create("span", "review-history-meta", run.duration_s != null ? fmtDuration(run.duration_s) : "—"));
+      const git = run.browse?.git || {};
+      if (git.branch || git.head_full || git.head) {
+        const commit = git.head_full || git.head;
+        row.append(create("span", "review-history-meta", `${git.branch || "分支未知"} · ${commit ? String(commit).slice(0, 12) : "提交未知"}`));
+      }
+      target.append(row);
+    });
+    const compare = $("review-compare-btn");
+    if (compare) compare.disabled = runs.filter((run) => run.status === "complete").length < 2;
+  }
+  function renderSkillReviewHistory(reports = skillReviewReports) {
+    const target = $("skill-review-history");
+    if (!target) return;
+    target.replaceChildren();
+    if (!reports.length) {
+      target.append(create("div", "review-empty", "尚未导入 Skill 报告。"));
+      return;
+    }
+    reports.slice(0, 8).forEach((report) => {
+      const row = create("button", "review-history-row");
+      row.type = "button";
+      row.title = "在网页内查看此 Skill 审查报告";
+      row.append(create("span", "review-history-id", report.repository_name || "Skill 审查报告"));
+      row.append(create("span", "review-history-meta", `${report.review_mode === "repository_audit" ? "全仓审查" : "改动审查"} · ${relativeTime(report.imported_at)}`));
+      row.append(create("span", "review-history-meta", `版本 ${report.revision_head || "未知"}`));
+      row.addEventListener("click", () => openSkillReviewReport(report.report_id));
+      target.append(row);
+    });
+  }
+  function renderAutoReviewState(state = autoReviewState) {
+    autoReviewState = { ...autoReviewState, ...(state || {}) };
+    const checkbox = $("auto-review-enabled");
+    const badge = $("auto-review-badge");
+    const help = $("auto-review-help");
+    if (!checkbox || !badge || !help) return;
+    checkbox.checked = !!autoReviewState.enabled;
+    const metadata = {
+      disabled: ["自动审查关闭", "neutral"],
+      watching: ["等待改动", "info"],
+      waiting: ["等待安静期", "warning"],
+      running: ["正在审查", "info"],
+      complete: ["最近审查完成", "success"],
+      error: ["最近审查失败", "danger"],
+    };
+    const quietSeconds = Math.max(0, Number(autoReviewState.quiet_seconds) || 10800);
+    const quietLabels = { 300: "5 分钟", 1800: "30 分钟", 3600: "1 小时", 10800: "3 小时" };
+    const quietLabel = quietLabels[quietSeconds] || `${Math.round(quietSeconds / 60)} 分钟`;
+    metadata.waiting[0] = `等待 ${quietLabel} 安静期`;
+    const [label, tone] = metadata[autoReviewState.status] || metadata.disabled;
+    badge.textContent = autoReviewState.enabled ? label : "自动审查关闭";
+    badge.dataset.tone = autoReviewState.enabled ? tone : "neutral";
+    if (autoReviewState.error && autoReviewState.status === "waiting" && autoReviewState.pending_files?.length) {
+      const remain = Math.max(0, quietSeconds - (Date.now() / 1000 - Number(autoReviewState.last_change || 0)));
+      const hours = Math.floor(remain / 3600);
+      const minutes = Math.ceil((remain % 3600) / 60);
+      help.textContent = `上次自动审查失败；${autoReviewState.pending_files.length} 个变更文件已保留，将在安静等待 ${hours} 小时 ${minutes} 分钟后重试。原因：${autoReviewState.error}`;
+    }
+    else if (autoReviewState.error) help.textContent = `最近一次审查失败：${autoReviewState.error}`;
+    else if (!autoReviewState.enabled) help.textContent = `自动审查默认关闭。启用后，本地变更连续 ${quietLabel} 没有新改动时，会对累计变更做只读审查。`;
+    else if (autoReviewState.status === "waiting" && autoReviewState.last_change) {
+      const remain = Math.max(0, quietSeconds - (Date.now() / 1000 - Number(autoReviewState.last_change)));
+      const hours = Math.floor(remain / 3600);
+      const minutes = Math.ceil((remain % 3600) / 60);
+      help.textContent = `已发现 ${autoReviewState.pending_files?.length || 0} 个变更文件；预计还需等待 ${hours} 小时 ${minutes} 分钟无新改动后开始审查。`;
+    } else if (autoReviewState.status === "running") help.textContent = "正在只读审查本地变更；不会自动修改代码或运行项目命令。";
+    else help.textContent = `自动审查已启用。每次新改动都会重置 ${quietLabel} 安静计时；连续修改会合并成一份报告。`;
+    const quietSelect = $("auto-review-quiet-period");
+    if (quietSelect) quietSelect.value = String(quietSeconds);
+    const provider = llmProviderById(llmProviderConfig?.active_provider);
+    const providerNote = $("auto-review-provider-note");
+    if (providerNote && provider) {
+      providerNote.textContent = provider.id === "ollama"
+        ? `数据去向：本机 · ${provider.name} / ${provider.model}。源码仅发送到本机模型端点。`
+        : `数据去向：远程端点 · ${provider.name} / ${provider.model}。审查会发送选中变更文件文本；更换模型或端点后自动审查会暂停，需重新确认。`;
+    }
+    const grid = $("auto-review-runtime-grid");
+    if (grid) {
+      grid.replaceChildren();
+      const latest = codeReviewReports[0];
+      const lastChange = Number(autoReviewState.last_change || 0);
+      const dateText = (value) => value ? new Date(value).toLocaleString() : "暂无";
+      const lastChangeText = lastChange ? new Date(lastChange * 1000).toLocaleString() : "暂无待处理变更";
+      const reportText = latest
+        ? `${latest.status === "complete" ? "完成" : latest.status === "running" ? "运行中" : "失败"} · ${dateText(latest.finished_at || latest.started_at)}${latest.provider ? ` · ${latest.provider}${latest.model ? ` / ${latest.model}` : ""}` : ""}`
+        : "尚无自动审查任务";
+      const errorText = autoReviewState.error || latest?.error || "无";
+      const entries = [["监听状态", autoReviewState.enabled ? (autoReviewState.status === "watching" ? "已启用，等待文件变化" : label) : "已关闭"], ["最近变更", lastChangeText], ["待审查文件", `${autoReviewState.pending_files?.length || 0} 个`], ["最近任务", reportText], ["最近错误", errorText]];
+      entries.forEach(([title, value]) => {
+        const item = create("div", "auto-review-runtime-item");
+        item.append(create("span", "auto-review-runtime-label", title), create("span", "auto-review-runtime-value", value));
+        grid.append(item);
+      });
+    }
+    const pending = Array.isArray(autoReviewState.pending_files) ? autoReviewState.pending_files : [];
+    const pendingDetails = $("auto-review-pending");
+    const pendingSummary = $("auto-review-pending-summary");
+    const pendingList = $("auto-review-pending-list");
+    if (pendingDetails && pendingSummary && pendingList) {
+      pendingDetails.hidden = pending.length === 0;
+      pendingSummary.textContent = `查看待审查文件（${pending.length}）`;
+      pendingList.replaceChildren();
+      pending.slice(0, 200).forEach((path) => pendingList.append(create("li", "", path)));
+    }
+  }
+  function renderAutoReviewHistory(reports = codeReviewReports) {
+    const target = $("code-review-history");
+    if (!target) return;
+    target.replaceChildren();
+    if (!reports.length) {
+      target.append(create("div", "review-empty", "尚无 Code Defog 自动审查记录。"));
+      return;
+    }
+    reports.slice(0, 10).forEach((item) => {
+      const row = create("button", "review-history-row");
+      row.type = "button";
+      row.title = item.status === "complete" ? "查看 Code Defog 自动审查报告" : item.error || "查看任务状态";
+      const state = item.status === "complete" ? "完成" : item.status === "running" ? "运行中" : "失败";
+      row.append(create("span", "review-history-id", `${state} · ${item.trigger === "automatic" ? "自动" : "手动"}`));
+      row.append(create("span", "review-history-meta", `${relativeTime(item.started_at)} · ${item.changed_paths?.length || 0} 个文件`));
+      row.append(create("span", "review-history-meta", `${item.provider || "未完成"}${item.model ? ` / ${item.model}` : ""}`));
+      if (item.revision_head) row.append(create("span", "review-history-meta", `提交 ${String(item.revision_head).slice(0, 12)}`));
+      row.addEventListener("click", () => openCodeReviewReport(item.run_id));
+      target.append(row);
+    });
+  }
+  async function openCodeReviewReport(runId) {
+    if (!selectedProject || !runId) return;
+    try {
+      const workspace = encodeURIComponent(selectedProject.workspace);
+      const run = encodeURIComponent(runId);
+      const payload = await api(`/api/projects/${workspace}/code-reviews/${run}`);
+      if (payload.status !== "complete" || !payload.report) {
+        toast(payload.error || "审查任务尚未生成报告");
+        return;
+      }
+      renderSkillReviewReport({ ...payload, report: payload.report }, "Code Defog 自动审查");
+      $("review-report-dialog").showModal();
+    } catch (error) { toast(`读取自动审查报告失败：${error.message}`); }
+  }
+  function compareLatestReviews() {
+    const panel = $("review-history-compare");
+    const completed = reviewRuns.filter((run) => run.status === "complete");
+    panel.hidden = false;
+    panel.replaceChildren();
+    if (completed.length < 2) {
+      panel.append(create("div", "review-empty", "至少需要两次成功完成的审查才能比较。"));
+      return;
+    }
+    const newer = completed[0];
+    const older = completed[1];
+    const before = reviewFindingEntries(older);
+    const after = reviewFindingEntries(newer);
+    const beforeMap = new Map(before.map((item) => [item.identity, item]));
+    const afterMap = new Map(after.map((item) => [item.identity, item]));
+    const added = after.filter((item) => !beforeMap.has(item.identity));
+    const missing = before.filter((item) => !afterMap.has(item.identity));
+    const kept = after.length - added.length;
+    const revision = (run) => {
+      const git = run.browse?.git || {};
+      const commit = git.head_full || git.head || "提交未知";
+      return `${git.branch || "分支未知"}@${String(commit).slice(0, 12)}`;
+    };
+    panel.append(create("p", "review-compare-summary", `${revision(older)} → ${revision(newer)}（${shortId(older.run_id)} → ${shortId(newer.run_id)}）：新增 ${added.length} 项，持续 ${kept} 项，本次未见 ${missing.length} 项。未再出现不等同于已确认修复。`));
+    const renderItems = (items, label, tone) => items.forEach((item) => {
+      const row = create("div", `review-compare-row ${tone}`, `${label} · ${item.label}：${item.detail}`);
+      panel.append(row);
+    });
+    renderItems(added, "新增", "added");
+    renderItems(missing, "本次未见", "missing");
+    if (!added.length && !missing.length) panel.append(create("div", "review-compare-row", "两次审查摘要一致。"));
+  }
+  $("review-compare-btn").addEventListener("click", () => {
+    const panel = $("review-history-compare");
+    if (!panel.hidden) { panel.hidden = true; return; }
+    compareLatestReviews();
+  });
+  const reviewChannelTabs = [
+    ["auto", $("review-tab-auto"), $("review-panel-auto")],
+    ["local", $("review-tab-local"), $("review-panel-local")],
+    ["skill", $("review-tab-skill"), $("review-panel-skill")],
+  ];
+  function selectReviewChannel(name, focusTab = false) {
+    for (const [key, tab, panel] of reviewChannelTabs) {
+      const selected = key === name;
+      tab.setAttribute("aria-selected", String(selected));
+      tab.tabIndex = selected ? 0 : -1;
+      panel.hidden = !selected;
+      if (selected && focusTab) tab.focus();
+    }
+  }
+  reviewChannelTabs.forEach(([name, tab], index) => {
+    tab.addEventListener("click", () => selectReviewChannel(name));
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? reviewChannelTabs.length - 1
+        : (index + (event.key === "ArrowRight" ? 1 : -1) + reviewChannelTabs.length) % reviewChannelTabs.length;
+      selectReviewChannel(reviewChannelTabs[next][0], true);
+    });
+  });
+  async function currentLLMProvider() {
+    if (!llmProviderConfig) await loadLLMProviderConfig();
+    return llmProviderById(llmProviderConfig?.active_provider);
+  }
+  function providerIsLocal(provider) {
+    if (!provider) return false;
+    try { return ["localhost", "127.0.0.1", "::1"].includes(new URL(provider.base_url).hostname); }
+    catch { return provider.id === "ollama"; }
+  }
+  function formatByteSize(value) {
+    const bytes = Math.max(0, Number(value) || 0);
+    return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  function updateAiReviewPreviewSelection() {
+    const selected = Array.from($("ai-review-preview-list").querySelectorAll("input[data-review-path]:checked"));
+    const selectedBytes = selected.reduce((sum, input) => sum + (Number(input.dataset.reviewBytes) || 0), 0);
+    const totalLimit = Number(aiReviewPreview?.max_total_bytes) || 0;
+    const button = $("ai-review-preview-submit");
+    const overLimit = totalLimit > 0 && selectedBytes > totalLimit;
+    button.disabled = selected.length === 0 || aiReviewSubmitting || overLimit;
+    button.textContent = overLimit ? "所选文件超过总量上限" : selected.length ? `确认并发送（${selected.length} 个文件 · ${formatByteSize(selectedBytes)}）` : "至少选择一个文件";
+  }
+  function renderAiReviewFilePreview(payload, provider) {
+    aiReviewPreview = payload;
+    aiReviewPreviewWorkspace = selectedProject?.workspace || null;
+    const target = $("ai-review-preview-list");
+    target.replaceChildren();
+    const excluded = payload.excluded || [];
+    const files = payload.files || [];
+    const omitted = Number(payload.omitted_file_count) || 0;
+    $("ai-review-preview-summary").textContent = `当前有 ${payload.changed_file_count || 0} 个变更文件：${files.length} 个符合审查条件，${excluded.length} 个会跳过${omitted ? `，另有 ${omitted} 个超出最多 ${payload.max_files} 个文件的范围` : ""}。这里只显示路径与大小，不会把源码返回到网页。`;
+    $("ai-review-preview-destination").textContent = `发送目标：${providerIsLocal(provider) ? "本机" : "远程端点"} · ${provider.name} / ${provider.model} · 单文件上限 ${formatByteSize(payload.max_file_bytes)}，总量上限 ${formatByteSize(payload.max_total_bytes)}`;
+    const addGroup = (title, records, isExcluded) => {
+      if (!records.length) return;
+      const group = document.createElement("fieldset");
+      group.className = "ai-review-preview-group";
+      group.append(create("legend", "", `${title}（${records.length}）`));
+      records.forEach((file) => {
+        const row = create("label", `ai-review-file-row${isExcluded ? " is-excluded" : ""}`);
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = !isExcluded;
+        checkbox.disabled = isExcluded;
+        if (!isExcluded) {
+          checkbox.dataset.reviewPath = file.path;
+          checkbox.dataset.reviewBytes = String(file.size_bytes || 0);
+          checkbox.addEventListener("change", updateAiReviewPreviewSelection);
+        }
+        row.append(checkbox, create("span", "ai-review-file-path", file.path));
+        row.append(create("span", isExcluded ? "ai-review-file-reason" : "ai-review-file-size", isExcluded ? file.reason : formatByteSize(file.size_bytes)));
+        group.append(row);
+      });
+      target.append(group);
+    };
+    addGroup("将发送的候选文件（可取消选择）", files, false);
+    addGroup("自动跳过的文件", excluded, true);
+    if (!target.childElementCount) target.append(create("div", "review-empty", "当前没有变更文件。"));
+    updateAiReviewPreviewSelection();
+    $("ai-review-preview-dialog").showModal();
+  }
+  async function openAiReviewFilePreview() {
+    if (!selectedProject) { toast("请先选择一个监控项目"); return; }
+    let provider;
+    try { provider = await currentLLMProvider(); }
+    catch (error) { toast(`无法读取模型设置：${error.message}`); return; }
+    if (!provider?.configured) { toast("请先配置可用的模型提供方"); return; }
+    const button = $("ai-review-now-btn");
+    button.disabled = true;
+    try {
+      const selectedWorkspace = selectedProject.workspace;
+      const workspace = encodeURIComponent(selectedWorkspace);
+      const payload = await api(`/api/projects/${workspace}/code-reviews/preview`);
+      if (selectedProject?.workspace !== selectedWorkspace) return;
+      renderAiReviewFilePreview(payload, provider);
+    } catch (error) { toast(`无法读取变更文件清单：${error.message}`); }
+    finally { button.disabled = false; }
+  }
+  $("ai-review-preview-close").addEventListener("click", () => $("ai-review-preview-dialog").close());
+  $("ai-review-preview-cancel").addEventListener("click", () => $("ai-review-preview-dialog").close());
+  $("ai-review-preview-dialog").addEventListener("click", (event) => {
+    if (event.target === $("ai-review-preview-dialog")) $("ai-review-preview-dialog").close();
+  });
+  $("ai-review-select-all").addEventListener("click", () => {
+    $("ai-review-preview-list").querySelectorAll("input[data-review-path]").forEach((input) => { input.checked = true; });
+    updateAiReviewPreviewSelection();
+  });
+  $("ai-review-select-none").addEventListener("click", () => {
+    $("ai-review-preview-list").querySelectorAll("input[data-review-path]").forEach((input) => { input.checked = false; });
+    updateAiReviewPreviewSelection();
+  });
+  $("ai-review-preview-submit").addEventListener("click", async () => {
+    if (!selectedProject || !aiReviewPreview || aiReviewSubmitting) return;
+    if (selectedProject.workspace !== aiReviewPreviewWorkspace) { toast("当前项目已切换，请重新预览文件"); return; }
+    const paths = Array.from($("ai-review-preview-list").querySelectorAll("input[data-review-path]:checked"), (input) => input.dataset.reviewPath);
+    if (!paths.length) return;
+    const workspace = selectedProject.workspace;
+    aiReviewSubmitting = true;
+    updateAiReviewPreviewSelection();
+    try {
+      await api(`/api/projects/${encodeURIComponent(workspace)}/code-reviews`, { method: "POST", body: { paths } });
+      $("ai-review-preview-dialog").close();
+      await loadReviewHistory(dataEpoch);
+      toast(`已提交 ${paths.length} 个文件的 AI 改动审查`);
+    } catch (error) { toast(error.message); }
+    finally { aiReviewSubmitting = false; updateAiReviewPreviewSelection(); }
+  });
+  const handledFindingsFilter = $("review-show-handled");
+  try { handledFindingsFilter.checked = localStorage.getItem("code-defog-show-handled-findings") === "true"; }
+  catch { /* Keep the in-page default when browser storage is unavailable. */ }
+  handledFindingsFilter.addEventListener("change", () => {
+    try { localStorage.setItem("code-defog-show-handled-findings", String(handledFindingsFilter.checked)); }
+    catch { /* Filtering still works for this page session. */ }
+    if (reviewRun) renderReviewFindings(reviewRun);
+  });
+  $("review-onboarding-model-btn").addEventListener("click", openLLMSettings);
+  $("review-onboarding-run-btn").addEventListener("click", () => $("drive-btn").click());
+  const quietPeriodSelect = $("auto-review-quiet-period");
+  const quietPeriodLabels = { 300: "5 分钟", 1800: "30 分钟", 3600: "1 小时", 10800: "3 小时" };
+  const quietPeriodLabel = () => quietPeriodLabels[Number(quietPeriodSelect.value)] || "自定义安静期";
+  $("auto-review-enabled").addEventListener("change", async (event) => {
+    const checkbox = event.currentTarget;
+    if (!selectedProject) { checkbox.checked = false; toast("请先选择一个监控项目"); return; }
+    const enabled = checkbox.checked;
+    let provider;
+    if (enabled) {
+      try { provider = await currentLLMProvider(); }
+      catch (error) { checkbox.checked = false; toast(`无法读取模型设置：${error.message}`); return; }
+      if (!provider?.configured) { checkbox.checked = false; toast("请先配置可用的模型提供方"); return; }
+      const destination = providerIsLocal(provider) ? "本机模型端点" : `${provider.name}（${provider.base_url}）`;
+      const message = "启用后，项目变更会在连续 " + quietPeriodLabel() + " 无新改动后自动发送给 " + destination + " 进行只读审查。变更文件文本会离开本机（本机模型除外）；系统不会自动修改代码或运行项目命令。确定启用？";
+      if (!window.confirm(message)) { checkbox.checked = false; return; }
+    }
+    checkbox.disabled = true;
+    try {
+      await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/ai-review-settings`, {
+        method: "POST", body: { enabled, quiet_seconds: Number(quietPeriodSelect.value) },
+      });
+      await loadReviewHistory(dataEpoch);
+      toast(enabled ? ("已启用该项目的 " + quietPeriodLabel() + " 安静窗口自动审查") : "已关闭该项目的自动审查");
+    } catch (error) {
+      checkbox.checked = !enabled;
+      toast(`更新自动审查设置失败：${error.message}`);
+    } finally { checkbox.disabled = false; }
+  });
+  quietPeriodSelect.addEventListener("change", async () => {
+    if (!selectedProject) { toast("请先选择一个监控项目"); renderAutoReviewState(autoReviewState); return; }
+    const workspace = selectedProject.workspace;
+    const quietSeconds = Number(quietPeriodSelect.value);
+    quietPeriodSelect.disabled = true;
+    try {
+      const payload = await api("/api/projects/" + encodeURIComponent(workspace) + "/ai-review-settings", {
+        method: "POST", body: { quiet_seconds: quietSeconds },
+      });
+      if (selectedProject?.workspace !== workspace) return;
+      autoReviewState = { ...autoReviewState, ...(payload.project || {}), quiet_seconds: quietSeconds };
+      renderAutoReviewState(autoReviewState);
+      toast("安静期已设为 " + quietPeriodLabel());
+    } catch (error) {
+      renderAutoReviewState(autoReviewState);
+      toast("保存安静期失败：" + error.message);
+    } finally { quietPeriodSelect.disabled = false; }
+  });
+  const autoReviewNotifications = $("auto-review-notifications");
+  try { autoReviewNotifications.value = localStorage.getItem(AUTO_REVIEW_NOTICE_KEY) || "failure"; }
+  catch { autoReviewNotifications.value = "failure"; }
+  autoReviewNotifications.addEventListener("change", () => {
+    try { localStorage.setItem(AUTO_REVIEW_NOTICE_KEY, autoReviewNotifications.value); }
+    catch { /* Page notices still work for this session. */ }
+  });
+  $("ai-review-now-btn").addEventListener("click", async () => {
+    await openAiReviewFilePreview();
+  });
+  function renderReviewRun(run) {
+    if (!run) return;
+    reviewRun = run;
+    const reportButton = $("review-report-open-btn");
+    if (reportButton) reportButton.disabled = false;
+    const git = run.browse?.git || {};
+    const commit = git.head_full || git.head;
+    const revision = git.branch ? ` · ${git.branch}${commit ? `@${String(commit).slice(0, 12)}` : ""}` : "";
+    $("review-run-meta").textContent = `${shortId(run.run_id)} · ${run.status === "complete" ? "已完成" : run.status === "error" ? "失败" : "运行中"}${revision}`;
+    renderReviewTasks(run);
+    renderReviewFindings(run);
+    renderReviewCases(run);
+    renderReviewRuntime();
+    renderReviewCommandState();
+    if (run.browse || run.llm) renderDriveRun(run);
+  }
+  function appendReviewReportSection(target, title) {
+    const section = create("section", "report-section");
+    section.append(create("h3", "", title));
+    target.append(section);
+    return section;
+  }
+  function appendReviewReportTable(section, headers, rows) {
+    const table = create("table", "report-table");
+    const head = document.createElement("thead");
+    const header = document.createElement("tr");
+    headers.forEach((label) => header.append(create("th", "", label)));
+    head.append(header);
+    const body = document.createElement("tbody");
+    rows.forEach((values) => {
+      const row = document.createElement("tr");
+      values.forEach((value) => row.append(create("td", "", value == null ? "—" : String(value))));
+      body.append(row);
+    });
+    table.append(head, body);
+    section.append(table);
+  }
+  function renderReviewReport(run) {
+    const target = $("review-report-content");
+    if (!target || !run) return;
+    $("review-report-dialog-title").textContent = "项目自动审查报告";
+    target.replaceChildren();
+    const git = run.browse?.git || {};
+    const browse = run.browse || {};
+    const test = browse.test || {};
+    const scan = browse.static_scan || {};
+    const summary = run.llm?.summary || {};
+    const project = selectedProject?.name || selectedProject?.workspace || "本机项目";
+    target.append(create("h1", "report-title", `${project} · 审查报告`));
+    const fullCommit = git.head_full || git.head || "提交版本未知";
+    const revision = git.branch ? `${git.branch}@${fullCommit}` : fullCommit;
+    target.append(create("p", "report-subtitle", `${shortId(run.run_id)} · ${run.status === "complete" ? "审查完成" : run.status === "error" ? "审查失败" : "运行中"} · ${run.started_at || "时间未知"} · ${revision}`));
+    const conclusion = create("div", "report-conclusion");
+    conclusion.append(create("strong", "", "审查结论："));
+    conclusion.append(document.createTextNode(summary.overall_status || (run.status === "error" ? run.error || "审查未能完成。" : run.status === "running" ? "审查仍在运行，以下为当前已保存的结果。" : "已完成确定性扫描；当前没有可用的总结文本。")));
+    target.append(conclusion);
+
+    const scopeSection = appendReviewReportSection(target, "审查范围");
+    const scope = run.scope || {};
+    const components = scope.components || {};
+    const enabled = Object.entries(components).filter(([, active]) => active).map(([name]) => ({ structure: "结构", tests: "测试", static: "静态扫描", git: "Git" }[name] || name));
+    appendReviewReportTable(scopeSection, ["模式", "检查项目", "分支 / 版本"], [[scope.mode === "fast" ? "快速" : "完整", enabled.join("、") || "未记录", revision]]);
+
+    const scopeComponents = scope.components || {};
+    const tasksByKey = new Map((run.tasks || []).map((task) => [task.task_key, task]));
+    const checks = [];
+    if (scopeComponents.tests === false) {
+      checks.push(["项目测试", "检查项未启用", "超出本次审查范围", "—", ""]);
+    } else if (test.detected) {
+      const result = !test.ran ? (test.runner_unavailable ? "运行器不可用，未执行" : "已识别但未执行") : test.timed_out ? "超时" : test.execution_error ? "无法启动" : test.passed ? "通过" : "失败";
+      checks.push(["项目测试", test.command || test.runner || "检测到测试", result, test.exit_code == null ? "未提供" : String(test.exit_code), test.output_summary || ""]);
+    } else checks.push(["项目测试", "未检测到测试入口", "未运行", "—", ""]);
+    const staticTaskStatus = tasksByKey.get("static_scan")?.status;
+    const staticStatus = scopeComponents.static === false ? "超出本次审查范围"
+      : scan.error || staticTaskStatus === "error" ? "失败"
+      : staticTaskStatus === "running" ? "进行中"
+      : staticTaskStatus === "pending" ? "尚未开始"
+      : staticTaskStatus === "skipped" ? "未运行"
+      : staticTaskStatus === "complete" ? "已完成"
+      : run.status === "running" ? "未完成"
+      : "无扫描结果";
+    const staticExtent = scopeComponents.static === false ? "未启用静态扫描" : `${scan.scanned_files ?? 0} 个文件`;
+    const staticSummary = scopeComponents.static === false ? ""
+      : `${scan.error_handling_gaps?.length || 0} 处错误处理线索；TODO ${scan.todo_count ?? 0}，FIXME ${scan.fixme_count ?? 0}`;
+    checks.push(["静态扫描", staticExtent, staticStatus, "—", staticSummary]);
+    if (run.error) checks.push(["审查运行", "后台任务", "失败", "—", run.error]);
+    const checkSection = appendReviewReportSection(target, "检查结果");
+    appendReviewReportTable(checkSection, ["检查", "范围 / 命令", "状态", "退出码", "观察"], checks);
+
+    const taskSection = appendReviewReportSection(target, "审查阶段");
+    const tasks = (run.tasks || []).map((task) => [task.title || task.task_key, reviewStatusLabel(task.status), task.failure_reason || task.output?.note || task.output?.status || "—"]);
+    if (tasks.length) appendReviewReportTable(taskSection, ["阶段", "状态", "说明"], tasks);
+    else taskSection.append(create("p", "report-note", "此记录没有阶段明细。"));
+
+    const findingsSection = appendReviewReportSection(target, `发现与待判断线索（${reviewFindingEntries(run).length}）`);
+    findingsSection.append(create("p", "report-note", "下列静态风险和改动提示是审查线索，不自动等同于已确认缺陷；请结合代码与测试验证。LLM 总结也不属于执行证据。"));
+    const findings = reviewFindingEntries(run);
+    if (!findings.length) findingsSection.append(create("p", "report-note", "本次没有记录发现。"));
+    findings.forEach((item) => {
+      const row = create("article", "report-finding");
+      row.append(create("strong", "", `${item.label} · ${item.detail.slice(0, 180)}`));
+      if (item.detail.length > 180) row.append(create("p", "", item.detail));
+      findingsSection.append(row);
+    });
+    if (summary.risks?.length) {
+      const risks = appendReviewReportSection(target, "AI 总结的风险（待确认）");
+      risks.append(create("p", "report-note", "此内容来自模型总结，不是测试或代码执行证据。"));
+      summary.risks.forEach((risk) => risks.append(create("article", "report-finding", risk)));
+    }
+    if (summary.next_steps?.length) {
+      const next = appendReviewReportSection(target, "建议下一步");
+      summary.next_steps.forEach((step, index) => next.append(create("article", "report-finding", `${index + 1}. ${step}`)));
+    }
+  }
+  async function openSkillReviewReport(reportId) {
+    if (!selectedProject || !reportId) return;
+    try {
+      const workspace = encodeURIComponent(selectedProject.workspace);
+      const report = encodeURIComponent(reportId);
+      const payload = await api(`/api/projects/${workspace}/skill-reports/${report}`);
+      renderSkillReviewReport(payload);
+      $("review-report-dialog").showModal();
+    } catch (error) { toast(`读取 Skill 报告失败：${error.message}`); }
+  }
+  function renderSkillReviewReport(record, sourceLabel = "Skill") {
+    const target = $("review-report-content");
+    const report = record?.report;
+    if (!target || !report?.review) return;
+    const review = report.review;
+    const repository = review.repository || {};
+    const revision = review.revision || {};
+    const findings = Array.isArray(report.findings) ? report.findings : [];
+    const confirmed = findings.filter((item) => item.status === "confirmed").length;
+    const unverified = findings.filter((item) => item.status === "unverified").length;
+    const limited = findings.filter((item) => item.status === "environment_limited").length;
+    const labels = {
+      behavior_defect: "行为缺陷", content_rule_inconsistency: "内容/规则不一致",
+      factual_content_error: "事实性错误", regression_check_failure: "回归检查失败",
+      maintenance_gap: "维护缺口", unverified_lead: "待核实", environment_issue: "环境限制",
+    };
+    const statuses = { passed: "通过", failed: "失败", environment_limited: "环境受限", not_run: "未运行" };
+    const findingStatuses = { confirmed: "已确认", unverified: "待核实", environment_limited: "环境受限" };
+    target.replaceChildren();
+    $("review-report-dialog-title").textContent = `${sourceLabel}报告`;
+    target.append(create("h1", "report-title", `${repository.name || "项目"} · 代码审查报告`));
+    target.append(create("p", "report-subtitle", `${review.mode === "repository_audit" ? "全仓审查" : "改动审查"} · 版本 ${revision.head || "未知"} · ${review.created_at || "时间未知"}${repository.url ? ` · ${repository.url}` : ""}`));
+    const conclusion = create("div", "report-conclusion");
+    conclusion.textContent = confirmed
+      ? `确认 ${confirmed} 项问题，另有 ${unverified} 项待核实、${limited} 项受环境限制。`
+      : `本次未确认缺陷（不等于证明没有缺陷）；另有 ${unverified} 项待核实、${limited} 项受环境限制。`;
+    target.append(conclusion);
+    target.append(create("p", "report-note", "只有具备独立复现或可核验静态证据的问题才应标为已确认；模型线索默认待核实，未运行的测试不能算作通过。"));
+
+    const scopeSection = appendReviewReportSection(target, "审查范围");
+    scopeSection.append(create("p", "report-note", review.scope_summary || "未记录范围说明。"));
+    const notes = Array.isArray(review.coverage_notes) ? review.coverage_notes : [];
+    notes.forEach((note) => scopeSection.append(create("p", "report-note", note)));
+
+    const checkSection = appendReviewReportSection(target, "检查结果");
+    const checks = Array.isArray(report.checks) ? report.checks : [];
+    appendReviewReportTable(checkSection, ["命令", "状态", "退出码", "结果"], checks.map((check) => [
+      check.command || "—", statuses[check.status] || check.status || "—",
+      check.exit_code == null ? "—" : String(check.exit_code), check.summary || "",
+    ]));
+
+    const findingsSection = appendReviewReportSection(target, `问题明细（${findings.length}）`);
+    if (!findings.length) findingsSection.append(create("p", "report-note", "本次没有记录问题或待核实线索。"));
+    findings.forEach((finding) => {
+      const card = create("article", "report-finding");
+      const status = findingStatuses[finding.status] || finding.status || "状态未知";
+      card.append(create("strong", "", `[${finding.severity || "未评级"}] ${labels[finding.category] || finding.category || "问题"} · ${status} · ${finding.title || "未命名问题"}`));
+      const locations = (finding.evidence || []).map((evidence) => {
+        if (evidence.path) return evidence.line ? `${evidence.path}:${evidence.line}` : evidence.path;
+        return evidence.url || "位置未提供";
+      });
+      if (locations.length) card.append(create("p", "", `位置：${locations.join("；")}`));
+      (finding.evidence || []).forEach((evidence) => {
+        if (!evidence.path || !evidence.line) return;
+        const jump = create("button", "review-case-link", "在代码地图定位此行");
+        jump.type = "button";
+        jump.addEventListener("click", () => jumpToCodeLocation(evidence.path, evidence.line));
+        card.append(jump);
+      });
+      for (const [label, key] of [["预期", "expected"], ["实际", "actual"], ["影响", "impact"], ["建议", "suggested_action"]]) {
+        if (finding[key]) card.append(create("p", "", `${label}：${finding[key]}`));
+      }
+      (finding.evidence || []).forEach((evidence) => {
+        if (evidence.observation) card.append(create("p", "", `证据：${evidence.observation}`));
+      });
+      if (finding.reproduction?.command) card.append(create("p", "", `复现命令：${finding.reproduction.command}`));
+      if (finding.reproduction?.observed) card.append(create("p", "", `观察：${finding.reproduction.observed}`));
+      appendReviewFindingActions(card, sourceLabel, finding.title || finding.category || "报告问题", reportFindingIdentity(finding));
+      findingsSection.append(card);
+    });
+    target.append(create("p", "report-note", `导入时间：${record.imported_at || "未知"} · 报告按 Skill 审查记录原文展示，模型线索与已确认问题保持区分。`));
+  }
+  $("review-report-open-btn").addEventListener("click", () => {
+    if (!reviewRun) { toast("当前项目还没有审查记录"); return; }
+    renderReviewReport(reviewRun);
+    $("review-report-dialog").showModal();
+  });
+  $("review-report-close-btn").addEventListener("click", () => $("review-report-dialog").close());
+  $("review-report-print-btn").addEventListener("click", () => {
+    document.body.classList.add("review-report-print");
+    window.print();
+    document.body.classList.remove("review-report-print");
+  });
+  $("review-report-dialog").addEventListener("click", (event) => {
+    if (event.target === $("review-report-dialog")) $("review-report-dialog").close();
+  });
+  function setReviewStartBusy(busy) {
+    reviewStartBusy = busy;
+    const btn = $("drive-btn");
+    const label = $("drive-btn-label");
+    const running = reviewRun?.status === "running";
+    if (btn) {
+      btn.disabled = busy || running;
+      btn.setAttribute("aria-busy", String(busy));
+    }
+    if (label) label.textContent = busy ? "正在启动审查…" : running ? "审查进行中" : "开始全项目审查";
+    renderReviewCommandState();
+  }
+  async function startDrive() {
+    if (!selectedProject) { toast("请先选择要监控的项目"); return; }
+    if (reviewStartBusy || reviewRun?.status === "running") return;
+    const workspace = selectedProject.workspace;
+    const projectName = selectedProject.name || workspace;
+    const epoch = dataEpoch;
+    reviewStartError = "";
+    setReviewStartBusy(true);
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/drive`, {
+        method: "POST", body: { scope: selectedReviewScope() },
+      });
+      if (epoch !== dataEpoch || !selectedProject || selectedProject.workspace !== workspace) return;
+      if (payload.run) renderReviewRun(payload.run);
+      setDriveStatus(true, "运行中", "warn");
+      startDriveTimer();
+      $("ov-drive-note").textContent = `正在审查 ${projectName}…`;
+    } catch (error) {
+      if (epoch !== dataEpoch || !selectedProject || selectedProject.workspace !== workspace) return;
+      setDriveStatus(true, "失败", "bad");
+      $("ov-drive-note").textContent = error.message;
+      reviewStartError = error.message || "审查启动失败";
+      toast("审查未能启动，可检查服务后重试");
+    } finally {
+      if (epoch === dataEpoch && selectedProject?.workspace === workspace) setReviewStartBusy(false);
+    }
+  }
+  $("drive-btn").addEventListener("click", startDrive);
+
+  function onDriveStatus(event) {
+    const run = (event && event.run) || {};
+    const workspace = run.workspace || event?.workspace;
+    if (workspace && (!selectedProject || workspace !== selectedProject.workspace)) return;
+    const status = run.status;
+    if (run.run_id) renderReviewRun(run);
+    if (status === "running") {
+      reviewStartError = "";
+      setReviewStartBusy(false);
+      setDriveStatus(true, "运行中", "warn");
+      if (!driveTimer) startDriveTimer();
+      $("ov-drive-note").textContent = "正在由 Harness 协调结构审查、测试探测、静态扫描和结果汇总…";
+    } else if (status === "complete") {
+      reviewStartError = "";
+      setReviewStartBusy(false);
+      stopDriveTimer();
+      if (run.duration_s != null) $("ov-drive-timer").textContent = fmtDuration(run.duration_s);
+      setDriveStatus(true, "已完成", "ok");
+      $("ov-drive-note").textContent = `审查完成，用时 ${run.duration_s != null ? fmtDuration(run.duration_s) : "?"}。`;
+      loadReviewHistory();
+    } else if (status === "error") {
+      reviewStartError = run.error || "审查执行失败";
+      setReviewStartBusy(false);
+      stopDriveTimer();
+      setDriveStatus(true, "失败", "bad");
+      $("ov-drive-note").textContent = run.error || "驱动失败";
+    }
+  }
+  let taskBurstTimer = null;
+  function handleEvent(event) {
+    if (event.type === "review_status" || event.type === "drive_status") { onDriveStatus(event); return; }
+    if (event.type === "code_review_updated" || event.type === "auto_review_status") {
+      if (event.type === "code_review_updated" && event.trigger === "automatic" && ["complete", "error"].includes(event.status)) {
+        const preference = autoReviewNotifications.value || "failure";
+        const runKey = String(event.run_id || event.workspace || "") + ":" + String(event.status);
+        const shouldNotify = preference === "all" || (preference === "failure" && event.status === "error");
+        if (shouldNotify && !notifiedAutoReviewRuns.has(runKey)) {
+          notifiedAutoReviewRuns.add(runKey);
+          if (notifiedAutoReviewRuns.size > 100) notifiedAutoReviewRuns.delete(notifiedAutoReviewRuns.values().next().value);
+          const projectName = String(event.workspace || "项目").split(/[\\/]/).filter(Boolean).pop() || "项目";
+          toast(event.status === "complete"
+            ? "自动审查完成：" + projectName + "，打开审查历史查看报告。"
+            : "自动审查失败：" + projectName + "。" + (event.error || "请查看任务记录。"));
+        }
+      }
+      if (selectedProject && event.workspace === selectedProject.workspace) loadReviewHistory();
+      return;
+    }
+    if (event.type === "review_task_status") {
+      const workspace = event.workspace || event.run?.workspace;
+      if (workspace && (!selectedProject || workspace !== selectedProject.workspace)) return;
+      if (reviewRun && (!reviewRun.workspace || reviewRun.workspace === selectedProject?.workspace) && event.review_run_id === reviewRun.run_id && event.task) {
+        const tasks = Array.isArray(reviewRun.tasks) ? reviewRun.tasks.slice() : [];
+        const index = tasks.findIndex((task) => task.task_key === event.task.task_key);
+        if (index >= 0) tasks[index] = event.task;
+        else tasks.push(event.task);
+        // Coalesce bursts of task events into ONE re-render.
+        clearTimeout(taskBurstTimer);
+        taskBurstTimer = setTimeout(() => renderReviewRun({ ...reviewRun, tasks }), 150);
+      }
+      return;
+    }
+    if (!CASE_EVENTS.includes(event.type) && event.type !== "knowledge_reviewed") return;
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => refreshAll(), 500);
+  }
+
+  function driveReportItem(label, detail, tone = "") {
+    const item = create("div", "drive-report-item");
+    item.append(create("span", `badge${tone ? ` ${tone}` : ""}`, label));
+    item.append(document.createTextNode(String(detail || "")));
+    return item;
+  }
+  function driveTestItem(test) {
+    const item = driveReportItem("test", test.detail || test.command || "");
+    if (test.ran || test.execution_error) {
+      item.append(document.createTextNode(" "));
+      const label = test.timed_out ? "超时" : test.execution_error ? (test.runner_unavailable ? "运行器不可用" : "无法启动") : test.passed ? "通过" : "失败";
+      item.append(create("span", test.passed ? "good" : "bad", label));
+    }
+    return item;
+  }
+  function driveCasePromotionItem(promotion) {
+    if (!promotion || !promotion.triggered) return null;
+    if (promotion.status === "linked" && promotion.case_id) {
+      return driveReportItem("Case", `${promotion.outcome === "timeout" ? "自检超时" : "自检失败"}已纳入 ${shortId(promotion.case_id)} · ${statusMeta(promotion.case_status).label}`, "warn");
+    }
+    if (promotion.status === "duplicate") return driveReportItem("Case", "该次自检已由现有来源记录处理。", "warn");
+    if (promotion.status === "pending") return driveReportItem("Case", "自检来源正在等待关联。", "warn");
+    return driveReportItem("Case", promotion.error || "自检异常未能升级为 Case。", "warn");
+  }
+
+  // 渲染项目浏览报告（确定性）+ 复用 LLM 信息金字塔
+  function renderDriveRun(run) {
+    const browse = run.browse;
+    const llm = run.llm;
+    if (llm && llm.status === "ok") {
+      summaryLlm = llm;
+      renderOverviewLlm(llm);
+    }
+    const report = $("overview-drive");
+    const badge = $("ov-drive-report-badge");
+    const body = $("ov-drive-report-body");
+    report.hidden = false;
+    body.replaceChildren();
+    if (!browse) { body.append(create("div", "empty-data", "无浏览数据。")); return; }
+    const git = browse.git || {};
+    const test = browse.test || {};
+    const scan = browse.static_scan || {};
+    const changeReview = browse.change_review || {};
+    badge.textContent = run.status === "complete" ? "已完成" : run.status;
+    badge.className = "llm-badge " + (run.status === "complete" ? "ok" : "warn");
+    const grid = create("div", "drive-report-grid");
+    const kpis = [
+      ["文件数", String(browse.file_count ?? 0)],
+      ["代码符号", String(browse.symbol_total ?? 0)],
+      ["语言", Object.keys(browse.language_stats || {}).slice(0, 3).join("/") || "—"],
+      ["Git 分支", git.branch || "—"],
+      ["TODO/FIXME", String((scan.todo_count ?? 0) + (scan.fixme_count ?? 0))],
+      ["测试", test.detected ? (test.ran ? (test.timed_out ? "超时" : test.execution_error ? "无法启动" : test.passed ? "通过" : "失败") : test.runner_unavailable ? "运行器不可用" : test.execution_error ? "无法启动" : "已检测") : "未检测"],
+    ];
+    kpis.forEach(([label, value]) => {
+      const kpi = create("div", "drive-report-kpi");
+      kpi.append(create("div", "kpi-label", label));
+      kpi.append(create("div", "kpi-value", value));
+      grid.append(kpi);
+    });
+    body.append(grid);
+    const list = create("div", "drive-report-list");
+    if (git.remote) list.append(driveReportItem("remote", git.remote));
+    if (git.head) list.append(driveReportItem("HEAD", `${git.head} · ${git.dirty_count ?? 0} 个未提交变更`));
+    if (git.recent_commits && git.recent_commits.length) {
+      git.recent_commits.slice(0, 4).forEach((commit) => list.append(driveReportItem("git", commit)));
+    }
+    if (test.detected) {
+      list.append(driveTestItem(test));
+      if (test.output_summary) list.append(driveReportItem("out", test.output_summary.slice(0, 300)));
+    }
+    const promotionItem = driveCasePromotionItem(browse.case_promotion);
+    if (promotionItem) list.append(promotionItem);
+    if ((scan.error_handling_gaps || []).length) {
+      list.append(driveReportItem("风险", `${scan.error_handling_gaps.length} 处错误处理缺口（bare except / 空 catch）`, "warn"));
+      scan.error_handling_gaps.slice(0, 5).forEach((gap) =>
+        list.append(driveReportItem("gap", `${gap.file}:${gap.line} ${gap.snippet}`)));
+    }
+    if (changeReview.status === "ready") {
+      list.append(driveReportItem("改动", `${changeReview.changed_files} 个文件变动，${changeReview.functions?.length || 0} 个 Python 函数受影响`));
+      (changeReview.hypotheses || []).slice(0, 5).forEach((hint) =>
+        list.append(driveReportItem("待验证", `${hint.file}:${hint.line} ${hint.function} · ${hint.title}；${hint.probe}`, "warn")));
+    }
+    body.append(list);
+  }
+
+  async function loadDriveLatest(epoch = dataEpoch) {
+    if (!selectedProject) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/drive`);
+      if (epoch !== dataEpoch) return;
+      const run = payload.run;
+      if (run) onDriveStatus({ type: "drive_status", run });
+    } catch (error) { /* no run yet — ignore */ }
+  }
+  async function loadReviewHistory(epoch = dataEpoch) {
+    if (!selectedProject) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`);
+      if (epoch !== dataEpoch) return;
+      reviewRuns = payload.runs || [];
+      skillReviewReports = payload.skill_reports || [];
+      codeReviewReports = payload.code_reports || [];
+      autoReviewState = payload.auto_review || autoReviewState;
+      reviewFeedback = new Map((payload.feedback || []).map((item) => [item.identity || reviewFindingIdentity(item.label, item.detail), item]));
+      renderReviewHistory(reviewRuns);
+      renderSkillReviewHistory(skillReviewReports);
+      renderAutoReviewHistory(codeReviewReports);
+      renderAutoReviewState(autoReviewState);
+      renderPersonalOnboarding();
+      if (reviewRun) renderReviewFindings(reviewRun);
+    } catch (error) {
+      if (epoch === dataEpoch) { reviewRuns = []; skillReviewReports = []; codeReviewReports = []; reviewFeedback = new Map(); renderReviewHistory([]); renderSkillReviewHistory([]); renderAutoReviewHistory([]); }
+    }
+  }
+  $("skill-report-import-btn").addEventListener("click", () => {
+    if (!selectedProject) { toast("请先选择一个监控项目"); return; }
+    $("skill-report-file").click();
+  });
+  $("skill-report-file").addEventListener("change", async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (file.size > 950_000) { toast("报告文件过大，请限制在 950 KB 以内"); return; }
+    if (!selectedProject) { toast("请先选择一个监控项目"); return; }
+    const workspace = selectedProject.workspace;
+    const epoch = dataEpoch;
+    try {
+      const report = JSON.parse(await file.text());
+      const payload = await api(`/api/projects/${encodeURIComponent(workspace)}/skill-reports`, {
+        method: "POST", body: { report },
+      });
+      if (epoch !== dataEpoch || selectedProject?.workspace !== workspace) return;
+      await loadReviewHistory(epoch);
+      toast(`已将 ${payload.record?.repository_name || file.name} 保存到本机审查历史`);
+    } catch (error) { toast(`导入失败：${error.message}`); }
+  });
+  $("review-export-btn").addEventListener("click", async () => {
+    if (!selectedProject) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews/export`);
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `code-defog-review-history-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast(`已导出 ${payload.runs?.length || 0} 条本地检查、${payload.code_reports?.length || 0} 条 Code Defog AI 审查和 ${payload.skill_reports?.length || 0} 份 Skill 报告`);
+    } catch (error) { toast(error.message); }
+  });
+  $("review-clear-btn").addEventListener("click", async () => {
+    if (!selectedProject) return;
+    const projectName = selectedProject.name || selectedProject.workspace;
+    if (!window.confirm(`确定清空“${projectName}”的全部审查历史和问题状态吗？此操作不可撤销。`)) return;
+    try {
+      const payload = await api(`/api/projects/${encodeURIComponent(selectedProject.workspace)}/reviews`, { method: "DELETE" });
+      reviewRuns = [];
+      skillReviewReports = [];
+      codeReviewReports = [];
+      reviewFeedback = new Map();
+      reviewRun = null;
+      $("review-report-open-btn").disabled = true;
+      if ($("review-report-dialog").open) $("review-report-dialog").close();
+      renderReviewHistory([]);
+      renderSkillReviewHistory([]);
+      renderAutoReviewHistory([]);
+      renderReviewTasks(null);
+      renderReviewFindings(null);
+      renderReviewCases(null);
+      $("review-run-meta").textContent = "历史记录已清空";
+      $("review-history-compare").hidden = true;
+      toast(`已清理 ${payload.deleted?.runs || 0} 条本地检查、${payload.deleted?.ai_reports || 0} 条 Code Defog AI 审查、${payload.deleted?.skill_reports || 0} 份 Skill 报告和问题状态`);
+    } catch (error) { toast(error.message); }
+  });
+  async function boot() {
+    const connection = ++connectionEpoch;
+    stopSubscription();
+    try {
+      const epoch = ++dataEpoch;
+      await Promise.all([loadProjects(epoch), loadHarness(epoch)]);
+      if (connection !== connectionEpoch) return;
+      if (!monitoredProjects.length) {
+        clearSelectedProject();
+        if (!location.hash || location.hash === "#/") {
+          history.replaceState(null, "", "#/overview");
+        }
+        applyHash();                        // direct entry: overview provides the project-selection CTA
+        subscribe(connection);
+        return;
+      }
+      const saved = localStorage.getItem(PROJECT_KEY);
+      const match = monitoredProjects.find((p) => p.workspace === saved) || monitoredProjects[0];
+      selectedProject = match;
+      renderSidebarProjects();
+      if (!location.hash || location.hash === "#/") {
+        history.replaceState(null, "", "#/overview");
+      }
+      applyHash();                          // toggle only (no load)
+      await refreshAll(epoch);              // loads active view + sidebar once
+      subscribe(connection);
+    } catch (error) { toast(error.message); }
+  }
+
+  // ── 监控项目：选择窗口 + 监控列表 ──────────────────────────────────
+
+  let discoveredGit = [];
+  let discoveredProcesses = [];
+
+  function statusText(s) { return s === "watching" ? "监控中" : s === "error" ? "错误" : s === "pending" ? "待启动" : (s || "未知"); }
+  function projectStatusTone(status) { return status === "watching" ? "success" : status === "error" ? "danger" : status === "pending" ? "warning" : "neutral"; }
+
+  let projectsCache = { at: 0, epoch: -1 };
+  async function loadProjects(epoch = dataEpoch, force = false) {
+    // SSE-triggered refreshes fire often; the monitored-project list changes
+    // rarely, so serve it from a short TTL instead of refetching every event.
+    if (!force && epoch === projectsCache.epoch && Date.now() - projectsCache.at < 8000) {
+      return true;
+    }
+    try {
+      const payload = await api("/api/projects");
+      projectsCache = { at: Date.now(), epoch };
+      if (epoch !== dataEpoch) return false;
+      monitoredProjects = payload.projects || [];
+      if (selectedProject && !monitoredProjects.some((project) => project.workspace === selectedProject.workspace)) {
+        clearSelectedProject();
+      } else {
+        renderSidebarProjects();
+      }
+      if (currentView === "projects") renderMonitoredProjects(monitoredProjects);
+      setApiOnline(true);
+      return true;
+    } catch (error) {
+      if (epoch === dataEpoch) {
+        const list = $("monitored-projects-list");
+        if (list) { list.innerHTML = ""; list.append(create("div", "empty-data", "无法连接监控服务。")); }
+      }
+      return false;
+    }
+  }
+
+  function renderSidebarProjects() {
+    const target = $("sidebar-project-list");
+    target.innerHTML = "";
+    target.setAttribute("aria-busy", String(projectSwitchBusy));
+    $("topbar-project").textContent = selectedProject
+      ? (selectedProject.name || selectedProject.workspace) : "未选择项目";
+    renderReviewProjectFacts();
+    renderOverviewEmptyState();
+    updateAssistantProject();
+    if (!monitoredProjects.length) {
+      target.append(create("div", "sidebar-empty", "尚未监控项目"));
+      return;
+    }
+    monitoredProjects.forEach((p) => {
+      const item = create("button", "sidebar-project-item");
+      item.type = "button";
+      const active = !!selectedProject && selectedProject.workspace === p.workspace;
+      item.classList.toggle("active", active);
+      item.dataset.projectWorkspace = p.workspace;
+      item.setAttribute("aria-current", active ? "true" : "false");
+      item.disabled = projectSwitchBusy;
+      item.append(create("span", "sidebar-project-name", p.name || p.workspace));
+      item.append(create("span", "sidebar-project-meta", shortRepo(p.workspace)));
+      item.append(create("span", `sidebar-project-status ${p.status || "pending"}`, statusText(p.status)));
+      item.addEventListener("click", () => selectProject(p.workspace));
+      target.append(item);
+    });
+  }
+
+  async function selectProject(workspace, opts = {}) {
+    const project = monitoredProjects.find((p) => p.workspace === workspace);
+    if (!project || projectSwitchBusy) return;
+    const changed = !selectedProject || selectedProject.workspace !== project.workspace;
+    if (!changed) {
+      if (opts.navigateToOverview && currentView !== "overview") location.hash = "#/overview";
+      return;
+    }
+    const projectName = project.name || project.workspace;
+    projectSwitchBusy = true;
+    $("project-switch-status").textContent = `正在切换至 ${projectName}…`;
+    selectedProject = project;
+    renderPersonalOnboarding();
+    const epoch = ++dataEpoch;                 // invalidate in-flight loads from the old project
+    resetAssistantConversation();
+    resetCodeMap();
+    resetAuditCaseData();
+    resetOverviewUI();
+    localStorage.setItem(PROJECT_KEY, workspace);
+    renderSidebarProjects();
+    if (currentView === "projects") renderMonitoredProjects(monitoredProjects);
+    resetDriveUI();
+    try {
+      if (opts.navigateToOverview && currentView !== "overview") {
+        location.hash = "#/overview";           // hashchange → refreshActiveView loads
+        return;
+      }
+      await refreshActiveView(epoch);
+    } catch (error) {
+      if (epoch === dataEpoch) toast(`已切换项目，但加载数据失败：${error.message || "请重试"}`);
+    } finally {
+      projectSwitchBusy = false;
+      $("project-switch-status").textContent = `已切换至 ${projectName}。`;
+      renderSidebarProjects();
+      if (currentView === "projects") renderMonitoredProjects(monitoredProjects);
+      if (!activeOverlay) {
+        const focusTarget = [...document.querySelectorAll("[data-project-workspace]")]
+          .find((element) => element.dataset.projectWorkspace === workspace);
+        focusTarget?.focus({ preventScroll: true });
+      }
+    }
+  }
+
+  function resetDriveUI() {
+    stopDriveTimer();
+    reviewRun = null;
+    reviewRuns = [];
+    skillReviewReports = [];
+    codeReviewReports = [];
+    autoReviewState = { enabled: false, status: "disabled", quiet_seconds: 10800 };
+    renderAutoReviewHistory([]);
+    renderAutoReviewState(autoReviewState);
+    reviewFeedback = new Map();
+    const reportButton = $("review-report-open-btn");
+    if (reportButton) reportButton.disabled = true;
+    const reportDialog = $("review-report-dialog");
+    if (reportDialog?.open) reportDialog.close();
+    const compare = $("review-compare-btn");
+    if (compare) compare.disabled = true;
+    reviewStartError = "";
+    setReviewStartBusy(false);
+    setDriveStatus(false);
+    const report = $("overview-drive");
+    if (report) report.hidden = true;
+    const body = $("ov-drive-report-body");
+    if (body) body.replaceChildren(create("div", "empty-data", "尚未运行自动化驱动。"));
+    const graph = $("review-task-graph");
+    if (graph) graph.replaceChildren(create("div", "review-empty", "启动审查后显示阶段和任务记录。"));
+    if (graph) graph.classList.add("is-empty");
+    const findings = $("review-findings");
+    if (findings) findings.replaceChildren(create("div", "review-empty", "尚无审查结果。"));
+    const casesTarget = $("review-case-list");
+    if (casesTarget) casesTarget.replaceChildren(create("div", "review-empty", "仅测试超时或非零退出会进入 Case。"));
+    const history = $("review-history");
+    if (history) history.replaceChildren(create("div", "review-empty", "尚无历史记录。"));
+    renderSkillReviewHistory([]);
+    const comparison = $("review-history-compare");
+    if (comparison) { comparison.hidden = true; comparison.replaceChildren(); }
+    const meta = $("review-run-meta");
+    if (meta) meta.textContent = "尚未启动审查";
+    renderReviewRuntime();
+    renderReviewCommandState();
+  }
+
+  function clearSelectedProject() {
+    selectedProject = null;
+    localStorage.removeItem(PROJECT_KEY);
+    resetAssistantConversation();
+    closeAssistantDrawer();
+    resetCodeMap();
+    resetDriveUI();
+    resetAuditCaseData();
+    resetOverviewUI();
+    renderSidebarProjects();
+    if (currentView === "projects") renderMonitoredProjects(monitoredProjects);
+  }
+
+  function renderMonitoredProjects(projects) {
+    const target = $("monitored-projects-list");
+    const summary = $("monitored-projects-summary");
+    const state = $("monitored-projects-state");
+    target.innerHTML = "";
+    target.setAttribute("aria-busy", String(projectSwitchBusy));
+    const watching = projects.filter((project) => project.status === "watching").length;
+    const errors = projects.filter((project) => project.status === "error").length;
+    if (summary) summary.textContent = projects.length ? `已登记 ${projects.length} 个 · ${watching} 个监控中${errors ? ` · ${errors} 个异常` : ""}` : "尚未登记本机项目";
+    if (state) {
+      state.textContent = !projects.length ? "等待选择项目" : errors ? "存在监控异常" : watching ? "监控运行中" : "等待监控启动";
+      state.dataset.tone = !projects.length ? "neutral" : errors ? "danger" : watching ? "success" : "warning";
+    }
+    if (!projects.length) {
+      const empty = create("div", "projects-empty", "还没有监控项目。选择本机仓库或路径后，才能开始项目审查与代码地图。");
+      const add = create("button", "button primary", "选择要监控的项目");
+      add.type = "button";
+      add.addEventListener("click", (event) => openProjectPicker(false, event.currentTarget));
+      empty.append(add);
+      target.append(empty);
+      return;
+    }
+    projects.forEach((p) => {
+      const card = create("article", "monitored-card");
+      const active = !!selectedProject && selectedProject.workspace === p.workspace;
+      card.classList.toggle("active", active);
+      card.dataset.tone = projectStatusTone(p.status);
+      card.dataset.projectWorkspace = p.workspace;
+      const info = create("div", "");
+      info.append(create("div", "monitored-name", p.name || p.workspace));
+      info.append(create("div", "monitored-meta", `${p.kind === "git" ? "git" : "进程"} · ${p.workspace}${p.canonical_ref ? " · " + p.canonical_ref.split("|")[0] : ""}`));
+      const markers = create("div", "monitored-markers");
+      if (active) {
+        const current = create("span", "state-badge monitored-current", "当前项目");
+        current.dataset.tone = "info";
+        markers.append(current);
+      }
+      const status = create("span", "state-badge monitored-status", statusText(p.status));
+      status.dataset.tone = projectStatusTone(p.status);
+      markers.append(status);
+      const actions = create("div", "monitored-actions");
+      if (!active) {
+        const selectBtn = create("button", "button", "设为当前");
+        selectBtn.type = "button";
+        selectBtn.dataset.projectWorkspace = p.workspace;
+        selectBtn.disabled = projectSwitchBusy;
+        selectBtn.addEventListener("click", () => selectProject(p.workspace));
+        actions.append(selectBtn);
+      }
+      const removeBtn = create("button", "button danger monitored-remove", "停止监控");
+      removeBtn.type = "button";
+      removeBtn.addEventListener("click", async () => {
+        if (!window.confirm(`停止监控“${p.name || p.workspace}”？这不会删除工作区文件。`)) return;
+        removeBtn.disabled = true;
+        removeBtn.setAttribute("aria-busy", "true");
+        const previousLabel = removeBtn.textContent;
+        removeBtn.textContent = "正在停止…";
+        try {
+          await api(`/api/projects/${encodeURIComponent(p.workspace)}`, { method: "DELETE" });
+          // The server has already accepted the deletion.  Reflect that fact
+          // immediately so a transient list-refresh failure cannot leave a
+          // misleading, still-selectable project card on screen.
+          projectsCache = { at: 0, epoch: -1 };
+          monitoredProjects = monitoredProjects.filter((project) => project.workspace !== p.workspace);
+          if (selectedProject?.workspace === p.workspace) clearSelectedProject();
+          else {
+            renderSidebarProjects();
+            if (currentView === "projects") renderMonitoredProjects(monitoredProjects);
+          }
+          const projectsLoaded = await loadProjects(dataEpoch, true);
+          if (!projectsLoaded) toast("已停止监控，但项目列表刷新失败；当前列表已按本次操作更新");
+          else toast("已停止监控该项目");
+          if (!monitoredProjects.length) {
+            ++dataEpoch;
+            clearSelectedProject();
+            location.hash = "#/overview";
+          } else if (!selectedProject || !monitoredProjects.some((project) => project.workspace === selectedProject.workspace)) {
+            await selectProject(monitoredProjects[0].workspace);
+          }
+        } catch (error) {
+          toast(error.message);
+          removeBtn.disabled = false;
+          removeBtn.setAttribute("aria-busy", "false");
+          removeBtn.textContent = previousLabel;
+        }
+      });
+      actions.append(removeBtn);
+      card.append(info, markers, actions);
+      target.append(card);
+    });
+  }
+
+  function openProjectPicker(firstRun = false, opener = document.activeElement) {
+    $("projects-screen").classList.add("show");
+    $("proj-manual-connect").open = false;
+    $("proj-manual-path").value = "";
+    $("proj-picker-copy").textContent = firstRun
+      ? "先选择要监控的项目以开始。当前还没有任何被监控的项目。"
+      : "自动检索本机 git 仓库与运行中进程的工作目录；勾选后开始监控。";
+    updateProjectPickerSelection();
+    beginOverlay("projectPicker", opener, $("proj-picker-close-btn"));
+    refreshProjectDiscovery();
+  }
+  function closeProjectPicker(restoreFocus = true) {
+    const wasOpen = $("projects-screen").classList.contains("show");
+    $("projects-screen").classList.remove("show");
+    if (wasOpen) endOverlay("projectPicker", restoreFocus);
+  }
+  function selectedProjectEntries() {
+    const selected = [];
+    document.querySelectorAll("#projects-screen .proj-option input:checked").forEach((box) => {
+      selected.push({ workspace: box.dataset.path, kind: box.dataset.kind, name: box.dataset.name });
+    });
+    const manualPath = $("proj-manual-path").value.trim();
+    if (manualPath) selected.push({ workspace: manualPath, kind: "git", name: "" });
+    return [...new Map(selected.filter((item) => item.workspace).map((item) => [item.workspace, item])).values()];
+  }
+  function updateProjectPickerSelection() {
+    const selected = selectedProjectEntries();
+    const confirm = $("proj-picker-confirm");
+    const summary = $("proj-picker-selection");
+    summary.textContent = projectPickerBusy
+      ? `正在开始监控 ${selected.length} 个项目…`
+      : selected.length ? `已选择 ${selected.length} 个项目` : "尚未选择项目";
+    confirm.disabled = projectPickerBusy || !selected.length;
+    confirm.setAttribute("aria-busy", String(projectPickerBusy));
+    confirm.textContent = projectPickerBusy ? "正在开始监控…" : selected.length ? `开始监控 ${selected.length} 个项目` : "选择项目后开始监控";
+  }
+  async function refreshProjectDiscovery() {
+    if (projectDiscoveryBusy || projectPickerBusy) return;
+    projectDiscoveryBusy = true;
+    const refresh = $("proj-refresh-btn");
+    refresh.disabled = true;
+    refresh.setAttribute("aria-busy", "true");
+    $("proj-discovery-status").textContent = "正在检索本机项目…";
+    $("proj-git-list").innerHTML = "";
+    $("proj-proc-list").innerHTML = "";
+    try {
+      const payload = await api("/api/projects/discover");
+      discoveredGit = payload.git || [];
+      discoveredProcesses = payload.processes || [];
+      $("proj-discovery-status").textContent = `发现 ${discoveredGit.length} 个 git 仓库 · ${discoveredProcesses.length} 个运行进程工作目录`;
+      renderGitCandidates();
+      renderProcessCandidates();
+    } catch (error) {
+      $("proj-discovery-status").textContent = "项目发现暂不可用。";
+      $("proj-git-list").append(create("div", "empty-data", error.message));
+    } finally {
+      projectDiscoveryBusy = false;
+      refresh.disabled = projectPickerBusy;
+      refresh.setAttribute("aria-busy", "false");
+      updateProjectPickerSelection();
+    }
+  }
+
+  function projOption(candidate) {
+    const option = create("label", "proj-option");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset.path = candidate.path || candidate.cwd || candidate.workspace || "";
+    box.dataset.kind = candidate.kind || "git";
+    box.dataset.name = candidate.name || "";
+    box.addEventListener("change", () => {
+      option.classList.toggle("is-selected", box.checked);
+      updateProjectPickerSelection();
+    });
+    const copy = create("span", "");
+    copy.append(create("span", "proj-option-name", candidate.name || candidate.path || candidate.cwd));
+    const meta = candidate.git_remote || candidate.branch || candidate.last_commit || candidate.pid
+      ? [candidate.git_remote, candidate.branch, candidate.last_commit, candidate.pid ? `pid ${candidate.pid}` : ""].filter(Boolean).join(" · ")
+      : candidate.path || candidate.cwd;
+    copy.append(create("span", "proj-option-meta", meta));
+    option.append(box, copy);
+    return option;
+  }
+
+  function renderGitCandidates() {
+    const target = $("proj-git-list");
+    target.innerHTML = "";
+    if (!discoveredGit.length) { target.append(create("div", "empty-data", "未发现 git 仓库（可在下方手动添加路径）。")); return; }
+    discoveredGit.forEach((c) => target.append(projOption(c)));
+  }
+  function renderProcessCandidates() {
+    const target = $("proj-proc-list");
+    target.innerHTML = "";
+    $("proj-proc-status").textContent = discoveredProcesses.length ? `发现 ${discoveredProcesses.length} 个运行中的项目工作目录` : "未发现运行中的项目进程";
+    if (!discoveredProcesses.length) { target.append(create("div", "empty-data", "暂无运行中的开发进程。")); return; }
+    discoveredProcesses.forEach((c) => target.append(projOption(c)));
+  }
+
+  async function confirmProjectSelection() {
+    if (projectPickerBusy) return;
+    const selected = selectedProjectEntries();
+    if (!selected.length) { toast("请至少选择一个项目"); return; }
+    const previousProject = selectedProject?.workspace || null;
+    const registered = [];
+    const failed = [];
+    projectPickerBusy = true;
+    updateProjectPickerSelection();
+    $("proj-refresh-btn").disabled = true;
+    for (const item of selected) {
+      try {
+        await api("/api/projects", { method: "POST", body: item });
+        registered.push(item);
+      } catch (error) {
+        failed.push({ item, error });
+      }
+    }
+    projectPickerBusy = false;
+    $("proj-refresh-btn").disabled = false;
+    if (!registered.length) {
+      $("proj-discovery-status").textContent = `未能开始监控：${failed.map(({ item }) => item.workspace).join("、")}`;
+      toast("未注册任何项目，请检查路径后重试");
+      updateProjectPickerSelection();
+      return;
+    }
+    const projectsLoaded = await loadProjects(dataEpoch, true);
+    if (!projectsLoaded) {
+      $("proj-discovery-status").textContent = "监控已登记，但项目列表暂时无法刷新；请稍后重试刷新。";
+      toast("监控已登记，列表刷新失败");
+      updateProjectPickerSelection();
+      return;
+    }
+    if (!previousProject && registered[0]?.workspace) {
+      await selectProject(registered[0].workspace, { navigateToOverview: true });
+    }
+    if (failed.length) {
+      const successPaths = new Set(registered.map((item) => item.workspace));
+      document.querySelectorAll("#projects-screen .proj-option input:checked").forEach((box) => {
+        if (successPaths.has(box.dataset.path)) {
+          box.checked = false;
+          box.closest(".proj-option")?.classList.remove("is-selected");
+        }
+      });
+      if (successPaths.has($("proj-manual-path").value.trim())) $("proj-manual-path").value = "";
+      $("proj-discovery-status").textContent = `已开始监控 ${registered.length} 个项目；${failed.length} 个未成功，可保留选择后重试。`;
+      toast(`已开始监控 ${registered.length} 个项目，${failed.length} 个需重试`);
+      updateProjectPickerSelection();
+      return;
+    }
+    toast(`已开始监控 ${registered.length} 个项目`);
+    closeProjectPicker();
+  }
+
+  $("open-project-picker-btn").addEventListener("click", (event) => openProjectPicker(false, event.currentTarget));
+  $("sidebar-add-project-btn").addEventListener("click", (event) => openProjectPicker(false, event.currentTarget));
+  $("overview-empty-cta").addEventListener("click", (event) => openProjectPicker(true, event.currentTarget));
+  $("workspace-empty-cta").addEventListener("click", (event) => {
+    if ($("workspace-empty-state").dataset.state === "no-project") openProjectPicker(true, event.currentTarget);
+    else location.hash = "#/overview";
+  });
+  $("proj-picker-close-btn").addEventListener("click", closeProjectPicker);
+  $("proj-picker-cancel").addEventListener("click", closeProjectPicker);
+  $("proj-refresh-btn").addEventListener("click", refreshProjectDiscovery);
+  $("proj-picker-confirm").addEventListener("click", confirmProjectSelection);
+  $("proj-manual-path").addEventListener("input", updateProjectPickerSelection);
+  $("proj-manual-path").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      confirmProjectSelection();
+    }
+  });
+
+  // ── 项目进度 · 分控仪表盘 ──────────────────────────────────────────
+
+  function statusCssVar(status) {
+    const meta = statusMeta(status);
+    const colors = { "var(--ink-muted)": "var(--ink-muted)", "var(--blue)": "var(--blue)", "var(--orange)": "var(--orange)", "var(--yellow)": "var(--yellow)", "var(--green)": "var(--green)", "var(--red)": "var(--red)", "var(--rose)": "var(--rose)" };
+    return colors[meta.color] || "var(--ink-muted)";
+  }
+
+  function resetOverviewUI() {
+    ["ov-total", "ov-active", "ov-agent-runs", "ov-tool-runs", "ov-events"].forEach((id) => { $(id).textContent = "—"; });
+    renderStatusDonut([]);
+    renderAgentBars([]);
+    renderTrend([]);
+    renderToolBars([]);
+    renderApprovalCard([], []);
+    renderPhaseBars(null);
+    renderOverviewLlm(null);
+    const report = $("overview-drive");
+    if (report) report.hidden = true;
+  }
+  async function loadProjectSummary(force = false, epoch = dataEpoch) {
+    if (!selectedProject) {
+      resetOverviewUI();
+      renderOverviewEmptyState();
+      return false;
+    }
+    try {
+      const query = new URLSearchParams();
+      query.set("workspace", selectedProject.workspace);
+      if (force) query.set("refresh", "1");
+      const qs = query.toString();
+      const payload = await api(`/api/project/summary${qs ? `?${qs}` : ""}`);
+      if (epoch !== dataEpoch) return false;
+      summaryLlm = payload.llm || null;
+      renderOverviewStats(payload.stats);
+      renderOverviewLlm(payload.llm);
+      setApiOnline(true);
+      return true;
+    } catch (error) {
+      if (epoch === dataEpoch) toast(`无法刷新项目概览：${error.message || "请稍后重试"}`);
+      return false;
+    }
+  }
+  async function refreshOverviewSummary() {
+    const button = $("overview-refresh-btn");
+    if (button.disabled) return;
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    try {
+      if (await loadProjectSummary(true)) toast("项目概览已刷新");
+    } finally {
+      button.disabled = false;
+      button.setAttribute("aria-busy", "false");
+    }
+  }
+  $("overview-refresh-btn").addEventListener("click", refreshOverviewSummary);
+
+  function renderOverviewStats(stats) {
+    if (!stats) return;
+    const totals = stats.totals || {};
+    $("ov-total").textContent = totals.cases ?? 0;
+    $("ov-active").textContent = totals.active_cases ?? 0;
+    $("ov-agent-runs").textContent = totals.agent_runs ?? 0;
+    $("ov-tool-runs").textContent = totals.tool_runs ?? 0;
+    // 监控活动 = 近 14 天 timeline 事件总数（监控事件，非 Case）
+    const timeline = stats.activity_timeline || [];
+    $("ov-events").textContent = timeline.reduce((sum, d) => sum + (d.events || 0), 0);
+    renderStatusDonut(stats.case_counts_by_status || []);
+    renderAgentBars(stats.agent_run_counts || []);
+    renderTrend(stats.activity_timeline || []);
+    renderToolBars(stats.tool_counts || []);
+    renderApprovalCard(stats.approval_counts || [], stats.knowledge_counts || []);
+    renderPhaseBars(summaryLlm?.status === "ok" ? (summaryLlm.summary.progress_by_phase || []) : null);
+  }
+
+  function renderStatusDonut(statuses) {
+    const target = $("ov-status-card");
+    target.innerHTML = "";
+    if (!statuses.length) { target.append(create("div", "empty-data", "暂无 Case 数据。")); return; }
+    const total = statuses.reduce((s, r) => s + r.count, 0);
+    const wrap = create("div", "donut-wrap");
+    const donut = create("div", "donut");
+    let acc = 0;
+    const stops = statuses.map((r) => {
+      const color = statusCssVar(r.status);
+      const start = (acc / total) * 360; acc += r.count; const end = (acc / total) * 360;
+      return `${color} ${start}deg ${end}deg`;
+    }).join(", ");
+    donut.style.background = `conic-gradient(${stops})`;
+    const center = create("div", "donut-center");
+    center.append(document.createTextNode(String(total)));
+    center.append(create("small", "", "Case"));
+    donut.append(center);
+    const legend = create("div", "donut-legend");
+    statuses.slice().sort((a, b) => b.count - a.count).forEach((r) => {
+      const row = create("div", "legend");
+      const mark = create("i", "legend-mark");
+      mark.style.background = statusCssVar(r.status);
+      row.append(mark);
+      row.append(create("span", "", `${statusMeta(r.status).label} · ${r.count}`));
+      legend.append(row);
+    });
+    wrap.append(donut, legend);
+    target.append(wrap);
+  }
+
+  function renderAgentBars(agentRuns) {
+    const target = $("ov-agent-card");
+    target.innerHTML = "";
+    if (!agentRuns.length) { target.append(create("div", "empty-data", "暂无 Agent 运行记录。")); return; }
+    const byAgent = {};
+    agentRuns.forEach((r) => {
+      byAgent[r.agent_id] = byAgent[r.agent_id] || {};
+      byAgent[r.agent_id][r.status] = (byAgent[r.agent_id][r.status] || 0) + r.count;
+    });
+    const maxTotal = Math.max(1, ...Object.values(byAgent).map((m) => Object.values(m).reduce((s, c) => s + c, 0)));
+    const AGENT_TITLES = { triage: "分诊", diagnosis: "诊断", repair: "修复", verification: "验证" };
+    Object.entries(byAgent).forEach(([agentId, statusMap]) => {
+      const total = Object.values(statusMap).reduce((s, c) => s + c, 0);
+      const completed = statusMap.completed || 0;
+      const failed = statusMap.failed || 0;
+      const running = statusMap.running || 0;
+      const row = create("div", "bar-row");
+      row.append(create("div", "bar-label", AGENT_TITLES[agentId] || agentId));
+      const track = create("div", "bar-track");
+      const SEG_STATUS = { completed: "completed", failed: "failed", running: "running" };
+      Object.entries(SEG_STATUS).forEach(([status, cls]) => {
+        const count = statusMap[status] || 0;
+        if (!count) return;
+        const seg = create("div", `bar-seg ${cls}`);
+        seg.style.width = `${(count / maxTotal) * 100}%`;
+        seg.title = `${status}: ${count}`;
+        track.append(seg);
+      });
+      track.setAttribute("role", "img");
+      track.setAttribute("aria-label", `${AGENT_TITLES[agentId] || agentId}：完成 ${completed}，失败 ${failed}，进行中 ${running}`);
+      row.append(track);
+      row.append(create("div", "bar-total", String(total)));
+      row.append(create("div", "bar-detail", `完成 ${completed} · 失败 ${failed} · 进行中 ${running}`));
+      target.append(row);
+    });
+    const hint = create("div", "legend", "");
+    [["completed", "完成"], ["failed", "失败"], ["running", "进行中"]].forEach(([cls, label]) => {
+      hint.append(create("i", `legend-mark ${cls === "completed" ? "success" : cls === "failed" ? "blocked" : ""}`, ""));
+      const seg = hint.lastElementChild;
+      seg.style.background = cls === "completed" ? "var(--green)" : cls === "failed" ? "var(--red)" : "var(--blue)";
+      hint.append(create("span", "", label));
+    });
+    target.append(hint);
+  }
+
+  function renderTrend(timeline) {
+    const target = $("ov-trend-card");
+    target.innerHTML = "";
+    if (!timeline.length) { target.append(create("div", "empty-data", "暂无活动数据。")); return; }
+    const svgNS = "http://www.w3.org/2000/svg";
+    const W = 360, H = 174, padL = 30, padR = 10, padB = 25, padT = 19;
+    const n = timeline.length;
+    const cases = timeline.map((d) => d.cases_updated || 0);
+    const events = timeline.map((d) => d.events || 0);
+    const rawMax = Math.max(1, ...cases, ...events);
+    const scaleStep = 10 ** Math.floor(Math.log10(rawMax));
+    const normalized = rawMax / scaleStep;
+    const maxVal = (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10) * scaleStep;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+    const xStep = plotW / n;
+    const barW = Math.max(2, Math.min(10, (xStep - 4) / 2));
+    const dayLabel = (day) => {
+      const date = new Date(`${day}T00:00:00`);
+      return Number.isNaN(date.getTime()) ? String(day).slice(5) : `${date.getMonth() + 1}/${date.getDate()}`;
+    };
+    const appendSvg = (parent, tag, attrs = {}, text = null) => {
+      const element = document.createElementNS(svgNS, tag);
+      Object.entries(attrs).forEach(([key, value]) => element.setAttribute(key, String(value)));
+      if (text !== null) element.textContent = text;
+      parent.append(element);
+      return element;
+    };
+    const svg = document.createElementNS(svgNS, "svg");
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("class", "trend-chart");
+    svg.setAttribute("role", "img");
+    svg.setAttribute("aria-label", "近 14 天活动趋势。可使用鼠标、触摸或左右方向键查看逐日数值。");
+    [maxVal, maxVal / 2, 0].forEach((value) => {
+      const y = padT + (1 - value / maxVal) * plotH;
+      appendSvg(svg, "line", { x1: padL, y1: y, x2: W - padR, y2: y, class: value ? "chart-grid" : "axis" });
+      appendSvg(svg, "text", { x: padL - 6, y: y + 3, "text-anchor": "end" }, String(value));
+    });
+    const visual = create("div", "trend-visual");
+    const tooltip = create("div", "trend-tooltip");
+    tooltip.setAttribute("role", "status");
+    tooltip.setAttribute("aria-live", "polite");
+    const groups = [];
+    const activate = (index) => {
+      groups.forEach((group, groupIndex) => group.classList.toggle("is-active", groupIndex === index));
+      const point = timeline[index];
+      tooltip.replaceChildren(
+        create("strong", "", dayLabel(point.day)),
+        create("span", "", `Case 更新 ${cases[index]} · 事件 ${events[index]}`),
+      );
+      tooltip.style.left = `${Math.max(22, Math.min(78, ((index + .5) / n) * 100))}%`;
+    };
+    timeline.forEach((point, index) => {
+      const x = padL + index * xStep;
+      const group = appendSvg(svg, "g", {
+        class: "trend-group", tabindex: 0, role: "button",
+        "aria-label": `${dayLabel(point.day)}：Case 更新 ${cases[index]}，事件 ${events[index]}`,
+      });
+      const caseHeight = (cases[index] / maxVal) * plotH;
+      const eventHeight = (events[index] / maxVal) * plotH;
+      appendSvg(group, "rect", { x: x + (xStep - barW * 2 - 2) / 2, y: H - padB - caseHeight, width: barW, height: caseHeight, rx: 1.5, class: "trend-bar trend-bar-cases" });
+      appendSvg(group, "rect", { x: x + (xStep - barW * 2 - 2) / 2 + barW + 2, y: H - padB - eventHeight, width: barW, height: eventHeight, rx: 1.5, class: "trend-bar trend-bar-events" });
+      appendSvg(group, "rect", { x, y: padT, width: xStep, height: plotH, class: "trend-hit" });
+      group.addEventListener("pointerenter", () => activate(index));
+      group.addEventListener("focus", () => activate(index));
+      group.addEventListener("click", () => activate(index));
+      group.addEventListener("keydown", (event) => {
+        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+        event.preventDefault();
+        const next = Math.max(0, Math.min(n - 1, index + (event.key === "ArrowLeft" ? -1 : 1)));
+        groups[next].focus();
+        activate(next);
+      });
+      groups.push(group);
+    });
+    const labelIndexes = [...new Set([0, Math.floor((n - 1) / 2), n - 1])];
+    labelIndexes.forEach((index) => appendSvg(svg, "text", { x: padL + (index + .5) * xStep, y: H - 7, "text-anchor": "middle" }, dayLabel(timeline[index].day)));
+    const peakIndex = cases.reduce((best, value, index) => (value + events[index]) > (cases[best] + events[best]) ? index : best, 0);
+    const summary = create("div", "chart-summary");
+    summary.append(create("span", "", "逐日活动"));
+    summary.append(create("strong", "", `峰值 ${dayLabel(timeline[peakIndex].day)} · ${cases[peakIndex] + events[peakIndex]}`));
+    const hint = create("div", "legend", "");
+    [["cases", "var(--blue)", "Case 更新"], ["events", "var(--green)", "事件"]].forEach(([cls, color, label]) => {
+      const mark = create("i", "legend-mark");
+      mark.style.background = color;
+      hint.append(mark);
+      hint.append(create("span", "", label));
+    });
+    visual.append(svg, tooltip);
+    target.append(summary, visual, hint);
+    activate(n - 1);
+  }
+
+  function renderToolBars(toolCounts) {
+    const target = $("ov-tool-card");
+    target.innerHTML = "";
+    if (!toolCounts.length) { target.append(create("div", "empty-data", "暂无工具调用记录。")); return; }
+    const max = Math.max(1, ...toolCounts.map((t) => t.count));
+    const TOOL_TITLES = { sandbox_copy: "沙箱拷贝", apply_case_a_patch: "受控补丁", quality_gate: "质量门禁" };
+    toolCounts.forEach((t) => {
+      const row = create("div", "bar-row");
+      row.append(create("div", "bar-label", TOOL_TITLES[t.tool_name] || t.tool_name));
+      const track = create("div", "bar-track");
+      const success = Math.max(0, Math.min(t.count, t.exit_zero ?? 0));
+      const failed = t.count - success;
+      const scaledWidth = (t.count / max) * 100;
+      if (success) {
+        const succeeded = create("div", "bar-seg completed", "");
+        succeeded.style.width = `${scaledWidth * (success / t.count)}%`;
+        track.append(succeeded);
+      }
+      if (failed) {
+        const failedSeg = create("div", "bar-seg failed", "");
+        failedSeg.style.width = `${scaledWidth * (failed / t.count)}%`;
+        track.append(failedSeg);
+      }
+      track.setAttribute("role", "img");
+      track.setAttribute("aria-label", `${TOOL_TITLES[t.tool_name] || t.tool_name}：调用 ${t.count} 次，成功 ${success} 次，失败 ${failed} 次`);
+      row.append(track);
+      row.append(create("div", "bar-total", String(t.count)));
+      row.append(create("div", "bar-detail", `成功率 ${Math.round((success / t.count) * 100)}% · ${success}/${t.count} 次退出码为 0`));
+      target.append(row);
+    });
+  }
+
+  function renderApprovalCard(approvals, knowledge) {
+    const target = $("ov-approval-card");
+    target.innerHTML = "";
+    const apprMap = {};
+    approvals.forEach((a) => { apprMap[a.decision] = (apprMap[a.decision] || 0) + a.count; });
+    const knMap = {};
+    knowledge.forEach((k) => { knMap[k.status] = (knMap[k.status] || 0) + k.count; });
+    const labels = [
+      ["审批 · 通过", apprMap.approved || 0, "var(--green)"],
+      ["审批 · 拒绝", apprMap.rejected || 0, "var(--red)"],
+      ["知识 · 待复核", knMap.pending_review || 0, "var(--yellow)"],
+      ["知识 · 已验证", knMap.verified || 0, "var(--green)"],
+      ["知识 · 已拒绝", knMap.rejected || 0, "var(--red)"],
+    ];
+    if (!labels.some(([, c]) => c > 0)) { target.append(create("div", "empty-data", "暂无审批与知识记录。")); return; }
+    const list = create("div", "donut-legend");
+    labels.forEach(([label, count, color]) => {
+      if (!count) return;
+      const row = create("div", "legend");
+      const mark = create("i", "legend-mark");
+      mark.style.background = color;
+      row.append(mark);
+      row.append(create("span", "", `${label} · ${count}`));
+      list.append(row);
+    });
+    target.append(list);
+  }
+
+  function renderPhaseBars(phases) {
+    const target = $("ov-phase-card");
+    target.innerHTML = "";
+    if (!phases || !phases.length) { target.append(create("div", "empty-data", "LLM 未提供阶段进度（待刷新总结）。")); return; }
+    const list = create("div", "phase-list");
+    phases.forEach((p) => {
+      const phase = create("div", "phase");
+      const head = create("div", "");
+      head.append(create("div", "phase-name", p.phase));
+      head.append(create("div", "phase-meta", p.status || "待确认"));
+      const track = create("div", "phase-track");
+      const fill = create("div", `phase-fill ${p.status === "已验证" ? "good" : p.status === "进行中" ? "warn" : ""}`);
+      fill.style.width = `${p.progress}%`;
+      track.append(fill);
+      phase.append(head, track, create("div", "phase-value", `${p.progress}%`));
+      list.append(phase);
+    });
+    target.append(list);
+  }
+
+  function renderOverviewLlm(llm) {
+    const badge = $("ov-llm-badge");
+    const body = $("ov-llm-body");
+    body.innerHTML = "";
+    if (!llm) { badge.textContent = "LLM 待生成"; badge.className = "llm-badge warn"; body.append(create("div", "empty-data", "正在生成项目总结…")); return; }
+    if (llm.status === "unavailable") {
+      badge.textContent = "LLM 不可用"; badge.className = "llm-badge warn";
+      body.append(create("div", "empty-data", llm.reason || "DEEPSEEK_API_KEY 未配置。"));
+      return;
+    }
+    if (llm.status === "error") {
+      badge.textContent = "LLM 生成失败"; badge.className = "llm-badge bad";
+      body.append(create("div", "empty-data", llm.reason || "LLM 调用失败，请重试。"));
+      return;
+    }
+    badge.textContent = "LLM 已生成 · 非执行证据"; badge.className = "llm-badge ok";
+    const s = llm.summary || {};
+    body.append(create("p", "llm-overall", s.overall_status || "—"));
+    const prios = s.top_priorities || [];
+    if (prios.length) {
+      body.append(create("div", "section-label", "信息金字塔 · 优先级"));
+      prios.forEach((item) => {
+        const row = create("div", "pyramid-row");
+        const m = String(item).match(/^(P\d+|优先级)\s+(.*)$/);
+        row.append(create("div", "pyramid-prio", m ? m[1] : "P"));
+        row.append(create("div", "pyramid-what", m ? m[2] : item));
+        row.append(create("div", "pyramid-evi", "以本地统计为准"));
+        body.append(row);
+      });
+    }
+    const divisions = s.division_of_labor || [];
+    if (divisions.length) {
+      body.append(create("div", "section-label", "Agent 分工"));
+      const rows = divisions.map((d) => [
+        { text: d.agent || "—" },
+        { text: d.activity || "—" },
+        { text: `${d.share ?? 0}%`, className: "mono" },
+      ]);
+      body.append(table(["Agent", "活动", "相对投入"], rows));
+    }
+    if ((s.risks || []).length) {
+      body.append(create("div", "section-label", "风险与待确认"));
+      const ul = create("ul", "risk-list");
+      s.risks.forEach((r) => ul.append(create("li", "", r)));
+      body.append(ul);
+    }
+    if ((s.next_steps || []).length) {
+      body.append(create("div", "section-label", "下一步建议"));
+      const ul = create("ul", "next-list");
+      s.next_steps.forEach((n) => ul.append(create("li", "", n)));
+      body.append(ul);
+    }
+  }
+
+  window.addEventListener("load", () => { if (window.lucide) window.lucide.createIcons({ attrs: { width: 16, height: 16 } }); });
+  (async () => { if (await initConnection()) await boot(); })();

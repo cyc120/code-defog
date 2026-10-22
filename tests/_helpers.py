@@ -9,10 +9,20 @@ from __future__ import annotations
 
 import secrets
 import threading
+from pathlib import Path
 from typing import Any
 
 from daemon.server import CodeDefogServer
 from daemon.store import StateStore
+
+
+def read_console_source() -> str:
+    """Return the console's HTML plus bundled CSS/JS for source-level tests."""
+    web = Path(__file__).resolve().parents[1] / "web"
+    html = (web / "index.html").read_text(encoding="utf-8")
+    css = (web / "assets" / "app.css").read_text(encoding="utf-8")
+    js = (web / "assets" / "app.js").read_text(encoding="utf-8")
+    return f"{html}\n<style>\n{css}\n</style>\n<script>\n{js}\n</script>"
 
 
 def start_server(store: StateStore, *, token: str | None = None, **kwargs: Any):

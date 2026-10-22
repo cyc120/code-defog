@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 from urllib.request import urlopen
 
+from _helpers import read_console_source
 from daemon.dashboard import DashboardServer
 from daemon.service_discovery import LocalServiceDiscoveryAgent
 
@@ -46,9 +47,7 @@ class DashboardServerTests(unittest.TestCase):
 
 class ConsoleVisualFoundationTests(unittest.TestCase):
     def test_console_uses_semantic_status_tones_and_action_primary(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn("--action-primary-bg", console)
         self.assertIn(".button.primary { border-color: var(--action-primary-bg)", console)
         self.assertIn('.state-badge[data-tone="success"]', console)
@@ -60,18 +59,14 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertNotIn('$("case-state").style.background', render_case)
 
     def test_case_audit_prioritizes_the_current_decision(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         audit_markup = console[console.index('<div id="view-audit"'):console.index('aria-labelledby="phase-title"')]
         self.assertLess(audit_markup.index('id="action-desk"'), audit_markup.index('aria-label="Case 摘要"'))
         self.assertIn('$("action-desk").dataset.tone = decision.tone', console)
         self.assertIn('renderAction(null);', console)
 
     def test_audit_empty_state_is_scoped_to_the_selected_project(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn('id="workspace-empty-state"', console)
         self.assertIn('data-audit-content', console)
         self.assertIn('function clearSelectedProject()', console)
@@ -83,9 +78,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertNotIn('"/api/cases?limit=500"', load_cases)
 
     def test_overview_prioritizes_project_scope_and_review_decision(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         overview = console[console.index('<section id="view-overview"'):console.index('<section id="view-code-map"')]
         self.assertIn('id="overview-empty-state"', overview)
         self.assertIn('data-overview-content', overview)
@@ -98,9 +91,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertIn('query.set("workspace", selectedProject.workspace);', summary_loader)
 
     def test_root_route_opens_the_overview_without_forcing_project_picker(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         router_start = console.index("function applyHash()")
         router = console[router_start:console.index('window.addEventListener("hashchange"', router_start)]
         self.assertIn('setView(hash === "audit" ? "audit"', router)
@@ -116,9 +107,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertNotIn("openProjectPicker(true);", no_projects)
 
     def test_discovery_auto_connects_only_a_unique_verified_loopback_service(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         verified = console[
             console.index("function verifiedServiceCandidates"):
             console.index("async function hasHealthyService", console.index("function verifiedServiceCandidates"))
@@ -152,9 +141,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertIn("location.replace(candidate.ui_url);", remembered)
 
     def test_file_preview_guides_to_the_no_configuration_launch_path(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn('id="connection-start"', console)
         self.assertIn('id="start-command">python3 -m daemon.serve</code>', console)
         self.assertIn('id="copy-start-command"', console)
@@ -170,9 +157,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertIn('localStorage.setItem("cc-conn", JSON.stringify({ host: config.host, port: config.port, user: config.user }));', manual)
 
     def test_project_workspace_and_code_map_preserve_readable_context(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn('class="projects-workspace"', console)
         self.assertIn('id="monitored-projects-summary"', console)
         self.assertIn('function projectStatusTone(status)', console)
@@ -182,9 +167,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertIn('aria-current="page"', console)
 
     def test_overlays_are_mutually_exclusive_and_keyboard_operable(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn('role="dialog" aria-modal="true" aria-labelledby="connect-title"', console)
         self.assertIn('role="dialog" aria-modal="true" aria-labelledby="proj-picker-title"', console)
         self.assertIn('const OVERLAY_PANELS = {', console)
@@ -197,9 +180,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertIn('<form id="manual-connect-form">', console)
 
     def test_project_picker_keeps_valid_checkbox_semantics_and_recovery(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         picker = console[console.index("function selectedProjectEntries()"):console.index('$("open-project-picker-btn")')]
         self.assertIn('create("label", "proj-option")', picker)
         self.assertIn('box.type = "checkbox";', picker)
@@ -209,9 +190,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertNotIn('create("button", "proj-option")', picker)
 
     def test_project_switch_and_review_events_are_scoped_to_current_workspace(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         switcher = console[console.index("async function selectProject"):console.index("function resetDriveUI")]
         self.assertIn('if (!changed) {', switcher)
         self.assertIn('projectSwitchBusy = true;', switcher)
@@ -230,9 +209,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertIn('setReviewStartBusy(true);', drive)
 
     def test_code_map_selection_has_a_clear_keyboard_safe_path(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         code_map = console[console.index("function clearCodeMapSelection"):console.index("// Refresh only the data")]
         self.assertIn('id="code-map-clear-selection"', console)
         self.assertIn('svg.setAttribute("role", "group");', code_map)
@@ -242,9 +219,7 @@ class ConsoleVisualFoundationTests(unittest.TestCase):
         self.assertIn('event.key !== "Escape" || activeOverlay', code_map)
 
     def test_code_map_canvas_has_local_view_controls_and_node_robot_summary(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn('id="code-map-zoom-in"', console)
         self.assertNotIn('id="code-map-expand"', console)
         self.assertNotIn('code-map-inspector', console)

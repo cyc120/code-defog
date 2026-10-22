@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from _helpers import read_console_source
 from agent_runtime.harness import AGENT_TASKS, PROJECT_REVIEW_TASKS, DevLoopHarness
 from agent_runtime.orchestrator import Orchestrator
 from agent_runtime.teams_adapter import AgentScopeExecutionAdapter
@@ -168,9 +169,7 @@ class HarnessEndpointTests(unittest.TestCase):
                 store.close()
 
     def test_console_reads_harness_manifest_and_names_the_control_surface(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(
-            encoding="utf-8"
-        )
+        console = read_console_source()
         self.assertIn("Harness 调度", console)
         self.assertIn('api("/api/harness")', console)
         self.assertIn("Harness 显式派发 Agent 任务", console)

@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import stat as stat_module
 import subprocess
 import sys
 import tempfile
@@ -41,6 +42,7 @@ SKIP_FILES = {
     ".DS_Store",
 }
 STATE_VERSION = 1
+MAX_HASH_BYTES = 1_048_576
 
 
 @dataclass(frozen=True)
@@ -85,7 +87,7 @@ def default_state_file(workspace: Path, worklog_name: str) -> Path:
     return _state_dir() / f"{digest}.json"
 
 
-def load_state(path: Path) -> dict[str, dict[str, int]]:
+def load_state(path: Path) -> dict[str, dict[str, int | str]]:
     if not path.exists():
         return {}
     try:
@@ -98,7 +100,7 @@ def load_state(path: Path) -> dict[str, dict[str, int]]:
     return files if isinstance(files, dict) else {}
 
 
-def save_state(path: Path, workspace: Path, files: dict[str, dict[str, int]]) -> None:
+def save_state(path: Path, workspace: Path, files: dict[str, dict[str, int | str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": STATE_VERSION,
@@ -150,12 +152,12 @@ def should_skip_file(path: Path, workspace: Path, worklog_name: str, state_file:
     return False
 
 
-def snapshot(workspace: Path, worklog_name: str, state_file: Path | None) -> dict[str, dict[str, int]]:
+def snapshot(workspace: Path, worklog_name: str, state_file: Path | None) -> dict[str, dict[str, int | str]]:
     """Collect per-file signatures under *workspace* (add/modify/delete).
 
     Uses ``os.walk`` + one ``stat`` per file with NO per-file ``resolve()``
     (previously ~7 syscalls per file on the daemon's 5-second poll loop)."""
-    files: dict[str, dict[str, int]] = {}
+    files: dict[str, dict[str, int | str]] = {}
     for root, dirnames, filenames in os.walk(workspace):
         dirnames[:] = [dirname for dirname in dirnames if not should_skip_dir(dirname)]
         root_path = Path(root)
@@ -168,18 +170,32 @@ def snapshot(workspace: Path, worklog_name: str, state_file: Path | None) -> dic
                 relative = path.relative_to(workspace).as_posix()
             except OSError:
                 continue
-            files[relative] = {
+            signature: dict[str, int | str] = {
                 "mtime_ns": stat.st_mtime_ns,
                 "ctime_ns": stat.st_ctime_ns,
                 "size": stat.st_size,
                 "ino": stat.st_ino,
             }
+            # On Windows ctime is creation time. Hash small regular files so a
+            # same-size rewrite with restored mtime is still visible. Keep the
+            # cost bounded for large trees and avoid following file symlinks.
+            if (sys.platform == "win32" and stat_module.S_ISREG(stat.st_mode)
+                    and stat.st_size <= MAX_HASH_BYTES and not path.is_symlink()):
+                try:
+                    digest = hashlib.blake2b(digest_size=16)
+                    with path.open("rb") as handle:
+                        for chunk in iter(lambda: handle.read(262_144), b""):
+                            digest.update(chunk)
+                    signature["digest"] = digest.hexdigest()
+                except OSError:
+                    pass
+            files[relative] = signature
     return files
 
 
 def diff_snapshots(
-    previous: dict[str, dict[str, int]],
-    current: dict[str, dict[str, int]],
+    previous: dict[str, dict[str, int | str]],
+    current: dict[str, dict[str, int | str]],
 ) -> list[Change]:
     changes: list[Change] = []
     previous_paths = set(previous)

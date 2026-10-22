@@ -32,7 +32,9 @@ def _get_validator():
 DEFAULT_RETENTION = 2000
 # Bumped when the on-disk layout gains a structural change; migrate_schema
 # uses PRAGMA user_version so future data-conditioned migrations have a hook.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 7
+DEFAULT_REVIEW_RETENTION = 200
+DEFAULT_REVIEW_FEEDBACK_RETENTION = 1000
 DEFAULT_CONVERSATION_ID = "default"
 PRUNE_EVERY_INGESTS = 50
 DEFAULT_IDEMPOTENCY_WINDOW_S = 300
@@ -240,7 +242,16 @@ class StateStore:
                 last_scan_state TEXT,
                 status TEXT NOT NULL DEFAULT 'pending',
                 last_error TEXT,
-                canonical_ref TEXT NOT NULL DEFAULT ''
+                canonical_ref TEXT NOT NULL DEFAULT '',
+                ai_review_enabled INTEGER NOT NULL DEFAULT 0,
+                ai_review_last_change REAL,
+                ai_review_pending_files_json TEXT NOT NULL DEFAULT '[]',
+                ai_review_status TEXT NOT NULL DEFAULT 'disabled',
+                ai_review_error TEXT,
+                ai_review_last_report_id TEXT,
+                ai_review_provider_id TEXT NOT NULL DEFAULT '',
+                ai_review_provider_signature TEXT NOT NULL DEFAULT '',
+                ai_review_quiet_seconds INTEGER NOT NULL DEFAULT 10800
             );
             CREATE INDEX IF NOT EXISTS idx_monitored_projects_status
                 ON monitored_projects(status);
@@ -298,6 +309,53 @@ class StateStore:
             );
             CREATE INDEX IF NOT EXISTS idx_review_task_runs_run
                 ON review_task_runs(review_run_id, task_order);
+
+            CREATE TABLE IF NOT EXISTS review_finding_feedback (
+                workspace TEXT NOT NULL,
+                finding_key TEXT NOT NULL,
+                label TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                identity TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (workspace, finding_key)
+            );
+            CREATE INDEX IF NOT EXISTS idx_review_feedback_workspace
+                ON review_finding_feedback(workspace, updated_at DESC);
+
+            -- Imported Code Defog Skill audits remain distinct from daemon
+            -- Review Runs while sharing the project's local review history.
+            CREATE TABLE IF NOT EXISTS skill_review_reports (
+                workspace TEXT NOT NULL,
+                report_id TEXT NOT NULL,
+                repository_name TEXT NOT NULL,
+                review_mode TEXT NOT NULL,
+                revision_head TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                imported_at TEXT NOT NULL,
+                report_json TEXT NOT NULL,
+                PRIMARY KEY (workspace, report_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_reports_workspace
+                ON skill_review_reports(workspace, imported_at DESC);
+
+            -- Code Defog-run AI reviews have their own provenance and lifecycle.
+            CREATE TABLE IF NOT EXISTS code_review_reports (
+                run_id TEXT PRIMARY KEY,
+                workspace TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'running',
+                trigger TEXT NOT NULL DEFAULT 'manual',
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                provider TEXT NOT NULL DEFAULT '',
+                model TEXT NOT NULL DEFAULT '',
+                revision_head TEXT NOT NULL DEFAULT '',
+                changed_paths_json TEXT NOT NULL DEFAULT '[]',
+                report_json TEXT,
+                error TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_code_review_workspace
+                ON code_review_reports(workspace, started_at DESC);
 
             -- case_sources: case_id is NULL for pending (not-yet-associated) observations
             CREATE TABLE IF NOT EXISTS case_sources (
@@ -420,8 +478,8 @@ class StateStore:
 
     def migrate_schema(self) -> None:
         # user_version gives future migrations a data-conditioned hook.
-        # v1 = probe-based migrations (still idempotent and re-run every
-        #      startup); v2 = current layout incl. cases.chain_anchor.
+        # v1 = probe-based migrations; v2 = cases.chain_anchor; v3 = persisted
+        # review feedback; v4 = stable review finding identities.
         current_version = self.connection.execute("PRAGMA user_version").fetchone()[0]
         event_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(events)").fetchall()}
         project_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(projects)").fetchall()}
@@ -436,6 +494,21 @@ class StateStore:
         needs_chain_sequence = "chain_sequence" not in tool_run_cols if tool_run_cols else False
         knowledge_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(knowledge_records)").fetchall()}
         needs_review_note = "review_note" not in knowledge_cols if knowledge_cols else False
+        feedback_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(review_finding_feedback)").fetchall()}
+        needs_review_identity = "identity" not in feedback_cols if feedback_cols else False
+        monitored_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(monitored_projects)").fetchall()}
+        auto_review_columns = {
+            "ai_review_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "ai_review_last_change": "REAL",
+            "ai_review_pending_files_json": "TEXT NOT NULL DEFAULT '[]'",
+            "ai_review_status": "TEXT NOT NULL DEFAULT 'disabled'",
+            "ai_review_error": "TEXT",
+            "ai_review_last_report_id": "TEXT",
+            "ai_review_provider_id": "TEXT NOT NULL DEFAULT ''",
+            "ai_review_provider_signature": "TEXT NOT NULL DEFAULT ''",
+            "ai_review_quiet_seconds": "INTEGER NOT NULL DEFAULT 10800",
+        }
+        needs_auto_review_columns = [name for name in auto_review_columns if name not in monitored_cols]
         case_cols = {row[1] for row in self.connection.execute("PRAGMA table_info(cases)").fetchall()}
         needs_chain_anchor = "chain_anchor" not in case_cols if case_cols else False
 
@@ -477,7 +550,8 @@ class StateStore:
         # DevLoop schema migrations — one transaction so a crash mid-sequence
         # cannot leave a partially migrated schema.
         if any((needs_patch_ref, needs_sandbox_ref, needs_repo_abs_path,
-                needs_chain_sequence, needs_review_note, needs_chain_anchor)):
+                needs_chain_sequence, needs_review_note, needs_chain_anchor,
+                needs_review_identity, needs_auto_review_columns)):
             self.connection.execute("BEGIN IMMEDIATE")
             try:
                 if needs_patch_ref:
@@ -493,6 +567,14 @@ class StateStore:
                     self.connection.execute("ALTER TABLE knowledge_records ADD COLUMN review_note TEXT")
                 if needs_chain_anchor:
                     self.connection.execute("ALTER TABLE cases ADD COLUMN chain_anchor TEXT")
+                if needs_review_identity:
+                    self.connection.execute(
+                        "ALTER TABLE review_finding_feedback ADD COLUMN identity TEXT NOT NULL DEFAULT ''"
+                    )
+                for name in needs_auto_review_columns:
+                    self.connection.execute(
+                        f"ALTER TABLE monitored_projects ADD COLUMN {name} {auto_review_columns[name]}"
+                    )
             except Exception:
                 self.connection.execute("ROLLBACK")
                 raise
@@ -613,7 +695,7 @@ class StateStore:
         with self.lock:
             self.connection.execute("DELETE FROM events")
             self.connection.execute("DELETE FROM projects")
-            for tbl in ("review_task_runs", "review_runs", "case_sources", "agent_runs", "tool_runs", "artifacts",
+            for tbl in ("review_task_runs", "review_runs", "code_review_reports", "review_finding_feedback", "case_sources", "agent_runs", "tool_runs", "artifacts",
                          "approval_grants", "approvals", "knowledge_records", "cases",
                          "drive_runs"):
                 self.connection.execute(f"DELETE FROM {tbl}")
@@ -1615,6 +1697,312 @@ class StateStore:
                 (commit, abs_path))
             self.connection.commit()
 
+    def set_auto_review_enabled(self, workspace: str, enabled: bool,
+                                provider_id: str = "", provider_signature: str = "",
+                                quiet_seconds: int | None = None) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        value = bool(enabled)
+        with self.lock:
+            self.connection.execute(
+                "UPDATE monitored_projects SET ai_review_enabled = ?, ai_review_status = ?, "
+                "ai_review_last_change = NULL, ai_review_pending_files_json = '[]', "
+                "ai_review_error = NULL, ai_review_provider_id = ?, "
+                "ai_review_provider_signature = ?, "
+                "ai_review_quiet_seconds = COALESCE(?, ai_review_quiet_seconds) WHERE workspace = ?",
+                (1 if value else 0, "watching" if value else "disabled",
+                 provider_id if value else "", provider_signature if value else "",
+                 quiet_seconds, abs_path),
+            )
+            self.connection.commit()
+            row = self.connection.execute(
+                "SELECT * FROM monitored_projects WHERE workspace = ?", (abs_path,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def set_auto_review_quiet_seconds(self, workspace: str, quiet_seconds: int) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            self.connection.execute(
+                "UPDATE monitored_projects SET ai_review_quiet_seconds = ? WHERE workspace = ?",
+                (int(quiet_seconds), abs_path),
+            )
+            self.connection.commit()
+            row = self.connection.execute(
+                "SELECT * FROM monitored_projects WHERE workspace = ?", (abs_path,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def note_auto_review_changes(self, workspace: str, paths: list[str], changed_at: float | None = None) -> None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT ai_review_enabled, ai_review_pending_files_json FROM monitored_projects WHERE workspace = ?",
+                (abs_path,),
+            ).fetchone()
+            if not row or not row["ai_review_enabled"]:
+                return
+            try:
+                pending = json.loads(row["ai_review_pending_files_json"] or "[]")
+            except json.JSONDecodeError:
+                pending = []
+            merged = list(dict.fromkeys([*(pending if isinstance(pending, list) else []), *paths]))[:200]
+            self.connection.execute(
+                "UPDATE monitored_projects SET ai_review_last_change = ?, "
+                "ai_review_pending_files_json = ?, ai_review_status = 'waiting', ai_review_error = NULL "
+                "WHERE workspace = ?",
+                (changed_at if changed_at is not None else time.time(),
+                 json.dumps(merged, ensure_ascii=False), abs_path),
+            )
+            self.connection.commit()
+
+    def claim_due_auto_review(self, workspace: str, quiet_seconds: int | None = None,
+                              now: float | None = None) -> dict[str, Any] | None:
+        """Atomically take the quiet-window batch so it is scheduled only once."""
+        abs_path = str(Path(workspace).expanduser().resolve())
+        timestamp = now if now is not None else time.time()
+        with self.lock:
+            running = self.connection.execute(
+                "SELECT 1 FROM code_review_reports WHERE workspace = ? AND status = 'running' LIMIT 1",
+                (abs_path,),
+            ).fetchone()
+            if running:
+                return None
+            row = self.connection.execute(
+                "SELECT * FROM monitored_projects WHERE workspace = ?", (abs_path,),
+            ).fetchone()
+            configured_quiet_seconds = max(
+                60, int(quiet_seconds if quiet_seconds is not None
+                        else (row["ai_review_quiet_seconds"] if row else 10800)),
+            )
+            if (not row or not row["ai_review_enabled"] or row["ai_review_status"] == "running"
+                    or row["ai_review_last_change"] is None
+                    or timestamp - float(row["ai_review_last_change"]) < configured_quiet_seconds):
+                return None
+            try:
+                paths = json.loads(row["ai_review_pending_files_json"] or "[]")
+            except json.JSONDecodeError:
+                paths = []
+            if not isinstance(paths, list) or not paths:
+                return None
+            self.connection.execute(
+                "UPDATE monitored_projects SET ai_review_status = 'running', "
+                "ai_review_last_change = NULL, ai_review_pending_files_json = '[]', ai_review_error = NULL "
+                "WHERE workspace = ?",
+                (abs_path,),
+            )
+            self.connection.commit()
+            result = dict(row)
+            result["changed_paths"] = paths
+            return result
+
+    def set_auto_review_failure(self, workspace: str, error: str,
+                                paths: list[str] | None = None) -> None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT ai_review_enabled, ai_review_pending_files_json FROM monitored_projects WHERE workspace = ?",
+                (abs_path,),
+            ).fetchone()
+            if row is None:
+                return
+            try:
+                pending = json.loads(row["ai_review_pending_files_json"] or "[]")
+            except json.JSONDecodeError:
+                pending = []
+            merged = list(dict.fromkeys([
+                *(pending if isinstance(pending, list) else []),
+                *(paths if isinstance(paths, list) else []),
+            ]))[:200]
+            enabled = bool(row["ai_review_enabled"])
+            self.connection.execute(
+                "UPDATE monitored_projects SET ai_review_status = ?, ai_review_error = ?, "
+                "ai_review_pending_files_json = ?, ai_review_last_change = ? WHERE workspace = ?",
+                ("waiting" if enabled and merged else "error", clean_text(error, 1000),
+                 json.dumps(merged, ensure_ascii=False), time.time() if enabled and merged else None,
+                 abs_path),
+            )
+            self.connection.commit()
+
+    def recover_interrupted_code_reviews(self, now: float | None = None) -> int:
+        """Mark abandoned workers failed and requeue automatic batches after restart."""
+        timestamp = now if now is not None else time.time()
+        interrupted_error = "服务上次运行中断；自动审查已保留并重新排队"
+        recovered = 0
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT run_id, workspace, trigger, changed_paths_json FROM code_review_reports "
+                "WHERE status = 'running'",
+            ).fetchall()
+            for row in rows:
+                workspace = row["workspace"]
+                try:
+                    paths = json.loads(row["changed_paths_json"] or "[]")
+                except json.JSONDecodeError:
+                    paths = []
+                project = self.connection.execute(
+                    "SELECT ai_review_enabled, ai_review_pending_files_json FROM monitored_projects "
+                    "WHERE workspace = ?", (workspace,),
+                ).fetchone()
+                requeue = bool(project and project["ai_review_enabled"] and row["trigger"] == "automatic")
+                if requeue:
+                    try:
+                        pending = json.loads(project["ai_review_pending_files_json"] or "[]")
+                    except json.JSONDecodeError:
+                        pending = []
+                    merged = list(dict.fromkeys([
+                        *(pending if isinstance(pending, list) else []),
+                        *(paths if isinstance(paths, list) else []),
+                    ]))[:200]
+                    self.connection.execute(
+                        "UPDATE monitored_projects SET ai_review_status = ?, ai_review_error = ?, "
+                        "ai_review_pending_files_json = ?, ai_review_last_change = ? WHERE workspace = ?",
+                        ("waiting" if merged else "error", interrupted_error,
+                         json.dumps(merged, ensure_ascii=False), timestamp if merged else None, workspace),
+                    )
+                elif project and row["trigger"] == "automatic":
+                    self.connection.execute(
+                        "UPDATE monitored_projects SET ai_review_status = 'disabled', ai_review_error = NULL "
+                        "WHERE workspace = ?", (workspace,),
+                    )
+                self.connection.execute(
+                    "UPDATE code_review_reports SET status = 'error', finished_at = ?, error = ? "
+                    "WHERE run_id = ?",
+                    (utc_now(), interrupted_error, row["run_id"]),
+                )
+                recovered += 1
+            self.connection.commit()
+        return recovered
+
+    def begin_code_review_report(self, workspace: str, trigger: str, paths: list[str],
+                                 revision_head: str = "") -> str:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        run_id = f"ai-review-{uuid.uuid4().hex[:16]}"
+        with self.lock:
+            running = self.connection.execute(
+                "SELECT 1 FROM code_review_reports WHERE workspace = ? AND status = 'running' LIMIT 1",
+                (abs_path,),
+            ).fetchone()
+            if running:
+                raise ValueError("该项目已有 AI 审查正在运行")
+            self.connection.execute(
+                "INSERT INTO code_review_reports (run_id, workspace, status, trigger, started_at, "
+                "revision_head, changed_paths_json) VALUES (?, ?, 'running', ?, ?, ?, ?)",
+                (run_id, abs_path, trigger, utc_now(), revision_head,
+                 json.dumps(paths[:200], ensure_ascii=False)),
+            )
+            self.connection.execute(
+                "UPDATE monitored_projects SET ai_review_status = 'running', ai_review_error = NULL "
+                "WHERE workspace = ?", (abs_path,),
+            )
+            self.connection.commit()
+        return run_id
+
+    def finish_code_review_report(self, run_id: str, workspace: str, status: str,
+                                  provider: str = "", model: str = "",
+                                  report: dict[str, Any] | None = None,
+                                  error: str | None = None) -> None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        encoded = json.dumps(report, ensure_ascii=False, separators=(",", ":")) if report else None
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT report_json, trigger, changed_paths_json FROM code_review_reports WHERE run_id = ?", (run_id,),
+            ).fetchone()
+            if row is None:
+                return
+            try:
+                prior = json.loads(row["report_json"] or "{}")
+                report_id = prior.get("review", {}).get("id") if isinstance(prior, dict) else None
+            except json.JSONDecodeError:
+                report_id = None
+            if report and isinstance(report.get("review"), dict):
+                report_id = report["review"].get("id")
+            self.connection.execute(
+                "UPDATE code_review_reports SET status = ?, finished_at = ?, provider = ?, model = ?, "
+                "report_json = COALESCE(?, report_json), error = ? WHERE run_id = ?",
+                (status, utc_now(), provider, model, encoded, error, run_id),
+            )
+            project = self.connection.execute(
+                "SELECT ai_review_enabled, ai_review_pending_files_json FROM monitored_projects WHERE workspace = ?",
+                (abs_path,),
+            ).fetchone()
+            if project:
+                try:
+                    pending = json.loads(project["ai_review_pending_files_json"] or "[]")
+                except json.JSONDecodeError:
+                    pending = []
+                auto_failure = bool(
+                    status != "complete" and row["trigger"] == "automatic" and project["ai_review_enabled"]
+                )
+                if auto_failure:
+                    try:
+                        failed_paths = json.loads(row["changed_paths_json"] or "[]")
+                    except json.JSONDecodeError:
+                        failed_paths = []
+                    pending = list(dict.fromkeys([
+                        *(pending if isinstance(pending, list) else []),
+                        *(failed_paths if isinstance(failed_paths, list) else []),
+                    ]))[:200]
+                    self.connection.execute(
+                        "UPDATE monitored_projects SET ai_review_pending_files_json = ?, "
+                        "ai_review_last_change = ? WHERE workspace = ?",
+                        (json.dumps(pending, ensure_ascii=False), time.time() if pending else None, abs_path),
+                    )
+                next_status = "waiting" if project["ai_review_enabled"] and pending else status
+                self.connection.execute(
+                    "UPDATE monitored_projects SET ai_review_status = ?, ai_review_error = ?, "
+                    "ai_review_last_report_id = ? WHERE workspace = ?",
+                    (next_status, error, report_id or run_id, abs_path),
+                )
+            stale = self.connection.execute(
+                "SELECT run_id FROM code_review_reports WHERE workspace = ? "
+                "ORDER BY started_at DESC LIMIT -1 OFFSET ?",
+                (abs_path, DEFAULT_REVIEW_RETENTION),
+            ).fetchall()
+            if stale:
+                self.connection.executemany(
+                    "DELETE FROM code_review_reports WHERE run_id = ?",
+                    [(item["run_id"],) for item in stale],
+                )
+            self.connection.commit()
+
+    def list_code_review_reports(self, workspace: str, limit: int = 50) -> list[dict[str, Any]]:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        safe_limit = max(1, min(int(limit), DEFAULT_REVIEW_RETENTION))
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT run_id, status, trigger, started_at, finished_at, provider, model, "
+                "revision_head, changed_paths_json, error FROM code_review_reports "
+                "WHERE workspace = ? ORDER BY started_at DESC LIMIT ?", (abs_path, safe_limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            try:
+                item["changed_paths"] = json.loads(item.pop("changed_paths_json") or "[]")
+            except json.JSONDecodeError:
+                item["changed_paths"] = []
+            result.append(item)
+        return result
+
+    def get_code_review_report(self, workspace: str, run_id: str) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            row = self.connection.execute(
+                "SELECT * FROM code_review_reports WHERE workspace = ? AND run_id = ?",
+                (abs_path, run_id),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        try:
+            result["changed_paths"] = json.loads(result.pop("changed_paths_json") or "[]")
+            result["report"] = json.loads(result.pop("report_json")) if result.get("report_json") else None
+            if "report_json" in result:
+                result.pop("report_json")
+        except json.JSONDecodeError:
+            result["report"] = None
+        return result
+
     def set_monitored_project_scan_state(self, workspace: str, state_json: str) -> None:
         abs_path = str(Path(workspace).expanduser().resolve())
         with self.lock:
@@ -1771,8 +2159,28 @@ class StateStore:
                     int(spec.get("order") or order),
                 ),
             )
+        self._prune_review_runs_locked(abs_path)
         self.connection.commit()
         return run_id
+
+    def _prune_review_runs_locked(self, workspace: str) -> None:
+        """Keep a bounded local history per project, preserving active runs."""
+        stale = self.connection.execute(
+            """SELECT run_id FROM review_runs
+               WHERE workspace = ? AND status != 'running'
+               ORDER BY started_at DESC LIMIT -1 OFFSET ?""",
+            (workspace, DEFAULT_REVIEW_RETENTION - 1),
+        ).fetchall()
+        run_ids = [row["run_id"] for row in stale]
+        if not run_ids:
+            return
+        placeholders = ",".join("?" for _ in run_ids)
+        self.connection.execute(
+            f"DELETE FROM review_task_runs WHERE review_run_id IN ({placeholders})", run_ids,
+        )
+        self.connection.execute(
+            f"DELETE FROM review_runs WHERE run_id IN ({placeholders})", run_ids,
+        )
 
     def update_review_task(
         self,
@@ -1893,13 +2301,207 @@ class StateStore:
 
     def list_review_runs(self, workspace: str, limit: int = 12) -> list[dict[str, Any]]:
         abs_path = str(Path(workspace).expanduser().resolve())
-        safe_limit = max(1, min(int(limit), 100))
+        # Retention is bounded to 200 per project; allow exports to include it all.
+        safe_limit = max(1, min(int(limit), 200))
         with self.lock:
             rows = self.connection.execute(
                 "SELECT * FROM review_runs WHERE workspace = ? ORDER BY started_at DESC LIMIT ?",
                 (abs_path, safe_limit),
             ).fetchall()
             return [self._review_run_dict(row) for row in rows]
+
+    def import_skill_review_report(self, workspace: str, report: dict[str, Any]) -> dict[str, Any]:
+        """Persist one validated Skill audit JSON in this project's local history."""
+        abs_path = str(Path(workspace).expanduser().resolve())
+        review = report["review"]
+        repository = review["repository"]
+        report_id = str(review["id"])
+        now = utc_now()
+        encoded = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+        with self.lock:
+            self.connection.execute(
+                """INSERT INTO skill_review_reports
+                   (workspace, report_id, repository_name, review_mode, revision_head,
+                    created_at, imported_at, report_json)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(workspace, report_id) DO UPDATE SET
+                     repository_name=excluded.repository_name,
+                     review_mode=excluded.review_mode,
+                     revision_head=excluded.revision_head,
+                     created_at=excluded.created_at,
+                     imported_at=excluded.imported_at,
+                     report_json=excluded.report_json""",
+                (abs_path, report_id, str(repository["name"]), str(review["mode"]),
+                 str(review["revision"]["head"]), str(review["created_at"]), now, encoded),
+            )
+            stale = self.connection.execute(
+                """SELECT report_id FROM skill_review_reports WHERE workspace = ?
+                   ORDER BY imported_at DESC LIMIT -1 OFFSET ?""",
+                (abs_path, DEFAULT_REVIEW_RETENTION),
+            ).fetchall()
+            if stale:
+                self.connection.executemany(
+                    "DELETE FROM skill_review_reports WHERE workspace = ? AND report_id = ?",
+                    [(abs_path, row["report_id"]) for row in stale],
+                )
+            self.connection.commit()
+        return self.get_skill_review_report(workspace, report_id) or {}
+
+    def list_skill_review_reports(self, workspace: str, limit: int = 50) -> list[dict[str, Any]]:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        safe_limit = max(1, min(int(limit), DEFAULT_REVIEW_RETENTION))
+        with self.lock:
+            rows = self.connection.execute(
+                """SELECT report_id, repository_name, review_mode, revision_head,
+                          created_at, imported_at
+                   FROM skill_review_reports WHERE workspace = ?
+                   ORDER BY imported_at DESC LIMIT ?""",
+                (abs_path, safe_limit),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_skill_review_report(self, workspace: str, report_id: str) -> dict[str, Any] | None:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            row = self.connection.execute(
+                """SELECT report_id, repository_name, review_mode, revision_head,
+                          created_at, imported_at, report_json
+                   FROM skill_review_reports WHERE workspace = ? AND report_id = ?""",
+                (abs_path, report_id),
+            ).fetchone()
+            if row is None:
+                return None
+            result = dict(row)
+            try:
+                result["report"] = json.loads(result.pop("report_json"))
+            except json.JSONDecodeError:
+                result["report"] = None
+            return result
+
+    def delete_review_history(self, workspace: str) -> dict[str, int]:
+        """Delete one project's review history and finding feedback atomically."""
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            running = self.connection.execute(
+                "SELECT COUNT(*) FROM review_runs WHERE workspace = ? AND status = 'running'",
+                (abs_path,),
+            ).fetchone()[0]
+            running += self.connection.execute(
+                "SELECT COUNT(*) FROM code_review_reports WHERE workspace = ? AND status = 'running'",
+                (abs_path,),
+            ).fetchone()[0]
+            if running:
+                raise RuntimeError("cannot clear review history while a review is running")
+            runs = self.connection.execute(
+                "SELECT run_id FROM review_runs WHERE workspace = ?", (abs_path,),
+            ).fetchall()
+            run_ids = [row["run_id"] for row in runs]
+            task_count = 0
+            if run_ids:
+                placeholders = ",".join("?" for _ in run_ids)
+                task_count = self.connection.execute(
+                    f"SELECT COUNT(*) FROM review_task_runs WHERE review_run_id IN ({placeholders})",
+                    run_ids,
+                ).fetchone()[0]
+                self.connection.execute(
+                    f"DELETE FROM review_task_runs WHERE review_run_id IN ({placeholders})", run_ids,
+                )
+            feedback_count = self.connection.execute(
+                "SELECT COUNT(*) FROM review_finding_feedback WHERE workspace = ?", (abs_path,),
+            ).fetchone()[0]
+            skill_report_count = self.connection.execute(
+                "SELECT COUNT(*) FROM skill_review_reports WHERE workspace = ?", (abs_path,),
+            ).fetchone()[0]
+            ai_report_count = self.connection.execute(
+                "SELECT COUNT(*) FROM code_review_reports WHERE workspace = ?", (abs_path,),
+            ).fetchone()[0]
+            self.connection.execute("DELETE FROM review_runs WHERE workspace = ?", (abs_path,))
+            self.connection.execute("DELETE FROM review_finding_feedback WHERE workspace = ?", (abs_path,))
+            self.connection.execute("DELETE FROM skill_review_reports WHERE workspace = ?", (abs_path,))
+            self.connection.execute("DELETE FROM code_review_reports WHERE workspace = ?", (abs_path,))
+            self.connection.commit()
+            return {"runs": len(run_ids), "tasks": task_count, "feedback": feedback_count,
+                    "skill_reports": skill_report_count, "ai_reports": ai_report_count}
+
+    def list_review_finding_feedback(self, workspace: str) -> list[dict[str, Any]]:
+        abs_path = str(Path(workspace).expanduser().resolve())
+        with self.lock:
+            rows = self.connection.execute(
+                """SELECT label, detail, identity, status, updated_at
+                   FROM review_finding_feedback WHERE workspace = ?
+                   ORDER BY updated_at DESC""",
+                (abs_path,),
+            ).fetchall()
+            result = []
+            for row in rows:
+                item = dict(row)
+                if not item["identity"]:
+                    item["identity"] = json.dumps(
+                        ["text-v1", item["label"], item["detail"]],
+                        ensure_ascii=False, separators=(",", ":"),
+                    )
+                result.append(item)
+            return result
+
+    def set_review_finding_feedback(
+        self, workspace: str, label: str, detail: str, status: str,
+        identity: str | None = None,
+    ) -> dict[str, Any]:
+        allowed = {"open", "fixed", "false_positive", "accepted"}
+        if status not in allowed:
+            raise ValueError("status must be open, fixed, false_positive, or accepted")
+        abs_path = str(Path(workspace).expanduser().resolve())
+        safe_label = clean_text(label, 120)
+        safe_detail = clean_text(detail, 1200)
+        if not safe_label or not safe_detail:
+            raise ValueError("label and detail are required")
+        safe_identity = str(identity or json.dumps(
+            ["text-v1", safe_label, safe_detail], ensure_ascii=False, separators=(",", ":"),
+        )).replace("\0", "")[:4000]
+        finding_key = sha256(safe_identity)
+        legacy_key = sha256(f"{safe_label}\0{safe_detail}")
+        updated_at = utc_now()
+        with self.lock:
+            if status == "open":
+                self.connection.execute(
+                    "DELETE FROM review_finding_feedback WHERE workspace = ? AND finding_key IN (?, ?)",
+                    (abs_path, finding_key, legacy_key),
+                )
+                result = {"label": safe_label, "detail": safe_detail, "identity": safe_identity, "status": "open", "updated_at": updated_at}
+            else:
+                legacy = self.connection.execute(
+                    "SELECT identity FROM review_finding_feedback WHERE workspace = ? AND finding_key = ?",
+                    (abs_path, legacy_key),
+                ).fetchone()
+                if legacy is not None and not legacy["identity"]:
+                    self.connection.execute(
+                        """UPDATE review_finding_feedback SET identity = ?, status = ?, updated_at = ?
+                           WHERE workspace = ? AND finding_key = ?""",
+                        (safe_identity, status, updated_at, abs_path, legacy_key),
+                    )
+                else:
+                    self.connection.execute(
+                        """INSERT INTO review_finding_feedback
+                           (workspace, finding_key, label, detail, identity, status, updated_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(workspace, finding_key) DO UPDATE SET
+                               label = excluded.label, detail = excluded.detail,
+                               identity = excluded.identity, status = excluded.status,
+                               updated_at = excluded.updated_at""",
+                        (abs_path, finding_key, safe_label, safe_detail, safe_identity, status, updated_at),
+                    )
+                self.connection.execute(
+                    """DELETE FROM review_finding_feedback
+                       WHERE workspace = ? AND finding_key IN (
+                           SELECT finding_key FROM review_finding_feedback
+                           WHERE workspace = ? ORDER BY updated_at DESC
+                           LIMIT -1 OFFSET ?
+                       )""",
+                    (abs_path, abs_path, DEFAULT_REVIEW_FEEDBACK_RETENTION),
+                )
+                result = {"label": safe_label, "detail": safe_detail, "identity": safe_identity, "status": status, "updated_at": updated_at}
+            self.connection.commit()
+        return result
 
     def project_summary(self, workspace: str | None = None, days: int = 14) -> dict[str, Any]:
         """Deterministic, evidence-derived aggregates for the project dashboard.

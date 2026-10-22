@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import secrets
 import shutil
 import sqlite3
@@ -37,7 +39,8 @@ class ServeConsoleLaunchTests(unittest.TestCase):
     def test_macos_finder_launcher_starts_the_standard_auto_open_path(self) -> None:
         launcher = Path(__file__).resolve().parents[1] / "scripts" / "open-code-defog.command"
         text = launcher.read_text(encoding="utf-8")
-        self.assertTrue(launcher.stat().st_mode & 0o111)
+        if os.name != "nt":
+            self.assertTrue(launcher.stat().st_mode & 0o111)
         self.assertIn("#!/bin/zsh", text)
         self.assertIn("exec /usr/bin/env python3 -m daemon.serve", text)
 
@@ -144,6 +147,82 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(state["summary"]["total_projects"], 1)
             self.assertEqual(state["projects"][0]["conversation_id"], "default")
             self.assertEqual(state["projects"][0]["name"], "legacy")
+            store.close()
+
+    def test_review_finding_feedback_persists_by_stable_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            workspace = Path(directory) / "repo"
+            workspace.mkdir()
+            identity = json.dumps(
+                ["code-v1", "src/api.py", 42, "bare-except", "except:"],
+                ensure_ascii=False, separators=(",", ":"),
+            )
+            store = StateStore(database)
+            saved = store.set_review_finding_feedback(
+                str(workspace), "静态风险", "src/api.py:42 except:", "fixed", identity,
+            )
+            self.assertEqual(saved["identity"], identity)
+            store.close()
+
+            reopened = StateStore(database)
+            history = reopened.list_review_finding_feedback(str(workspace))
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["identity"], identity)
+            self.assertEqual(history[0]["status"], "fixed")
+            reopened.set_review_finding_feedback(
+                str(workspace), "静态风险", "src/api.py:42 except:", "open", identity,
+            )
+            self.assertEqual(reopened.list_review_finding_feedback(str(workspace)), [])
+            reopened.close()
+
+    def test_review_feedback_schema_migration_preserves_legacy_marks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "state.sqlite3"
+            workspace = str(Path(directory) / "repo")
+            label = "静态"
+            detail = "扫描项目"
+            legacy_key = hashlib.sha256(f"{label}\0{detail}".encode("utf-8")).hexdigest()
+            connection = sqlite3.connect(database)
+            connection.execute(
+                """CREATE TABLE review_finding_feedback (
+                    workspace TEXT NOT NULL, finding_key TEXT NOT NULL,
+                    label TEXT NOT NULL, detail TEXT NOT NULL,
+                    status TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    PRIMARY KEY (workspace, finding_key))"""
+            )
+            connection.execute(
+                "INSERT INTO review_finding_feedback VALUES (?, ?, ?, ?, ?, ?)",
+                (workspace, legacy_key, label, detail, "accepted", "2026-09-27T00:00:00Z"),
+            )
+            connection.execute("PRAGMA user_version = 3")
+            connection.commit()
+            connection.close()
+
+            store = StateStore(database)
+            migrated = store.list_review_finding_feedback(workspace)
+            self.assertEqual(len(migrated), 1)
+            self.assertEqual(migrated[0]["status"], "accepted")
+            self.assertTrue(migrated[0]["identity"].startswith('["text-v1"'))
+            store.close()
+
+    def test_review_history_retention_keeps_latest_runs_and_tasks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "repo"
+            workspace.mkdir()
+            store = StateStore(Path(directory) / "state.sqlite3")
+            with patch("daemon.store.DEFAULT_REVIEW_RETENTION", 2):
+                for _ in range(4):
+                    run_id = store.begin_review_run(
+                        str(workspace), {}, [{"task_key": "prepare", "title": "准备", "stage": "prepare"}],
+                    )
+                    store.finish_review_run(run_id, "complete", 0.1, {}, None, [], None)
+            runs = store.list_review_runs(str(workspace), limit=10)
+            task_count = store.connection.execute(
+                "SELECT COUNT(*) FROM review_task_runs"
+            ).fetchone()[0]
+            self.assertEqual(len(runs), 2)
+            self.assertEqual(task_count, 2)
             store.close()
 
     def test_watching_status_stays_active_after_event_timeout(self) -> None:

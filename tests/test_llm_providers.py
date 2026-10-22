@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import stat
 import tempfile
@@ -12,6 +13,7 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+from _helpers import read_console_source
 from daemon import llm_summary
 from daemon import server as server_module
 from daemon.llm_providers import LLMProviderStore
@@ -38,8 +40,9 @@ class LLMProviderStoreTests(unittest.TestCase):
             })
             self.assertEqual(public["active_provider"], "openai")
             self.assertNotIn("saved-test-key", json.dumps(public))
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
+            if os.name != "nt":
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
             self.assertEqual(store.resolve_active()["api_key"], "saved-test-key")
 
     def test_ollama_is_usable_without_an_api_key(self) -> None:
@@ -471,7 +474,7 @@ class LLMProviderEndpointTests(unittest.TestCase):
 
 class LLMProviderConsoleTests(unittest.TestCase):
     def test_console_has_provider_settings_without_key_local_storage(self) -> None:
-        console = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(encoding="utf-8")
+        console = read_console_source()
         self.assertIn('id="llm-settings-drawer"', console)
         self.assertIn('id="llm-provider-select"', console)
         self.assertIn('id="llm-api-key"', console)

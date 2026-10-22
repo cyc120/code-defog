@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Code Defog · 个人版流程样板</title>
+  <style>
+    :root { color-scheme: light; --ink:#172b3c; --muted:#647586; --line:#dce5e8; --blue:#186c7a; --dark:#123c49; --mint:#e8f5f0; --paper:#f7f9f8; --orange:#bd6a30; --orange-bg:#fff2e7; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font:15px/1.5 "Segoe UI","Microsoft YaHei",sans-serif; }
+    button,input { font:inherit; }
+    button { cursor:pointer; }
+    .shell { display:grid; grid-template-columns:250px minmax(0,1fr); min-height:100vh; }
+    aside { background:#102e39; color:#e7f1f0; padding:28px 18px; display:flex; flex-direction:column; gap:30px; }
+    .brand { display:flex; align-items:center; gap:10px; padding:0 10px; font-size:19px; font-weight:750; letter-spacing:.2px; }
+    .brand-mark { width:32px; height:32px; border-radius:10px; display:grid; place-items:center; background:#7bd8bb; color:#0d3b42; font-size:21px; font-weight:900; }
+    .aside-label { color:#8caeb3; text-transform:uppercase; font-size:11px; letter-spacing:2px; padding:0 12px; margin-bottom:8px; }
+    .steps { display:grid; gap:5px; }
+    .step { border:0; background:none; color:#b9d0d1; width:100%; display:flex; align-items:center; gap:12px; padding:11px 12px; border-radius:11px; text-align:left; }
+    .step.active { background:#255160; color:white; }
+    .step.done { color:#8de4c3; }
+    .step:disabled { cursor:default; opacity:.52; }
+    .step-num { width:25px; height:25px; flex:none; border:1px solid currentColor; border-radius:50%; display:grid; place-items:center; font-size:12px; font-weight:750; }
+    .aside-bottom { margin-top:auto; padding:16px 13px; border:1px solid #3b5b65; border-radius:13px; color:#a7c2c4; font-size:12px; }
+    .aside-bottom strong { display:block; color:#e8f6f1; margin-bottom:4px; font-size:13px; }
+    main { min-width:0; padding:24px clamp(20px,4vw,56px) 50px; }
+    .topbar { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:34px; }
+    .crumb { font-size:13px; color:var(--muted); }
+    .demo-badge { display:inline-flex; align-items:center; gap:7px; color:#6e4b2c; background:#fff0da; border:1px solid #f0d3aa; border-radius:999px; padding:6px 11px; font-size:12px; font-weight:700; }
+    .dot { width:7px; height:7px; border-radius:50%; background:#d98c3b; }
+    .content { max-width:1090px; margin:auto; }
+    .eyebrow { color:var(--blue); font-size:12px; letter-spacing:1.4px; font-weight:800; text-transform:uppercase; }
+    h1 { font-size:clamp(30px,3.5vw,46px); line-height:1.18; letter-spacing:-1.4px; margin:8px 0 12px; }
+    h2 { font-size:22px; margin:0 0 7px; letter-spacing:-.4px; }
+    h3 { font-size:16px; margin:0 0 7px; }
+    p { margin:0; }
+    .lead { color:var(--muted); font-size:16px; max-width:700px; }
+    .hero { display:grid; grid-template-columns:1.5fr 1fr; gap:22px; align-items:stretch; margin-bottom:28px; }
+    .hero-art { min-height:205px; border-radius:20px; background:radial-gradient(circle at 80% 15%,#317b83,transparent 38%),linear-gradient(130deg,#123a47,#1a5a61); color:#d7efea; padding:25px; display:flex; flex-direction:column; justify-content:space-between; overflow:hidden; }
+    .hero-art .symbol { font-size:56px; line-height:1; opacity:.9; font-family:Consolas,monospace; }
+    .hero-art strong { font-size:17px; color:white; }
+    .hero-art span { display:block; color:#a6d2ce; font-size:13px; margin-top:3px; }
+    .card { background:white; border:1px solid var(--line); border-radius:17px; box-shadow:0 7px 30px rgba(24,58,65,.035); }
+    .pad { padding:23px; }
+    .grid { display:grid; grid-template-columns:1.2fr .8fr; gap:18px; }
+    .stack { display:grid; gap:17px; }
+    .muted { color:var(--muted); }
+    .small { font-size:12px; }
+    .project-choice { display:flex; gap:14px; align-items:center; padding:16px; border:1.5px solid #8fcabd; border-radius:13px; background:#f5fbf8; margin-top:18px; }
+    .folder { width:41px; height:41px; display:grid; place-items:center; border-radius:11px; background:#d8efe8; color:#1a7668; font-size:23px; }
+    .project-choice strong { display:block; }
+    .project-choice small { color:var(--muted); }
+    .note { border-left:3px solid #8ec9b8; padding:9px 12px; color:#516b70; background:#f3faf7; font-size:13px; border-radius:0 8px 8px 0; margin-top:18px; }
+    .primary { border:0; background:var(--dark); color:white; border-radius:10px; padding:11px 17px; font-weight:700; min-height:42px; }
+    .primary:hover { background:#195365; }
+    .primary:disabled { opacity:.45; cursor:default; }
+    .secondary { border:1px solid #bfd0d3; background:white; color:var(--dark); border-radius:10px; padding:10px 16px; font-weight:700; min-height:42px; }
+    .secondary:hover { background:#f4f9f8; }
+    .actions { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:22px; }
+    .metric-row { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:16px; }
+    .metric { background:#f5f8f7; border-radius:11px; padding:13px; }
+    .metric strong { display:block; font-size:23px; line-height:1.1; }
+    .metric span { color:var(--muted); font-size:12px; }
+    .scan-list { display:grid; gap:10px; margin-top:21px; }
+    .scan-item { display:flex; align-items:center; gap:12px; border:1px solid var(--line); border-radius:12px; padding:13px 14px; color:#60727d; }
+    .scan-item.complete { color:#205e58; background:#f5fbf8; border-color:#cce7dc; }
+    .scan-item.current { color:#1a5969; border-color:#9bcbd0; }
+    .scan-icon { width:26px; height:26px; display:grid; place-items:center; border-radius:50%; background:#eaf1f1; flex:none; }
+    .scan-item.complete .scan-icon { background:#d5efe3; }
+    .progress { height:9px; background:#e6efed; border-radius:99px; overflow:hidden; margin-top:24px; }
+    .progress span { display:block; height:100%; width:0; background:#3caa8b; border-radius:99px; transition:width .35s; }
+    .finding { display:flex; align-items:flex-start; gap:14px; padding:16px; width:100%; text-align:left; border:1px solid var(--line); border-radius:13px; background:white; margin-top:10px; }
+    .finding.selected { border-color:#41998d; background:#f4faf8; box-shadow:0 0 0 2px #d9efea; }
+    .finding-icon { flex:none; width:34px; height:34px; border-radius:10px; display:grid; place-items:center; font-size:17px; background:var(--orange-bg); color:var(--orange); }
+    .finding strong { display:block; color:var(--ink); }
+    .finding small { color:var(--muted); }
+    .severity { display:inline-block; padding:3px 8px; border-radius:999px; background:var(--orange-bg); color:var(--orange); font-size:11px; font-weight:750; margin-bottom:7px; }
+    .severity.info { background:#e8f1f9; color:#346886; }
+    .code { background:#102b36; color:#d3e8e4; border-radius:12px; padding:17px; overflow:auto; font:13px/1.7 Consolas,monospace; margin:16px 0 0; white-space:pre; }
+    .code .bad { color:#ffb98a; }
+    .code .good { color:#9ce2b9; }
+    .evidence-row { border-top:1px solid var(--line); padding-top:12px; margin-top:15px; display:grid; gap:5px; }
+    .evidence-row code { color:#215e69; background:#eef5f5; border-radius:5px; padding:2px 5px; font-size:12px; overflow-wrap:anywhere; }
+    .decision { display:grid; gap:10px; margin-top:20px; }
+    .decision label { display:block; cursor:pointer; border:1.5px solid var(--line); border-radius:12px; padding:14px 16px; }
+    .decision label:has(input:checked) { border-color:#48a890; background:#f3faf7; }
+    .decision input { margin-right:9px; accent-color:#247a70; }
+    .decision strong { display:inline; }
+    .decision span { display:block; margin-left:24px; color:var(--muted); font-size:12px; }
+    .summary-panel { border:1px solid #cce8db; background:var(--mint); padding:24px; border-radius:16px; margin-top:22px; }
+    .checkline { display:flex; align-items:center; gap:10px; padding:10px 0; border-bottom:1px solid #dfe8e7; }
+    .checkline:last-child { border-bottom:0; }
+    .check-icon { color:#207b65; font-weight:800; }
+    .hide { display:none !important; }
+    .footer { margin-top:30px; color:#82939c; font-size:12px; }
+    @media(max-width:850px) { .shell { grid-template-columns:1fr; } aside { padding:13px 18px; gap:12px; } .brand { font-size:16px; } .steps { display:flex; overflow:auto; } .step { width:auto; white-space:nowrap; } .aside-label,.aside-bottom { display:none; } main { padding:20px; } .hero,.grid { grid-template-columns:1fr; } .hero-art { min-height:150px; } }
+    @media(max-width:500px) { .metric-row { grid-template-columns:1fr 1fr 1fr; } .metric { padding:10px; } .metric strong { font-size:18px; } .step { font-size:12px; gap:6px; padding:8px; } .step-num { width:21px; height:21px; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside>
+      <div class="brand"><div class="brand-mark">⌁</div><span>Code Defog</span></div>
+      <div><div class="aside-label">个人版体验流程</div><nav class="steps" aria-label="演示步骤">
+        <button class="step active" data-step="0"><span class="step-num">1</span>选择项目</button>
+        <button class="step" data-step="1" disabled><span class="step-num">2</span>运行审查</button>
+        <button class="step" data-step="2" disabled><span class="step-num">3</span>查看证据</button>
+        <button class="step" data-step="3" disabled><span class="step-num">4</span>决定处理</button>
+        <button class="step" data-step="4" disabled><span class="step-num">5</span>回顾结果</button>
+      </nav></div>
+      <div class="aside-bottom"><strong>本地交互样板</strong>扫描进度和处理结果由页面内的示例数据演示。这里不会运行命令、修改仓库或发送内容到模型。</div>
+    </aside>
+    <main><div class="topbar"><div class="crumb">工作台 / 个人项目 / 流程演示</div><div class="demo-badge"><span class="dot"></span>交互样板 · 示例数据</div></div>
+      <div class="content">
+        <section id="view-0">
+          <div class="hero"><div><div class="eyebrow">01 / 开始</div><h1>先看清问题，<br>再决定怎么改。</h1><p class="lead">用一个真实的仓库示例，走一遍 Code Defog 的个人使用流程。你可以点击每一步，看看审查结果应如何呈现。</p></div><div class="hero-art"><div class="symbol">{···}</div><div><strong>从项目到结论，一屏看清</strong><span>问题、证据、建议与验证记录</span></div></div></div>
+          <div class="grid"><div class="card pad"><div class="eyebrow">已选示例项目</div><h2>配置读取演练</h2><p class="muted">基于仓库内的 <code>demo_target</code>。示例包含一个缺少配置字段时触发的异常，以及防止错误修复的验证门禁。</p><div class="project-choice"><div class="folder">▣</div><div><strong>demo_target</strong><small>Python CLI · 本地示例 · 只读体验</small></div></div><div class="actions"><button class="primary" id="start">开始演示审查 →</button></div></div><div class="card pad"><h3>你将看到什么</h3><div class="checkline"><span class="check-icon">✓</span> 项目结构与测试线索</div><div class="checkline"><span class="check-icon">✓</span> 问题对应的代码与失败输入</div><div class="checkline"><span class="check-icon">✓</span> 修复建议和回归验证</div><div class="note">这是前端体验样板。后续可将相同页面流程接入本地服务的真实数据。</div></div></div>
+        </section>
+        <section id="view-1" class="hide">
+          <div class="eyebrow">02 / 审查过程</div><h1>正在梳理项目</h1><p class="lead">把每个步骤展示出来，让结果可以追溯。本页的进度是演示动画。</p>
+          <div class="grid" style="margin-top:26px"><div class="card pad"><h2>本次审查</h2><p class="muted">demo_target · 配置读取场景</p><div class="scan-list" id="scan-list"></div><div class="progress"><span id="progress-bar"></span></div><div class="actions"><button class="primary" id="show-findings" disabled>查看发现 →</button><span class="small muted" id="scan-status">准备中…</span></div></div><div class="card pad"><h3>审查范围</h3><div class="metric-row"><div class="metric"><strong>1</strong><span>示例项目</span></div><div class="metric"><strong>3</strong><span>检查环节</span></div><div class="metric"><strong>0</strong><span>外部调用</span></div></div><div class="note">正式产品中，这里应显示真实命令、退出码、耗时及数据来源，而不是只有动画。</div></div></div>
+        </section>
+        <section id="view-2" class="hide">
+          <div class="eyebrow">03 / 审查发现</div><h1>发现 1 个需要处理的问题</h1><p class="lead">先看证据，再看建议。点击左侧条目可以切换查看。</p>
+          <div class="grid" style="margin-top:26px"><div class="card pad"><h2>问题清单</h2><button class="finding selected" id="finding-main"><span class="finding-icon">!</span><span><span class="severity">需要修复</span><strong>缺少 projects 字段时，读取配置失败</strong><small>demo_target/cli.py · 配置解析</small></span></button><button class="finding" id="finding-guard"><span class="finding-icon" style="background:#e8f1f9;color:#346886">✓</span><span><span class="severity info">回归保护</span><strong>required_field 的校验不能被绕过</strong><small>demo_target/quality_gate.py · 验证条件</small></span></button><div class="actions"><button class="primary" id="to-decision">查看处理方案 →</button></div></div><div class="card pad" id="evidence-main"><div class="severity">问题证据</div><h2>失败发生在哪里</h2><p class="muted">示例输入 <code>no_projects.json</code> 有必需字段，但没有 <code>projects</code>。直接按键读取会触发异常。</p><pre class="code"># demo_target/cli.py
+return {
+  <span class="bad">"projects": config["projects"],</span>
+  "required_field": config["required_field"],
+}</pre><div class="evidence-row"><strong>预期</strong><span class="muted">未配置项目时返回空列表，CLI 正常退出。</span><strong>实际</strong><span class="muted">抛出 <code>KeyError: 'projects'</code>，CLI 退出码为 1。</span></div></div><div class="card pad hide" id="evidence-guard"><div class="severity info">回归证据</div><h2>不能把验证一并放宽</h2><p class="muted">如果修复时给 <code>required_field</code> 也填入默认值，缺失必需字段的配置就可能被错误接受。</p><pre class="code"># 应保留的规则
+if not config["required_field"]:
+  raise ConfigError(...)
+
+<span class="good">缺少 required_field → 验证失败</span></pre><div class="evidence-row"><strong>验证门禁</strong><span class="muted">同时检查“缺少 projects 可正常处理”和“缺少 required_field 必须报错”。</span></div></div></div>
+        </section>
+        <section id="view-3" class="hide">
+          <div class="eyebrow">04 / 由你决定</div><h1>建议这样修复</h1><p class="lead">个人版先让你看懂改动和影响，再决定是否执行。此处的选择仅改变演示结果。</p>
+          <div class="grid" style="margin-top:26px"><div class="card pad"><div class="severity">待确认方案</div><h2>只给可选字段设置默认值</h2><p class="muted">让 <code>projects</code> 缺失时成为空列表；保留 <code>required_field</code> 的必填验证。</p><pre class="code"><span class="bad">- "projects": config["projects"],</span>
+<span class="good">+ "projects": config.get("projects", []),</span>
+  "required_field": config["required_field"],</pre><div class="decision"><label><input type="radio" name="choice" value="approve" checked><strong>模拟接受方案并运行验证</strong><span>展示修复后如何通过质量门禁；不会改动文件。</span></label><label><input type="radio" name="choice" value="defer"><strong>暂时保留问题</strong><span>展示未处理的问题如何留在个人待办中。</span></label></div><div class="actions"><button class="primary" id="finish">确认演示选择 →</button></div></div><div class="card pad"><h3>验证时应该检查</h3><div class="checkline"><span class="check-icon">01</span> 缺少 projects 时正常返回空列表</div><div class="checkline"><span class="check-icon">02</span> 缺少 required_field 时仍报错</div><div class="checkline"><span class="check-icon">03</span> 正常配置仍能列出项目</div><div class="note">真实修复需要在隔离副本中执行、记录 diff 与测试输出，并由你确认后再应用到项目。</div></div></div>
+        </section>
+        <section id="view-4" class="hide">
+          <div class="eyebrow">05 / 本次回顾</div><h1 id="result-title">流程已完成</h1><p class="lead" id="result-lead"></p><div class="summary-panel"><h2 id="result-card-title"></h2><p id="result-card-copy" class="muted"></p></div>
+          <div class="grid" style="margin-top:18px"><div class="card pad"><h3>你刚刚走过的流程</h3><div class="checkline"><span class="check-icon">✓</span> 选择本地示例项目</div><div class="checkline"><span class="check-icon">✓</span> 查看审查步骤</div><div class="checkline"><span class="check-icon">✓</span> 核对代码和失败输入</div><div class="checkline"><span class="check-icon">✓</span> 对处理方案作出选择</div></div><div class="card pad"><h3>正式版需要接入</h3><p class="muted">本地服务的真实项目、Review Run、Case 证据、沙箱 diff 和质量门禁结果。样板页没有写入这些数据。</p><div class="actions"><button class="secondary" id="restart">重新体验 ↺</button></div></div></div>
+        </section>
+        <div class="footer">Code Defog · 个人版交互样板 · 数据取自仓库演练场景，操作效果为模拟</div>
+      </div>
+    </main>
+  </div>
+  <script>
+    const steps = [...document.querySelectorAll('.step')];
+    const views = [...Array(5)].map((_, i) => document.getElementById(`view-${i}`));
+    let unlocked = 0;
+    let scanTimer = null;
+    function show(step) {
+      if (step > unlocked) return;
+      views.forEach((view, i) => view.classList.toggle('hide', i !== step));
+      steps.forEach((button, i) => {
+        button.disabled = i > unlocked;
+        button.classList.toggle('active', i === step);
+        button.classList.toggle('done', i < step);
+      });
+      window.scrollTo({top:0, behavior:'smooth'});
+    }
+    function unlock(step) { unlocked = Math.max(unlocked, step); show(step); }
+    steps.forEach(button => button.addEventListener('click', () => show(Number(button.dataset.step))));
+    const scanNames = ['读取项目结构', '检查测试与异常线索', '整理证据和处理建议'];
+    const scanList = document.getElementById('scan-list');
+    function renderScan(done) {
+      scanList.replaceChildren(...scanNames.map((name, i) => {
+        const row = document.createElement('div');
+        row.className = `scan-item ${i < done ? 'complete' : i === done ? 'current' : ''}`;
+        const icon = document.createElement('span'); icon.className = 'scan-icon'; icon.textContent = i < done ? '✓' : i === done ? '◌' : '·';
+        const label = document.createElement('span'); label.textContent = name;
+        row.append(icon, label); return row;
+      }));
+      document.getElementById('progress-bar').style.width = `${Math.round(done / 3 * 100)}%`;
+      document.getElementById('scan-status').textContent = done === 3 ? '演示审查已完成' : `步骤 ${done + 1} / 3`;
+    }
+    document.getElementById('start').addEventListener('click', () => {
+      clearInterval(scanTimer); renderScan(0); document.getElementById('show-findings').disabled = true; unlock(1);
+      let done = 0;
+      scanTimer = setInterval(() => {
+        done += 1; renderScan(done);
+        if (done === 3) { clearInterval(scanTimer); document.getElementById('show-findings').disabled = false; }
+      }, 800);
+    });
+    document.getElementById('show-findings').addEventListener('click', () => unlock(2));
+    for (const kind of ['main','guard']) {
+      document.getElementById(`finding-${kind}`).addEventListener('click', () => {
+        for (const option of ['main','guard']) {
+          document.getElementById(`finding-${option}`).classList.toggle('selected', option === kind);
+          document.getElementById(`evidence-${option}`).classList.toggle('hide', option !== kind);
+        }
+      });
+    }
+    document.getElementById('to-decision').addEventListener('click', () => unlock(3));
+    document.getElementById('finish').addEventListener('click', () => {
+      const approve = document.querySelector('input[name="choice"]:checked').value === 'approve';
+      document.getElementById('result-title').textContent = approve ? '已模拟完成修复与验证' : '问题已留待后续处理';
+      document.getElementById('result-lead').textContent = approve ? '示例演示了正确修复应通过的三项检查。页面没有实际修改代码或运行测试。' : '保留证据和建议，等你准备好时再处理。页面没有修改项目。';
+      document.getElementById('result-card-title').textContent = approve ? '演示结果：质量门禁通过' : '演示结果：待办保留 1 项';
+      document.getElementById('result-card-copy').textContent = approve ? '缺少 projects 可正常处理；required_field 必填规则仍有效；正常配置保持可用。这是样板结果，并非本次真实测试输出。' : '问题“缺少 projects 字段时配置读取失败”仍需修复。正式版应在这里保留 Case、证据和后续提醒。';
+      unlock(4);
+    });
+    document.getElementById('restart').addEventListener('click', () => { clearInterval(scanTimer); unlocked = 0; show(0); });
+    renderScan(0);
+  </script>
+</body>
+</html>
